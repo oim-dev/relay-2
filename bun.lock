@@ -5,19 +5,23 @@
     "": {
       "name": "relay",
       "devDependencies": {
+        "@types/bun": "1.4.3",
         "oxlint": "1.89.0",
         "prettier": "3.9.10",
         "turbo": "2.11.9",
+        "typescript": "7.0.2",
       },
     },
     "apps/cli": {
       "name": "@relay/cli",
       "version": "0.0.0",
       "dependencies": {
+        "@gunshi/plugin-i18n": "1.0.0-rc.1",
         "@relay/contracts": "workspace:*",
         "@relay/core": "workspace:*",
         "@relay/project-runtime": "workspace:*",
-        "@relay/rest-sdk": "workspace:*",
+        "@relay/storage": "workspace:*",
+        "gunshi": "1.0.0-rc.1",
       },
       "devDependencies": {
         "@relay/typescript-config": "workspace:*",
@@ -25,8 +29,8 @@
         "typescript": "7.0.2",
       },
     },
-    "apps/sync": {
-      "name": "@relay/sync",
+    "apps/git-sync": {
+      "name": "@relay/git-sync",
       "version": "0.0.0",
       "dependencies": {
         "@relay/contracts": "workspace:*",
@@ -102,6 +106,10 @@
     },
   },
   "packages": {
+    "@gunshi/plugin": ["@gunshi/plugin@1.0.0-rc.1", "", {}, "sha512-zVR8mHRsUmjxU/2g3Tr+sMgJMwTFfjZDY+KK9OXYtauPdj0E6QFmkbcUoc/LUwOVXjR+QPjfC4OYSnFMuu/2bQ=="],
+
+    "@gunshi/plugin-i18n": ["@gunshi/plugin-i18n@1.0.0-rc.1", "", { "dependencies": { "@gunshi/plugin": "1.0.0-rc.1" }, "peerDependencies": { "@gunshi/plugin-global": "1.0.0-rc.1" }, "optionalPeers": ["@gunshi/plugin-global"] }, "sha512-KIsUtwcjT+ecGd4Q0KU4AogKNHorYX96jfbeNSIu4ezSZ79DH2x3MXmjB0YQDYpL92inaLbj1mg8qbDWKZVNAQ=="],
+
     "@oxlint/binding-android-arm-eabi": ["@oxlint/binding-android-arm-eabi@1.89.0", "", { "os": "android", "cpu": "arm" }, "sha512-Pflpba5F3gRAQ12sWglRxvWTHEdAusNDvmi4Y5N1T5SY1AGkM7AixOnET8qkrnLJ/F32qAlNokO6eCknT8tmnw=="],
 
     "@oxlint/binding-android-arm64": ["@oxlint/binding-android-arm64@1.89.0", "", { "os": "android", "cpu": "arm64" }, "sha512-dYmyD1x7LaPlb79vZWUcpTShk8dI9z1I+IubtqrBxWNJaDhQdPHwcsvg7q5StTU4xWyd9AwPfLaTYFZY8NZgtQ=="],
@@ -146,13 +154,13 @@
 
     "@relay/core": ["@relay/core@workspace:packages/core"],
 
+    "@relay/git-sync": ["@relay/git-sync@workspace:apps/git-sync"],
+
     "@relay/project-runtime": ["@relay/project-runtime@workspace:packages/project-runtime"],
 
     "@relay/rest-sdk": ["@relay/rest-sdk@workspace:packages/rest-sdk"],
 
     "@relay/storage": ["@relay/storage@workspace:packages/storage"],
-
-    "@relay/sync": ["@relay/sync@workspace:apps/sync"],
 
     "@relay/typescript-config": ["@relay/typescript-config@workspace:packages/typescript-config"],
 
@@ -213,6 +221,8 @@
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
     "bun-types": ["bun-types@1.4.3", "", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-tinRJNGOmUN+tEAsn2y2e942n9JHRHR42iUYzDH75NmhJqVBokGSQkkfSFdNWwsANIdrK6ACH9t01M452YyTwg=="],
+
+    "gunshi": ["gunshi@1.0.0-rc.1", "", {}, "sha512-/nSFKVrJHKg9O4ppBl+lOSLDQWmvJ5fG3ldVsdJX8KMtUV2uYwlx/a8OaOWuvniuV28bZDjsB8p6YFtDxSlMcw=="],
 
     "oxlint": ["oxlint@1.89.0", "", { "optionalDependencies": { "@oxlint/binding-android-arm-eabi": "1.89.0", "@oxlint/binding-android-arm64": "1.89.0", "@oxlint/binding-darwin-arm64": "1.89.0", "@oxlint/binding-darwin-x64": "1.89.0", "@oxlint/binding-freebsd-x64": "1.89.0", "@oxlint/binding-linux-arm-gnueabihf": "1.89.0", "@oxlint/binding-linux-arm-musleabihf": "1.89.0", "@oxlint/binding-linux-arm64-gnu": "1.89.0", "@oxlint/binding-linux-arm64-musl": "1.89.0", "@oxlint/binding-linux-ppc64-gnu": "1.89.0", "@oxlint/binding-linux-riscv64-gnu": "1.89.0", "@oxlint/binding-linux-riscv64-musl": "1.89.0", "@oxlint/binding-linux-s390x-gnu": "1.89.0", "@oxlint/binding-linux-x64-gnu": "1.89.0", "@oxlint/binding-linux-x64-musl": "1.89.0", "@oxlint/binding-openharmony-arm64": "1.89.0", "@oxlint/binding-win32-arm64-msvc": "1.89.0", "@oxlint/binding-win32-ia32-msvc": "1.89.0", "@oxlint/binding-win32-x64-msvc": "1.89.0" }, "peerDependencies": { "oxlint-tsgolint": ">=7.0.2003", "vite-plus": "*" }, "optionalPeers": ["oxlint-tsgolint", "vite-plus"], "bin": { "oxlint": "bin/oxlint" } }, "sha512-a25hkfo61okGPvJz432fRIPoxlKtNnOVy9w4rzrmGgNm4iVTPwpSQlmdqNWnp6p9QyyPVfAZRgnf5XvSBZFk/A=="],
 

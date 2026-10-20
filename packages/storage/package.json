@@ -9,7 +9,7 @@
   "scripts": {
     "typecheck": "bun --bun tsc --noEmit",
     "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
-    "test:integration": "bun test --pass-with-no-tests .integration.test.ts"
+    "test:integration": "bun test .integration.test.ts"
   },
   "dependencies": {
     "@relay/contracts": "workspace:*"

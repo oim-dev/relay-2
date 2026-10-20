@@ -1,12 +1,12 @@
 {
-  "name": "@relay/sync",
+  "name": "@relay/git-sync",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun build --compile --watch ./src/main.ts --outfile ./dist/relay-sync",
-    "build": "bun build --compile ./src/main.ts --outfile ./dist/relay-sync",
-    "start": "./dist/relay-sync",
+    "dev": "bun build --compile --watch ./src/main.ts --outfile ./dist/relay-git-sync",
+    "build": "bun build --compile ./src/main.ts --outfile ./dist/relay-git-sync",
+    "start": "./dist/relay-git-sync",
     "typecheck": "bun --bun tsc --noEmit",
     "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
     "test:integration": "bun test --pass-with-no-tests .integration.test.ts",
