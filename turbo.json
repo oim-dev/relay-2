@@ -1,0 +1,33 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "ui": "stream",
+  "globalDependencies": ["bunfig.toml", ".bun-version"],
+  "remoteCache": {
+    "enabled": false
+  },
+  "tasks": {
+    "build": {
+      "dependsOn": ["^build", "typecheck"],
+      "outputs": ["dist/**"]
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    },
+    "test:unit": {
+      "dependsOn": ["^test:unit"],
+      "outputs": []
+    },
+    "test:integration": {
+      "cache": false
+    },
+    "test:process": {
+      "dependsOn": ["build"],
+      "cache": false
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "name": "relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "engines": {
+    "bun": "1.4.3"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "bun --bun turbo run dev",
+    "dev:cli": "bun --bun turbo run dev --filter=@relay/cli",
+    "dev:sync": "bun --bun turbo run dev --filter=@relay/sync",
+    "build": "bun --bun turbo run build",
+    "build:cli": "bun --bun turbo run build --filter=@relay/cli",
+    "build:sync": "bun --bun turbo run build --filter=@relay/sync",
+    "start:cli": "bun run --filter @relay/cli start",
+    "start:sync": "bun run --filter @relay/sync start",
+    "lint": "bun --bun oxlint --deny-warnings apps packages",
+    "typecheck": "bun --bun turbo run typecheck",
+    "test": "bun run test:unit",
+    "test:unit": "bun --bun turbo run test:unit",
+    "test:integration": "bun --bun turbo run test:integration",
+    "test:process": "bun --bun turbo run test:process --filter=@relay/cli --filter=@relay/sync",
+    "test:e2e": "bun run build && bun test --pass-with-no-tests ./tests/e2e",
+    "test:all": "bun run test:unit && bun run test:integration && bun run test:process && bun run test:e2e",
+    "format": "bun --bun prettier --write .",
+    "format:check": "bun --bun prettier --check .",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run build && bun run test:all"
+  },
+  "devDependencies": {
+    "oxlint": "1.89.0",
+    "prettier": "3.9.10",
+    "turbo": "2.11.9"
+  }
+}

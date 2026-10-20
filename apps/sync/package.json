@@ -1,0 +1,25 @@
+{
+  "name": "@relay/sync",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun build --compile --watch ./src/main.ts --outfile ./dist/relay-sync",
+    "build": "bun build --compile ./src/main.ts --outfile ./dist/relay-sync",
+    "start": "./dist/relay-sync",
+    "typecheck": "bun --bun tsc --noEmit",
+    "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
+    "test:integration": "bun test --pass-with-no-tests .integration.test.ts",
+    "test:process": "bun test --pass-with-no-tests .process.test.ts"
+  },
+  "dependencies": {
+    "@relay/contracts": "workspace:*",
+    "@relay/core": "workspace:*",
+    "@relay/project-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@relay/typescript-config": "workspace:*",
+    "@types/bun": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

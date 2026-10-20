@@ -1,0 +1,4 @@
+{
+  "extends": "@relay/typescript-config/bun.json",
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}

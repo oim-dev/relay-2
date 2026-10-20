@@ -1,0 +1,23 @@
+{
+  "name": "@relay/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "bun --bun tsc --noEmit",
+    "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
+    "test:integration": "bun test --pass-with-no-tests .integration.test.ts"
+  },
+  "dependencies": {
+    "@relay/contracts": "workspace:*",
+    "@relay/storage": "workspace:*"
+  },
+  "devDependencies": {
+    "@relay/typescript-config": "workspace:*",
+    "@types/bun": "1.4.3",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,9 @@
+[install]
+exact = true
+linker = "isolated"
+auto = "disable"
+
+[test]
+coverageSkipTestFiles = true
+coverageReporter = ["text", "lcov"]
+coveragePathIgnorePatterns = ["**/dist/**", "**/fixtures/**"]
