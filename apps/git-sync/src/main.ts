@@ -1,3 +1,3 @@
-console.info("Relay Git Sync: каркас приложения. Синхронизация пока не реализована.");
+import { gitSyncMessages } from "./messages";
 
-export {};
+console.info(gitSyncMessages.unavailable);

@@ -1,5 +1,9 @@
 import type { I18nPluginOptions } from "@gunshi/plugin-i18n";
 
+/**
+ * Русские ресурсы стандартной справки и диагностики Gunshi.
+ * Имена ключей и placeholders принадлежат контракту плагина локализации.
+ */
 export const russianResources = {
   COMMAND: "КОМАНДА",
   COMMANDS: "КОМАНДЫ",

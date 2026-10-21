@@ -1,41 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import {
-  RelayError,
-  type EntityRecord,
-  type TaskRecord,
-  type WorkPlanRecord,
-  type ReleaseRecord,
-  type WriteOptions,
-} from "@relay/contracts";
+import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
 import { KnowledgeService, PlanningService, TasksService } from "@relay/core";
 import { ProjectDatabase } from "@relay/storage";
+import type { Workflow, WorkflowFixture, WorkflowSnapshot } from "./helpers/workflow-fixture.types";
 
 const actor = "workflow-qa";
 
-interface Fixture {
-  db: ProjectDatabase;
-  knowledge: KnowledgeService;
-  tasks: TasksService;
-  planning: PlanningService;
-}
-
-interface Workflow {
-  feature: EntityRecord;
-  scenario: EntityRecord;
-  application: EntityRecord;
-  fi: EntityRecord;
-  si: EntityRecord;
-  preparation: TaskRecord;
-  implementation: TaskRecord;
-  acceptance: TaskRecord;
-  plan: WorkPlanRecord;
-  stageId: string;
-  release: ReleaseRecord;
-}
-
-function services(db: ProjectDatabase): Fixture {
+/**
+ * Связывает предметные сервисы с переданным соединением, не принимая владение им.
+ */
+function workflowServices(db: ProjectDatabase): WorkflowFixture {
   return {
     db,
     knowledge: new KnowledgeService(db),
@@ -44,7 +20,11 @@ function services(db: ProjectDatabase): Fixture {
   };
 }
 
-function withProject(run: (fixture: Fixture) => void): void {
+/**
+ * Создаёт пустой проект в файловой SQLite и удаляет его после синхронного сценария,
+ * включая отказ. Дополнительными соединениями владеет вызывающий код.
+ */
+function withWorkflowProject(run: (fixture: WorkflowFixture) => void): void {
   const date = new Date().toISOString().slice(0, 10);
   const root = resolve(import.meta.dir, "../../../..", ".artifacts", date);
   mkdirSync(root, { recursive: true });
@@ -56,7 +36,7 @@ function withProject(run: (fixture: Fixture) => void): void {
       name: "Сквозной рабочий цикл",
       slug: "workflow",
     });
-    run(services(db));
+    run(workflowServices(db));
   } finally {
     try {
       db?.close();
@@ -66,23 +46,34 @@ function withProject(run: (fixture: Fixture) => void): void {
   }
 }
 
+/**
+ * Передаёт исходную ревизию указанной записи без перечитывания или обновления CAS.
+ */
 function write(entity: EntityRecord): WriteOptions {
   return { actor, ifRevision: entity.revision };
 }
 
-function firstId(value: unknown): string {
-  if (!Array.isArray(value)) throw new Error("Ожидался массив с локальными ID");
-  const item: unknown = value[0];
-  if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") {
-    throw new Error("У первого элемента отсутствует локальный ID");
+/**
+ * Возвращает первый локальный ID из подготовленного состава; пустой fixture — ошибка теста.
+ */
+function firstId(value: readonly Pick<EntityRecord, "id">[]): string {
+  const item = value[0];
+  if (!item) {
+    throw new Error("Ожидался непустой состав с локальными ID");
   }
   return item.id;
 }
 
-function snapshot(db: ProjectDatabase) {
-  return { entities: db.list(), generation: db.getGeneration() };
+/**
+ * Читает все записи и поколение в одном снимке для сравнения до и после отказа пакета.
+ */
+function snapshot(db: ProjectDatabase): WorkflowSnapshot {
+  return db.snapshot(() => ({ entities: db.list(), generation: db.getGeneration() }));
 }
 
+/**
+ * Проверяет предметный код отказа и полную сохранность записей и поколения проекта.
+ */
 function expectAtomicFailure(db: ProjectDatabase, operation: () => unknown, code: string): void {
   const before = snapshot(db);
   let failure: unknown;
@@ -92,12 +83,18 @@ function expectAtomicFailure(db: ProjectDatabase, operation: () => unknown, code
     failure = error;
   }
   expect(failure).toBeInstanceOf(RelayError);
-  if (!(failure instanceof RelayError)) throw new Error("Ожидалась предметная ошибка Relay");
+  if (!(failure instanceof RelayError)) {
+    throw new Error("Ожидалась предметная ошибка Relay", { cause: failure });
+  }
   expect(failure.code).toBe(code);
   expect(snapshot(db)).toEqual(before);
 }
 
-function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
+/**
+ * Создаёт связный маршрут знаний, задач и планирования. Подготовка остаётся внешним
+ * обязательством, а план содержит только реализацию и приёмку; все задачи открыты.
+ */
+function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workflow {
   const feature = knowledge.create("feature", { name: "Локальный экспорт" }, actor);
   const scenario = knowledge.create(
     "scenario",
@@ -109,12 +106,12 @@ function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
     { name: "Консольный клиент", slug: "console", prefix: "CONSOLE", type: "internal" },
     actor,
   );
-  const fi = knowledge.create(
+  const featureImplementation = knowledge.create(
     "implementation",
     { application: application.key, target: feature.key, title: "Команды экспорта" },
     actor,
   );
-  const si = knowledge.create(
+  const scenarioImplementation = knowledge.create(
     "implementation",
     { application: application.id, target: scenario.key, title: "Запись выбранных данных" },
     actor,
@@ -127,7 +124,7 @@ function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
     {
       board: "console",
       title: "Реализовать команду экспорта",
-      targets: [fi.key, si.id],
+      targets: [featureImplementation.key, scenarioImplementation.id],
       acceptanceCriteria: [{ title: "Выбранные данные записываются без потерь" }],
     },
     actor,
@@ -154,7 +151,7 @@ function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
       scope: [
         { kind: "feature", id: feature.key },
         { kind: "application", id: application.key },
-        { kind: "implementation", id: si.key },
+        { kind: "implementation", id: scenarioImplementation.key },
       ],
     },
     actor,
@@ -172,8 +169,8 @@ function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
     feature,
     scenario,
     application,
-    fi,
-    si,
+    featureImplementation,
+    scenarioImplementation,
     preparation,
     implementation,
     acceptance,
@@ -183,13 +180,13 @@ function createWorkflow({ knowledge, tasks, planning }: Fixture): Workflow {
   };
 }
 
-function finishTasks({ tasks }: Fixture, workflow: Workflow): void {
-  tasks.move(
-    workflow.preparation.id,
-    { column: "done" },
-    write(tasks.get(workflow.preparation.id)),
-  );
-  let implementation = tasks.get(workflow.implementation.id);
+/**
+ * Завершает неизменённый после подготовки маршрут по его исходным ревизиям.
+ * Критерий выполняется перед закрытием реализации; план и релиз не изменяются.
+ */
+function finishWorkflowTasks({ tasks }: WorkflowFixture, workflow: Workflow): void {
+  tasks.move(workflow.preparation.id, { column: "done" }, write(workflow.preparation));
+  let implementation = workflow.implementation;
   implementation = tasks.criterion(
     implementation.id,
     "complete",
@@ -197,20 +194,42 @@ function finishTasks({ tasks }: Fixture, workflow: Workflow): void {
     write(implementation),
   );
   tasks.move(implementation.id, { column: "done" }, write(implementation));
-  tasks.move(workflow.acceptance.id, { column: "done" }, write(tasks.get(workflow.acceptance.id)));
+  tasks.move(workflow.acceptance.id, { column: "done" }, write(workflow.acceptance));
+}
+
+/**
+ * Возвращает ID задач продуктового охвата без зависимости от порядка выдачи.
+ */
+function productTaskIds(tasks: TasksService, reference: string): string[] {
+  return tasks
+    .list({ productTarget: reference })
+    .map((task) => task.id)
+    .sort();
 }
 
 describe("Связный рабочий цикл знаний, задач, планов и релизов", () => {
   test("требования и реализации проходят через критерии и внешнюю зависимость до выпуска", () => {
-    withProject((fixture) => {
+    withWorkflowProject((fixture) => {
       const { db, knowledge, tasks, planning } = fixture;
       const workflow = createWorkflow(fixture);
-      const { feature, scenario, application, fi, si, preparation, acceptance, stageId } = workflow;
+      const {
+        feature,
+        scenario,
+        application,
+        featureImplementation,
+        scenarioImplementation,
+        preparation,
+        acceptance,
+        stageId,
+      } = workflow;
       let { implementation, plan, release } = workflow;
 
       expect(scenario.data.featureId).toBe(feature.id);
-      expect(fi.data).toMatchObject({ applicationId: application.id, targetId: feature.id });
-      expect(si.data).toMatchObject({
+      expect(featureImplementation.data).toMatchObject({
+        applicationId: application.id,
+        targetId: feature.id,
+      });
+      expect(scenarioImplementation.data).toMatchObject({
         applicationId: application.id,
         featureId: feature.id,
         targetId: scenario.id,
@@ -219,14 +238,17 @@ describe("Связный рабочий цикл знаний, задач, пл�
       expect(implementation.data.boardId).toBe(
         knowledge.get("application", application.id).data.boardId,
       );
-      expect(implementation.data.targets).toEqual([fi.id, si.id]);
+      expect(implementation.data.targets).toEqual([
+        featureImplementation.id,
+        scenarioImplementation.id,
+      ]);
       expect(acceptance.data.targets).toEqual([scenario.id]);
       expect(preparation.data.targets).toEqual([]);
       expect(acceptance.data.dependencies).toEqual([implementation.id]);
       expect(plan.data.scope).toEqual([
         { kind: "feature", id: feature.id },
         { kind: "application", id: application.id },
-        { kind: "implementation", id: si.id },
+        { kind: "implementation", id: scenarioImplementation.id },
       ]);
       expect(release.data.planIds).toEqual([plan.id]);
       // Зависимость влияет на готовность, но не попадает в явный состав плана.
@@ -241,6 +263,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
       });
 
       plan = planning.transition("work-plan", plan.id, "start", {}, write(plan));
+
       expect(tasks.get(implementation.id)).toEqual(implementation);
       expectAtomicFailure(
         db,
@@ -260,22 +283,29 @@ describe("Связный рабочий цикл знаний, задач, пл�
         { id: firstId(implementation.data.acceptanceCriteria) },
         write(implementation),
       );
+
       expect(tasks.progress(implementation.id)).toEqual({
         completed: false,
         canComplete: false,
         blockers: [preparation.id],
       });
+
       tasks.move(preparation.id, { column: "done" }, write(preparation));
+
       expect(tasks.progress(implementation.id)).toEqual({
         completed: false,
         canComplete: true,
         blockers: [],
       });
+
       implementation = tasks.move(implementation.id, { column: "done" }, write(implementation));
+
       expect(planning.progress("work-plan", plan.id)).toMatchObject({
         counts: { total: 2, completed: 1, percent: 50 },
       });
+
       tasks.move(acceptance.id, { column: "done" }, write(acceptance));
+
       expect(planning.progress("work-plan", plan.id)).toMatchObject({
         completed: true,
         canComplete: true,
@@ -295,10 +325,13 @@ describe("Связный рабочий цикл знаний, задач, пл�
         { result: "Команда реализована, пользовательский сценарий принят." },
         write(plan),
       );
+
       expect(plan.data.status).toBe("completed");
       expect(planning.progress("release", release.id).canRelease).toBe(true);
       expect(planning.get("release", release.id)).toEqual(release);
+
       release = planning.transition("release", release.id, "publish", {}, write(release));
+
       expect(release.data).toMatchObject({ status: "released", releasedBy: actor });
       expect(typeof release.data.releasedAt).toBe("string");
 
@@ -318,10 +351,10 @@ describe("Связный рабочий цикл знаний, задач, пл�
   });
 
   test("публикация перечитывает обязательства из другой SQLite-сессии даже у закрытого плана", () => {
-    withProject((fixture) => {
+    withWorkflowProject((fixture) => {
       const { db, tasks, planning } = fixture;
       const workflow = createWorkflow(fixture);
-      finishTasks(fixture, workflow);
+      finishWorkflowTasks(fixture, workflow);
       const plan = planning.transition(
         "work-plan",
         workflow.plan.id,
@@ -363,10 +396,12 @@ describe("Связный рабочий цикл знаний, задач, пл�
 
         preparation = otherTasks.move(preparation.id, { column: "done" }, write(preparation));
         release = planning.transition("release", release.id, "publish", {}, write(release));
+
         expect(planning.progress("release", release.id).completed).toBe(true);
 
         // После выпуска меняется только текущая готовность, а факт выпуска сохраняется.
         otherTasks.move(preparation.id, { column: "review" }, write(preparation));
+
         expect(planning.progress("release", release.id)).toMatchObject({
           completed: false,
           canRelease: false,
@@ -381,19 +416,22 @@ describe("Связный рабочий цикл знаний, задач, пл�
   });
 
   test("снятие участия и перенос доски сохраняют цели, зависимости и явное включение задачи", () => {
-    withProject((fixture) => {
+    withWorkflowProject((fixture) => {
       const { db, knowledge, tasks, planning } = fixture;
       const workflow = createWorkflow(fixture);
-      const { feature, scenario, fi, si, plan, stageId, acceptance } = workflow;
+      const {
+        feature,
+        scenario,
+        featureImplementation,
+        scenarioImplementation,
+        plan,
+        stageId,
+        acceptance,
+      } = workflow;
       let implementation = workflow.implementation;
       let application = knowledge.get("application", workflow.application.id);
       const progress = planning.progress("work-plan", plan.id);
-      const productTasks = () =>
-        tasks
-          .list({ productTarget: feature.key })
-          .map((task) => task.id)
-          .sort();
-      expect(productTasks()).toEqual([implementation.id, acceptance.id].sort());
+      expect(productTaskIds(tasks, feature.key)).toEqual([implementation.id, acceptance.id].sort());
 
       expectAtomicFailure(
         db,
@@ -401,16 +439,23 @@ describe("Связный рабочий цикл знаний, задач, пл�
         "INVALID_ARGUMENT",
       );
       application = knowledge.replaceParticipation(application.id, [], write(application));
-      expect(knowledge.get("implementation", fi.key).data.active).toBe(false);
-      expect(knowledge.get("implementation", si.key).data.active).toBe(false);
-      expect(productTasks()).toEqual([acceptance.id]);
+
+      expect(knowledge.get("implementation", featureImplementation.key).data.active).toBe(false);
+      expect(knowledge.get("implementation", scenarioImplementation.key).data.active).toBe(false);
+      expect(productTaskIds(tasks, feature.key)).toEqual([acceptance.id]);
       expect(tasks.get(implementation.id)).toEqual(implementation);
-      expect(tasks.list({ target: si.key }).map((task) => task.id)).toEqual([implementation.id]);
+      expect(tasks.list({ target: scenarioImplementation.key }).map((task) => task.id)).toEqual([
+        implementation.id,
+      ]);
       expect(planning.get("work-plan", plan.id)).toEqual(plan);
       expect(planning.progress("work-plan", plan.id)).toEqual(progress);
       expectAtomicFailure(
         db,
-        () => tasks.create({ board: "console", title: "Новая работа", targets: [si.key] }, actor),
+        () =>
+          tasks.create(
+            { board: "console", title: "Новая работа", targets: [scenarioImplementation.key] },
+            actor,
+          ),
         "INVALID_ARGUMENT",
       );
       implementation = tasks.update(
@@ -418,16 +463,28 @@ describe("Связный рабочий цикл знаний, задач, пл�
         { description: "Существующая ссылка сохраняется после снятия участия." },
         write(implementation),
       );
-      expect(implementation.data.targets).toEqual([fi.id, si.id]);
 
-      knowledge.replaceParticipation(application.id, [fi.key, si.key], write(application));
-      expect(knowledge.get("implementation", fi.id)).toMatchObject({ id: fi.id, key: fi.key });
-      expect(knowledge.get("implementation", si.id)).toMatchObject({
-        id: si.id,
-        key: si.key,
+      expect(implementation.data.targets).toEqual([
+        featureImplementation.id,
+        scenarioImplementation.id,
+      ]);
+
+      knowledge.replaceParticipation(
+        application.id,
+        [featureImplementation.key, scenarioImplementation.key],
+        write(application),
+      );
+
+      expect(knowledge.get("implementation", featureImplementation.id)).toMatchObject({
+        id: featureImplementation.id,
+        key: featureImplementation.key,
+      });
+      expect(knowledge.get("implementation", scenarioImplementation.id)).toMatchObject({
+        id: scenarioImplementation.id,
+        key: scenarioImplementation.key,
         data: { active: true },
       });
-      expect(productTasks()).toEqual([implementation.id, acceptance.id].sort());
+      expect(productTaskIds(tasks, feature.key)).toEqual([implementation.id, acceptance.id].sort());
 
       const oldKey = implementation.key;
       implementation = tasks.update(implementation.id, { targets: [] }, write(implementation));
@@ -437,6 +494,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
         { targets: [scenario.key] },
         write(implementation),
       );
+
       expect(implementation.key).not.toBe(oldKey);
       expect(tasks.get(oldKey)).toEqual(implementation);
       expect(implementation.data).toMatchObject({
@@ -448,13 +506,16 @@ describe("Связный рабочий цикл знаний, задач, пл�
       expect(planning.get("work-plan", plan.id)).toEqual(plan);
       expect(planning.progress("work-plan", plan.id)).toEqual(progress);
       const before = snapshot(db);
-      expect(planning.stageTask(plan.id, stageId, oldKey, false, write(plan))).toEqual(plan);
+
+      const unchangedPlan = planning.stageTask(plan.id, stageId, oldKey, false, write(plan));
+
+      expect(unchangedPlan).toEqual(plan);
       expect(snapshot(db)).toEqual(before);
     });
   });
 
   test("поздний отказ завершения плана откатывает весь пакет знаний и задач вместе с адресами", () => {
-    withProject((fixture) => {
+    withWorkflowProject((fixture) => {
       const { db, knowledge, tasks, planning } = fixture;
       const initialIds = new Set(db.list().map((entity) => entity.id));
       const attempted: EntityRecord[] = [];

@@ -86,7 +86,7 @@ bun --bun turbo run test:process --filter=@relay/cli
 Для одного файла или теста можно вызвать Bun напрямую, без Turbo:
 
 ```bash
-bun test --cwd apps/cli ./src/run.unit.test.ts
+bun test --cwd apps/cli ./src/app/run.unit.test.ts
 bun test --cwd apps/cli .unit.test.ts -t "пустой вызов"
 ```
 

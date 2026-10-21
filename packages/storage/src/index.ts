@@ -1,2 +1,3 @@
-export { ProjectDatabase, type ProjectMetadata } from "./project-database";
-export { withLocalFileLock } from "./local-lock";
+export { ProjectDatabase } from "./database/project-database";
+export type { ProjectMetadata } from "./database/project-database.types";
+export { withLocalFileLock } from "./local-lock/local-lock";

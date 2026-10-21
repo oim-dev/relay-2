@@ -1,158 +1,247 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { HistoryService, KnowledgeService, TasksService } from "@relay/core";
+import type { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { arrayValue, entityValue, objectValue, stringValue } from "./helpers/responses";
 
-test("search и inspect разрешают прежние ключи и типизированные адреса", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    const { task, feature } = cli.withDatabase(project, (db) => {
-      const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-      knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
-        actor: "agent",
-        ifRevision: feature.revision,
+const validDoctorContexts = [
+  { name: "знания", seed: seedKnowledgeLinks },
+  { name: "история", seed: seedCompletedHistory },
+] as const;
+
+/**
+ * Создаёт согласованные участие приложения и документ раздела со ссылкой на фичу.
+ * Соединение принадлежит вызывающей fixture и здесь не закрывается.
+ */
+function seedKnowledgeLinks(db: ProjectDatabase): void {
+  const knowledge = new KnowledgeService(db);
+  const feature = knowledge.create("feature", { name: "Фича" }, "agent");
+  const app = knowledge.create("application", { name: "Web", slug: "web" }, "agent");
+  knowledge.replaceParticipation(app.id, [feature.id], {
+    actor: "agent",
+    ifRevision: app.revision,
+  });
+  knowledge.changeSection(
+    "create",
+    { id: "rules", name: "Правила" },
+    {
+      actor: "agent",
+      ifRevision: knowledge.get("project").revision,
+    },
+  );
+  knowledge.create(
+    "document",
+    { name: "Материал", body: "Текст", sectionId: "rules", targets: [feature.id] },
+    "agent",
+  );
+}
+
+/**
+ * Создаёт завершённую сессию с намерением и результатом для проверки согласованности истории.
+ * Все записи выполняются через Core; соединение остаётся у вызывающей fixture.
+ */
+function seedCompletedHistory(db: ProjectDatabase): void {
+  const history = new HistoryService(db);
+  const session = history.start({ title: "Поручение" }, "agent");
+  const runId = stringValue(session.data.currentRunId);
+  const intent = history.checkpoint(
+    session.id,
+    "open",
+    {
+      title: "Намерение",
+      body: "Описание",
+      runId,
+    },
+    { actor: "agent", ifRevision: session.revision },
+  );
+  history.checkpoint(
+    intent.id,
+    "complete",
+    {
+      title: "Результат",
+      body: "Материал",
+      runId,
+    },
+    { actor: "agent", ifRevision: history.get(session.id).revision },
+  );
+  history.transition(
+    session.id,
+    "complete",
+    { result: "Итог", runId },
+    {
+      actor: "agent",
+      ifRevision: history.get(session.id).revision,
+    },
+  );
+}
+
+describe("Поиск и обзор через CLI", () => {
+  test("inspect resolve разрешает типизированный постоянный ID задачи", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const task = cli.withDatabase(project, (db) =>
+        new TasksService(db).create({ title: "Задача" }, "agent"),
+      );
+
+      const resolved = await cli.entity(["inspect", "resolve", `task:${task.id}`]);
+
+      expect(resolved.id).toBe(task.id);
+    });
+  });
+
+  test("inspect get разрешает типизированный прежний ключ фичи", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const feature = cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
+        knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
+          actor: "agent",
+          ifRevision: feature.revision,
+        });
+        return feature;
       });
-      return { feature, task: new TasksService(db).create({ title: "Задача" }, "agent") };
-    });
-    expect((await cli.entity(["inspect", "resolve", `task:${task.id}`])).id).toBe(task.id);
-    expect((await cli.entity(["inspect", "get", `feature:${feature.key}`])).id).toBe(feature.id);
-    const found = await cli.page(["search", "--q", feature.key], entityValue);
-    expect(found.data.items.map((item) => item.id)).toEqual([feature.id]);
-  }));
 
-test("поиск не включает текст комментариев в содержание задачи", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    cli.withDatabase(project, (db) => {
-      const tasks = new TasksService(db);
-      const task = tasks.create({ title: "Работа" }, "agent");
-      tasks.comment(task.id, "неискомый-комментарий", "agent");
-    });
-    expect(
-      (await cli.page(["search", "--q", "неискомый-комментарий"], entityValue)).meta.page.total,
-    ).toBe(0);
-  }));
+      const resolved = await cli.entity(["inspect", "get", `feature:${feature.key}`]);
 
-test("поиск документов учитывает пояснение прикрепления к требованию", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    const document = cli.withDatabase(project, (db) => {
-      const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-      const document = knowledge.create("document", { name: "Материал", body: "Текст" }, "agent");
-      return knowledge.linkDocument(document.id, feature.id, {
-        actor: "agent",
-        ifRevision: document.revision,
-        description: "Особое основание",
+      expect(resolved.id).toBe(feature.id);
+      expect(resolved.key).toBe("FEATURE-RENAMED");
+    });
+  });
+
+  test("поиск по прежнему ключу находит переименованную фичу", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const feature = cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
+        knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
+          actor: "agent",
+          ifRevision: feature.revision,
+        });
+        return feature;
       });
-    });
-    const found = await cli.page(
-      ["search", "--q", "Особое основание", "--kind", "document"],
-      entityValue,
-    );
-    expect(found.data.items.map((item) => item.id)).toEqual([document.id]);
-  }));
 
-test("overview считает полный состав независимо от размера страницы", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    cli.withDatabase(project, (db) => {
-      new KnowledgeService(db).create("feature", { name: "Фича" }, "agent");
-      new TasksService(db).create({ title: "Работа" }, "agent");
-    });
-    const overview = await cli.page(["overview", "--limit", "1"], entityValue);
-    expect(overview.data.items).toHaveLength(1);
-    expect(overview.data.counts).toMatchObject({ task: 1, feature: 1 });
-    expect(overview.meta.page.total).toBe(cli.withDatabase(project, (db) => db.list().length));
-  }));
+      const found = await cli.page(["search", "--q", feature.key], entityValue);
 
-test("storage status представляет расположение и идентичность выбранной базы", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    const status = objectValue((await cli.success(["storage", "status"])).data);
-    expect(status).toMatchObject({
-      projectId: project.projectId,
-      databasePath: project.databasePath,
+      expect(found.data.items.map((item) => item.id)).toEqual([feature.id]);
     });
-  }));
+  });
 
-test.each(["знания", "история"] as const)(
-  "doctor принимает согласованные данные области %s",
-  (area) =>
-    withCliFixture(async (cli) => {
+  test("поиск не включает текст комментариев в содержание задачи", async () => {
+    await withCliFixture(async (cli) => {
       const project = cli.createProject();
       cli.withDatabase(project, (db) => {
-        if (area === "знания") {
-          const knowledge = new KnowledgeService(db);
-          const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-          const app = knowledge.create("application", { name: "Web", slug: "web" }, "agent");
-          knowledge.replaceParticipation(app.id, [feature.id], {
-            actor: "agent",
-            ifRevision: app.revision,
-          });
-          knowledge.changeSection(
-            "create",
-            { id: "rules", name: "Правила" },
-            { actor: "agent", ifRevision: knowledge.get("project").revision },
-          );
-          knowledge.create(
-            "document",
-            { name: "Материал", body: "Текст", sectionId: "rules", targets: [feature.id] },
-            "agent",
-          );
-        } else {
-          const history = new HistoryService(db);
-          const session = history.start({ title: "Поручение" }, "agent");
-          const runId = stringValue(session.data.currentRunId);
-          const intent = history.checkpoint(
-            session.id,
-            "open",
-            { title: "Намерение", body: "Описание", runId },
-            { actor: "agent", ifRevision: session.revision },
-          );
-          history.checkpoint(
-            intent.id,
-            "complete",
-            { title: "Результат", body: "Материал", runId },
-            { actor: "agent", ifRevision: history.get(session.id).revision },
-          );
-          history.transition(
-            session.id,
-            "complete",
-            { result: "Итог", runId },
-            { actor: "agent", ifRevision: history.get(session.id).revision },
-          );
-        }
+        const tasks = new TasksService(db);
+        const task = tasks.create({ title: "Работа" }, "agent");
+        tasks.comment(task.id, "неискомый-комментарий", "agent");
       });
-      const check = objectValue((await cli.success(["doctor", "check"])).data);
-      expect(check).toMatchObject({ projectId: project.projectId, valid: true, issues: [] });
-    }),
-);
 
-test("doctor передаёт нарушение ссылок в stderr с предметным кодом и деталями", () =>
-  withCliFixture(async (cli) => {
-    const project = cli.createProject();
-    const generation = cli.withDatabase(project, (db) => {
-      const document = new KnowledgeService(db).create(
-        "document",
-        { name: "Материал", body: "Текст" },
-        "agent",
+      const found = await cli.page(["search", "--q", "неискомый-комментарий"], entityValue);
+
+      expect(found.meta.page.total).toBe(0);
+      expect(found.data.items).toEqual([]);
+    });
+  });
+
+  test("поиск документов учитывает пояснение прикрепления к требованию", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const document = cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
+        const document = knowledge.create("document", { name: "Материал", body: "Текст" }, "agent");
+        return knowledge.linkDocument(document.id, feature.id, {
+          actor: "agent",
+          ifRevision: document.revision,
+          description: "Особое основание",
+        });
+      });
+
+      const found = await cli.page(
+        ["search", "--q", "Особое основание", "--kind", "document"],
+        entityValue,
       );
-      // Ошибка хранения вводится явно: штатный Core не позволяет записать такую ссылку.
-      db.update(
-        {
+
+      expect(found.data.items.map((item) => item.id)).toEqual([document.id]);
+    });
+  });
+
+  test("overview считает полный состав независимо от размера страницы", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      cli.withDatabase(project, (db) => {
+        new KnowledgeService(db).create("feature", { name: "Фича" }, "agent");
+        new TasksService(db).create({ title: "Работа" }, "agent");
+      });
+
+      const overview = await cli.page(["overview", "--limit", "1"], entityValue);
+
+      expect(overview.data.items).toHaveLength(1);
+      expect(overview.data.counts).toMatchObject({ task: 1, feature: 1 });
+      expect(overview.meta.page.total).toBe(cli.withDatabase(project, (db) => db.list().length));
+    });
+  });
+
+  test("storage status представляет расположение и идентичность выбранной базы", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+
+      const answer = await cli.success(["storage", "status"]);
+
+      expect(objectValue(answer.data)).toMatchObject({
+        projectId: project.projectId,
+        databasePath: project.databasePath,
+      });
+    });
+  });
+});
+
+describe("Диагностика целостности через CLI", () => {
+  test.each(validDoctorContexts)(
+    "$name: согласованные данные проходят doctor без замечаний",
+    async ({ seed }) => {
+      await withCliFixture(async (cli) => {
+        const project = cli.createProject();
+        cli.withDatabase(project, seed);
+
+        const check = await cli.success(["doctor", "check"]);
+
+        expect(objectValue(check.data)).toMatchObject({
+          projectId: project.projectId,
+          valid: true,
+          issues: [],
+        });
+      });
+    },
+  );
+
+  test("нарушенная ссылка возвращает INTEGRITY_ERROR в stderr без изменения данных", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const { generation, damaged } = cli.withDatabase(project, (db) => {
+        const document = new KnowledgeService(db).create(
+          "document",
+          { name: "Материал", body: "Текст" },
+          "agent",
+        );
+        // Ошибка хранения вводится явно: штатный Core не позволяет записать такую ссылку.
+        const damaged = {
           ...document,
           revision: document.revision + 1,
           data: { ...document.data, targets: ["missing-target"] },
-        },
-        document.revision,
-      );
-      return db.getGeneration();
+        };
+        db.update(damaged, document.revision);
+        return { generation: db.getGeneration(), damaged };
+      });
+
+      const error = await cli.error(["doctor", "check"], 1);
+
+      expect(error.code).toBe("INTEGRITY_ERROR");
+      const issues = arrayValue(objectValue(error.details).issues).map(stringValue);
+      expect(issues.some((issue) => issue.includes("missing-target"))).toBe(true);
+      expect(cli.withDatabase(project, (db) => db.getGeneration())).toBe(generation);
+      expect(cli.withDatabase(project, (db) => db.get(damaged.id))).toEqual(damaged);
     });
-    const error = await cli.error(["doctor", "check"], 1);
-    expect(error.code).toBe("INTEGRITY_ERROR");
-    const issues = arrayValue(objectValue(error.details).issues).map(stringValue);
-    expect(issues.some((issue) => issue.includes("missing-target"))).toBe(true);
-    expect(cli.withDatabase(project, (db) => db.getGeneration())).toBe(generation);
-  }));
+  });
+});

@@ -3,13 +3,35 @@ import { KnowledgeService } from "@relay/core";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { entityValue } from "./helpers/responses";
 
-describe("CLI: знания", () => {
-  test.each(["feature", "application"] as const)(
-    "create %s передаёт название и Markdown в Core",
-    (kind) =>
-      withCliFixture(async (cli) => {
+const knowledgeCreation = [
+  { name: "фича", kind: "feature", extra: [] },
+  { name: "приложение", kind: "application", extra: ["--slug", "web"] },
+] as const;
+const invalidRenames = [
+  {
+    name: "двоеточие в ключе",
+    key: "application:foreign",
+    exit: 2,
+    code: "VALIDATION_ERROR",
+    details: { field: "key" },
+  },
+  {
+    name: "slug чужого приложения",
+    key: "backend",
+    exit: 4,
+    code: "CONFLICT",
+    details: { kind: "application", ref: "backend" },
+  },
+] as const;
+
+describe("Знания через CLI", () => {
+  test.each(knowledgeCreation)(
+    "$name создаётся с переданными названием и полным Markdown",
+    async ({ kind, extra }) => {
+      await withCliFixture(async (cli) => {
         const project = cli.createProject();
         const description = "# Требования\n\n    точный текст\n";
+
         const created = await cli.entity([
           kind,
           "create",
@@ -17,24 +39,27 @@ describe("CLI: знания", () => {
           "Описание",
           "--description",
           description,
-          ...(kind === "application" ? ["--slug", "web"] : []),
+          ...extra,
         ]);
+
         expect(created).toMatchObject({
           kind,
           createdBy: "agent",
           data: { name: "Описание", description },
         });
         expect(cli.withDatabase(project, (db) => db.get(created.id))).toEqual(created);
-      }),
+      });
+    },
   );
 
-  test("rename сохраняет ID, старый алиас и полное Markdown-содержание фичи", async () => {
+  test("переименование фичи сохраняет ID, старый алиас и полное Markdown-содержание", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const description = "# Требования\n\n    точный текст\n";
       const feature = cli.withDatabase(project, (db) =>
         new KnowledgeService(db).create("feature", { name: "Поиск", description }, "fixture"),
       );
+
       const renamed = await cli.entity([
         "feature",
         "rename",
@@ -58,7 +83,7 @@ describe("CLI: знания", () => {
     });
   });
 
-  test("update отклоняет устаревшую ревизию и сохраняет актуальную запись", async () => {
+  test("обновление с устаревшей ревизией сохраняет актуальную запись и возвращает REVISION_CONFLICT", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const { before, current } = cli.withDatabase(project, (db) => {
@@ -70,6 +95,7 @@ describe("CLI: знания", () => {
         });
         return { before, current };
       });
+
       const error = await cli.error(
         [
           "feature",
@@ -95,69 +121,69 @@ describe("CLI: знания", () => {
     });
   });
 
-  test("update без ревизии отклоняется до изменения фичи", async () => {
+  test("обновление без ревизии отклоняется до изменения фичи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const feature = cli.withDatabase(project, (db) =>
         new KnowledgeService(db).create("feature", { name: "Поиск" }, "fixture"),
       );
 
-      expect(
-        await cli.error(["feature", "update", feature.key, "--summary", "Не сохранять"], 2),
-      ).toMatchObject({ code: "INVALID_ARGUMENT" });
+      const error = await cli.error(
+        ["feature", "update", feature.key, "--summary", "Не сохранять"],
+        2,
+      );
+
+      expect(error.code).toBe("INVALID_ARGUMENT");
       expect(await cli.entity(["feature", "get", feature.key])).toEqual(feature);
     });
   });
 
-  test("get отсутствующей фичи возвращает NOT_FOUND и код завершения 3", async () => {
+  test("чтение отсутствующей фичи возвращает NOT_FOUND и код завершения 3", async () => {
     await withCliFixture(async (cli) => {
       cli.createProject();
-      expect(await cli.error(["feature", "get", "absent"], 3)).toMatchObject({
+
+      const error = await cli.error(["feature", "get", "absent"], 3);
+
+      expect(error).toMatchObject({
         code: "NOT_FOUND",
         details: { ref: "absent", kind: "feature" },
       });
     });
   });
 
-  test.each([
-    {
-      name: "двоеточие в ключе",
-      key: "application:foreign",
-      exit: 2,
-      code: "VALIDATION_ERROR",
-      details: { field: "key" },
-    },
-    {
-      name: "slug чужого приложения",
-      key: "backend",
-      exit: 4,
-      code: "CONFLICT",
-      details: { kind: "application", ref: "backend" },
-    },
-  ])("rename отклоняет $name, сохраняя адреса приложений", async ({ key, exit, code, details }) => {
-    await withCliFixture(async (cli) => {
-      const project = cli.createProject();
-      const { first, second } = cli.withDatabase(project, (db) => {
-        const knowledge = new KnowledgeService(db);
-        return {
-          first: knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
-          second: knowledge.create("application", { name: "Backend", slug: "backend" }, "fixture"),
-        };
-      });
+  test.each(invalidRenames)(
+    "$name: переименование отклоняется, сохраняя адреса приложений",
+    async ({ key, exit, code, details }) => {
+      await withCliFixture(async (cli) => {
+        const project = cli.createProject();
+        const { first, second } = cli.withDatabase(project, (db) => {
+          const knowledge = new KnowledgeService(db);
+          return {
+            first: knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
+            second: knowledge.create(
+              "application",
+              { name: "Backend", slug: "backend" },
+              "fixture",
+            ),
+          };
+        });
 
-      expect(
-        await cli.error(
+        const error = await cli.error(
           ["application", "rename", first.key, key, "--if-revision", String(first.revision)],
           exit,
-        ),
-      ).toMatchObject({ code, details });
-      expect(await cli.entity(["application", "get", first.id])).toEqual(first);
-      expect(await cli.entity(["application", "get", `application:${second.id}`])).toEqual(second);
-      expect(await cli.entity(["application", "get", "backend"])).toEqual(second);
-    });
-  });
+        );
 
-  test("participation replace разрешает ключ фичи и возвращает состав с новой ревизией приложения", async () => {
+        expect(error).toMatchObject({ code, details });
+        expect(await cli.entity(["application", "get", first.id])).toEqual(first);
+        expect(await cli.entity(["application", "get", `application:${second.id}`])).toEqual(
+          second,
+        );
+        expect(await cli.entity(["application", "get", "backend"])).toEqual(second);
+      });
+    },
+  );
+
+  test("замена участия по ключу фичи возвращает состав с новой ревизией приложения", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const { feature, app } = cli.withDatabase(project, (db) => {
@@ -167,6 +193,7 @@ describe("CLI: знания", () => {
           app: knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
         };
       });
+
       const participation = await cli.entity([
         "application",
         "participation",
@@ -187,6 +214,41 @@ describe("CLI: знания", () => {
         data: { applicationId: app.id, targetId: feature.id, targetKind: "feature", active: true },
       });
       expect(participation.data.implementationIds).toEqual(list.data.items.map((item) => item.id));
+    });
+  });
+
+  test("явный пустой targets в JSON очищает непустое участие приложения", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const app = cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        const feature = knowledge.create("feature", { name: "Поиск" }, "fixture");
+        const created = knowledge.create("application", { name: "Web", slug: "web" }, "fixture");
+        return knowledge.replaceParticipation(created.id, [feature.id], {
+          actor: "fixture",
+          ifRevision: created.revision,
+        });
+      });
+
+      const cleared = await cli.entity([
+        "application",
+        "participation",
+        "replace",
+        app.key,
+        "--input",
+        '{"targets":[]}',
+        "--if-revision",
+        String(app.revision),
+      ]);
+
+      expect(cleared.id).toBe(app.id);
+      expect(cleared.revision).toBe(app.revision + 1);
+      expect(cleared.data).toEqual({ ...app.data, implementationIds: [] });
+      cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        expect(db.get(app.id)).toEqual(cleared);
+        expect(knowledge.list("implementation", { application: app.id, active: true })).toEqual([]);
+      });
     });
   });
 });

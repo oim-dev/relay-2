@@ -1,12 +1,44 @@
 import { describe, expect, test } from "bun:test";
 import { TasksService } from "@relay/core";
+import type { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { arrayValue, entityValue, objectValue, stringValue } from "./helpers/responses";
+import type { CorruptedTaskFixture, TaskWithCriterion } from "./helpers/task-fixture.types";
 
-describe("CLI: задачи", () => {
-  test("create разбирает JSON критериев и criterion list возвращает вложенные записи", async () => {
+/**
+ * Создаёт задачу с одним критерием через Core; соединение принадлежит вызывающей fixture.
+ */
+function createTaskWithCriterion(db: ProjectDatabase): TaskWithCriterion {
+  const tasks = new TasksService(db);
+  const task = tasks.create(
+    { title: "Работа", acceptanceCriteria: [{ title: "Проверено" }] },
+    "fixture",
+  );
+  const [criterion] = tasks.criteria(task.id);
+  if (!criterion) {
+    throw new Error("Подготовленная задача должна содержать критерий");
+  }
+  return { task, criterion };
+}
+
+/**
+ * Намеренно записывает null вместо dependencies через Storage для проверки отказа декодера.
+ * Возвращает состояние после повреждения; соединение не закрывает и не скрывает записи.
+ */
+function createCorruptedDependencies(db: ProjectDatabase): CorruptedTaskFixture {
+  const task = new TasksService(db).create({ title: "Повреждение" }, "fixture");
+  db.update(
+    { ...task, revision: task.revision + 1, data: { ...task.data, dependencies: null } },
+    task.revision,
+  );
+  return { damaged: entityValue(db.get(task.id)), generation: db.getGeneration() };
+}
+
+describe("Задачи через CLI", () => {
+  test("JSON критериев создания сохраняется в списке вложенных записей задачи", async () => {
     await withCliFixture(async (cli) => {
       cli.createProject();
+
       const task = await cli.entity([
         "task",
         "create",
@@ -33,22 +65,12 @@ describe("CLI: задачи", () => {
     });
   });
 
-  test("criterion complete и move в done отражаются в вычисляемом прогрессе задачи", async () => {
+  test("выполнение критерия делает задачу готовой к завершению без перевода в done", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { task, criterion } = cli.withDatabase(project, (db) => {
-        const tasks = new TasksService(db);
-        const task = tasks.create(
-          { title: "Работа", acceptanceCriteria: [{ title: "Проверено" }] },
-          "fixture",
-        );
-        return { task, criterion: tasks.criteria(task.id)[0]! };
-      });
-      expect(objectValue((await cli.success(["task", "progress", task.key])).data)).toEqual({
-        completed: false,
-        canComplete: false,
-        blockers: [],
-      });
+      const { task, criterion } = cli.withDatabase(project, createTaskWithCriterion);
+      const initialProgress = objectValue((await cli.success(["task", "progress", task.key])).data);
+
       const checked = await cli.entity([
         "task",
         "criterion",
@@ -59,6 +81,11 @@ describe("CLI: задачи", () => {
         String(task.revision),
       ]);
 
+      expect(initialProgress).toEqual({
+        completed: false,
+        canComplete: false,
+        blockers: [],
+      });
       expect(checked.revision).toBe(task.revision + 1);
       expect(arrayValue(checked.data.acceptanceCriteria)).toEqual([
         { ...criterion, completed: true, completedAt: expect.any(String), completedBy: "agent" },
@@ -68,18 +95,38 @@ describe("CLI: задачи", () => {
         canComplete: true,
         blockers: [],
       });
+    });
+  });
+
+  test("перевод готовой задачи в done сохраняет колонку и вычисляемое завершение", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const checked = cli.withDatabase(project, (db) => {
+        const { task, criterion } = createTaskWithCriterion(db);
+        return new TasksService(db).criterion(
+          task.id,
+          "complete",
+          { id: criterion.id },
+          {
+            actor: "fixture",
+            ifRevision: task.revision,
+          },
+        );
+      });
+
       const completed = await cli.entity([
         "task",
         "move",
-        task.key,
+        checked.key,
         "--column",
         "done",
         "--if-revision",
         String(checked.revision),
       ]);
+
       expect(completed.revision).toBe(checked.revision + 1);
       expect(completed.data.column).toBe("done");
-      expect(objectValue((await cli.success(["task", "progress", task.key])).data)).toEqual({
+      expect(objectValue((await cli.success(["task", "progress", checked.key])).data)).toEqual({
         completed: true,
         canComplete: true,
         blockers: [],
@@ -87,7 +134,7 @@ describe("CLI: задачи", () => {
     });
   });
 
-  test("parent set и clear меняют родителя и список прямых детей", async () => {
+  test("назначение родителя сохраняет его ID и добавляет задачу в прямых детей", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const { parent, child } = cli.withDatabase(project, (db) => {
@@ -97,6 +144,7 @@ describe("CLI: задачи", () => {
           child: tasks.create({ title: "Ребёнок" }, "fixture"),
         };
       });
+
       const assigned = await cli.entity([
         "task",
         "parent",
@@ -112,23 +160,41 @@ describe("CLI: задачи", () => {
       expect(assigned.revision).toBe(child.revision + 1);
       expect(children.meta.page.total).toBe(1);
       expect(children.data.items.map((item) => item.id)).toEqual([child.id]);
+    });
+  });
+
+  test("снятие родителя очищает связь и исключает задачу из прямых детей", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const { parent, child } = cli.withDatabase(project, (db) => {
+        const tasks = new TasksService(db);
+        const parent = tasks.create({ title: "Родитель" }, "fixture");
+        const child = tasks.create({ title: "Ребёнок" }, "fixture");
+        const assigned = tasks.setParent(child.id, parent.id, {
+          actor: "fixture",
+          ifRevision: child.revision,
+        });
+        return { parent, child: assigned };
+      });
+
       const cleared = await cli.entity([
         "task",
         "parent",
         "clear",
         child.key,
         "--if-revision",
-        String(assigned.revision),
+        String(child.revision),
       ]);
+
       expect(cleared.data.parentId).toBeNull();
-      expect(cleared.revision).toBe(assigned.revision + 1);
+      expect(cleared.revision).toBe(child.revision + 1);
       expect((await cli.page(["task", "children", parent.key], entityValue)).data.items).toEqual(
         [],
       );
     });
   });
 
-  test("dependency add разрешает ключ зависимости и показывает её как блокер прогресса", async () => {
+  test("добавление зависимости по ключу сохраняет её ID и показывает блокер прогресса", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const { task, dependency } = cli.withDatabase(project, (db) => {
@@ -138,6 +204,7 @@ describe("CLI: задачи", () => {
           dependency: tasks.create({ title: "Предварительная работа" }, "fixture"),
         };
       });
+
       const linked = await cli.entity([
         "task",
         "dependency",
@@ -162,36 +229,14 @@ describe("CLI: задачи", () => {
     });
   });
 
-  test("dependency list и update возвращают CORRUPT_DATA для повреждённых зависимостей без изменений", async () => {
+  test("чтение повреждённых зависимостей возвращает CORRUPT_DATA без изменения записи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { damaged, generation } = cli.withDatabase(project, (db) => {
-        const task = new TasksService(db).create({ title: "Повреждение" }, "fixture");
-        // Намеренное повреждение через Storage, не допустимый ввод предметного API.
-        db.update(
-          { ...task, revision: task.revision + 1, data: { ...task.data, dependencies: null } },
-          task.revision,
-        );
-        return { damaged: db.get(task.id)!, generation: db.getGeneration() };
-      });
+      const { damaged, generation } = cli.withDatabase(project, createCorruptedDependencies);
 
-      expect(await cli.error(["task", "dependency", "list", damaged.key], 1)).toMatchObject({
-        code: "CORRUPT_DATA",
-      });
-      expect(
-        await cli.error(
-          [
-            "task",
-            "update",
-            damaged.key,
-            "--title",
-            "Не сохранять",
-            "--if-revision",
-            String(damaged.revision),
-          ],
-          1,
-        ),
-      ).toMatchObject({ code: "CORRUPT_DATA" });
+      const error = await cli.error(["task", "dependency", "list", damaged.key], 1);
+
+      expect(error.code).toBe("CORRUPT_DATA");
       cli.withDatabase(project, (db) => {
         expect(db.get(damaged.id)).toEqual(damaged);
         expect(db.getGeneration()).toBe(generation);
@@ -199,13 +244,40 @@ describe("CLI: задачи", () => {
     });
   });
 
-  test("comment add/get/list сохраняют полный текст без изменения ревизии задачи", async () => {
+  test("обновление задачи с повреждёнными зависимостями возвращает CORRUPT_DATA без записи", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const { damaged, generation } = cli.withDatabase(project, createCorruptedDependencies);
+
+      const error = await cli.error(
+        [
+          "task",
+          "update",
+          damaged.key,
+          "--title",
+          "Не сохранять",
+          "--if-revision",
+          String(damaged.revision),
+        ],
+        1,
+      );
+
+      expect(error.code).toBe("CORRUPT_DATA");
+      cli.withDatabase(project, (db) => {
+        expect(db.get(damaged.id)).toEqual(damaged);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    });
+  });
+
+  test("добавленный комментарий читается целиком без изменения ревизии задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const task = cli.withDatabase(project, (db) =>
         new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
       );
       const body = "# Полный текст комментария\n\n    точный отступ\n";
+
       const commented = await cli.entity([
         "task",
         "comment",
@@ -237,26 +309,26 @@ describe("CLI: задачи", () => {
     });
   });
 
-  test("comment add отклоняет неизвестное поле JSON без публикации комментария", async () => {
+  test("неизвестное поле JSON комментария отклоняется без его публикации", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const task = cli.withDatabase(project, (db) =>
         new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
       );
 
-      expect(
-        await cli.error(
-          [
-            "task",
-            "comment",
-            "add",
-            task.key,
-            "--input",
-            JSON.stringify({ body: "Не сохранять", unknown: true }),
-          ],
-          2,
-        ),
-      ).toMatchObject({ code: "INVALID_ARGUMENT" });
+      const error = await cli.error(
+        [
+          "task",
+          "comment",
+          "add",
+          task.key,
+          "--input",
+          JSON.stringify({ body: "Не сохранять", unknown: true }),
+        ],
+        2,
+      );
+
+      expect(error.code).toBe("INVALID_ARGUMENT");
       const comments = await cli.page(["task", "comment", "list", task.key], objectValue);
       expect(comments.data.items).toEqual([]);
       expect(comments.meta.page.total).toBe(0);

@@ -1,15 +1,32 @@
 import { expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import type { EntityRecord } from "@relay/contracts";
 import { initializeProject, type ProjectLocation } from "@relay/project-runtime";
 import { ProjectDatabase } from "@relay/storage";
-import { runCli, type CliRuntime } from "../../../src/run";
+import { runCli } from "../../../src/app/run";
+import type { CliRuntime } from "../../../src/execution/runtime.types";
 import { entityValue, errorValue, pageValue, successValue } from "./responses";
+import type { CliInvocation } from "./cli-fixture.types";
+import type { ErrorResponse, PageResponse, SuccessResponse } from "./responses.types";
 
+/**
+ * Изолированное файловое окружение теста CLI без общей БД и глобального окружения.
+ * Владелец вызывает close после завершения всех команд и закрытия соединений.
+ */
 class CliFixture {
+  /* Уникальный каталог проекта и RELAY_HOME, удаляемый при закрытии fixture. */
   readonly root: string;
+
+  /* Явные cwd, env и stdin, передаваемые каждому вызову CLI. */
   readonly runtime: CliRuntime;
 
+  /* Локальный RELAY_HOME; не зависит от окружения процесса тестового runner. */
+  private readonly home: string;
+
+  /**
+   * Создаёт пустые изолированные каталоги; при отказе подготовки удаляет их самостоятельно.
+   */
   constructor() {
     const artifacts = resolve(
       import.meta.dir,
@@ -25,24 +42,32 @@ class CliFixture {
       rmSync(this.root, { recursive: true, force: true });
       throw error;
     }
+    this.home = join(this.root, "home");
     this.runtime = {
       cwd,
-      env: { RELAY_HOME: join(this.root, "home"), RELAY_ACTOR: "agent" },
+      env: { RELAY_HOME: this.home, RELAY_ACTOR: "agent" },
       stdin: "",
     };
   }
 
-  /** Подготовка через Runtime/Core отделена от CLI-действия, которое проверяет тест. */
+  /**
+   * Создаёт минимальный проект через Runtime, отделяя подготовку от проверяемой CLI-команды.
+   * Каталог и база принадлежат fixture и удаляются при close.
+   */
   createProject(cwd = this.runtime.cwd): ProjectLocation {
     mkdirSync(cwd, { recursive: true });
     return initializeProject({
       cwd,
-      home: this.runtime.env.RELAY_HOME!,
+      home: this.home,
       name: "Проверка CLI",
       slug: "cli-test",
     });
   }
 
+  /**
+   * Передаёт синхронной операции отдельное соединение и закрывает его даже при отказе.
+   * Соединение нельзя сохранять за пределами callback или передавать асинхронной работе.
+   */
   withDatabase<T>(
     project: ProjectLocation,
     operation: (db: ProjectDatabase) => T & (T extends PromiseLike<unknown> ? never : unknown),
@@ -55,16 +80,28 @@ class CliFixture {
     }
   }
 
-  async invoke(argv: string[], overrides: Partial<CliRuntime> = {}) {
+  /**
+   * Вызывает CLI в изолированном контексте и полностью захватывает оба потока без проверок.
+   */
+  async invoke(
+    argv: readonly string[],
+    overrides: Partial<CliRuntime> = {},
+  ): Promise<CliInvocation> {
     let stdout = "";
     let stderr = "";
     const code = await runCli(
       argv,
       {
-        stdout: (text) => {
+        /**
+         * Накапливает полный stdout только текущего вызова.
+         */
+        stdout: (text): void => {
           stdout += text;
         },
-        stderr: (text) => {
+        /**
+         * Накапливает полный stderr только текущего вызова.
+         */
+        stderr: (text): void => {
           stderr += text;
         },
       },
@@ -73,32 +110,65 @@ class CliFixture {
     return { code, stdout, stderr };
   }
 
-  async success(argv: string[], overrides: Partial<CliRuntime> = {}) {
+  /**
+   * Запрашивает JSON, проверяет нулевой код и пустой stderr, затем декодирует конверт.
+   */
+  async success(
+    argv: readonly string[],
+    overrides: Partial<CliRuntime> = {},
+  ): Promise<SuccessResponse> {
     const answer = await this.invoke([...argv, "--format=json"], overrides);
     expect(answer, `Команда: ${argv.join(" ")}`).toMatchObject({ code: 0, stderr: "" });
     return successValue(JSON.parse(answer.stdout));
   }
 
-  async entity(argv: string[], overrides: Partial<CliRuntime> = {}) {
+  /**
+   * Проверяет успешный вызов и обязательные поля возвращённой записи сущности.
+   */
+  async entity(
+    argv: readonly string[],
+    overrides: Partial<CliRuntime> = {},
+  ): Promise<EntityRecord> {
     return entityValue((await this.success(argv, overrides)).data);
   }
 
-  async page<T>(argv: string[], item: (value: unknown) => T, overrides: Partial<CliRuntime> = {}) {
+  /**
+   * Проверяет успешный вызов, метаданные снимка и каждый элемент страницы через item.
+   */
+  async page<T>(
+    argv: readonly string[],
+    item: (value: unknown) => T,
+    overrides: Partial<CliRuntime> = {},
+  ): Promise<PageResponse<T>> {
     return pageValue(await this.success(argv, overrides), item);
   }
 
-  async error(argv: string[], exitCode: number, overrides: Partial<CliRuntime> = {}) {
+  /**
+   * Проверяет ожидаемый код завершения, пустой stdout и JSON-ошибку в stderr.
+   * Предметный код и сохранность данных проверяет сам тест.
+   */
+  async error(
+    argv: readonly string[],
+    exitCode: number,
+    overrides: Partial<CliRuntime> = {},
+  ): Promise<ErrorResponse> {
     const answer = await this.invoke([...argv, "--format=json"], overrides);
     expect(answer, `Команда: ${argv.join(" ")}`).toMatchObject({ code: exitCode, stdout: "" });
     return errorValue(JSON.parse(answer.stderr));
   }
 
+  /**
+   * Удаляет каталоги fixture; все использующие их команды и соединения уже должны завершиться.
+   */
   close(): void {
     rmSync(this.root, { recursive: true, force: true });
   }
 }
 
-/** Каждому тесту принадлежит собственное окружение; общих hooks и изменяемых переменных нет. */
+/**
+ * Выделяет окружение одному тесту и удаляет его в finally, включая отказ проверок.
+ * Callback обязан дождаться своих CLI-вызовов и закрыть самостоятельно открытые ресурсы.
+ */
 export async function withCliFixture<T>(run: (cli: CliFixture) => Promise<T>): Promise<T> {
   const cli = new CliFixture();
   try {

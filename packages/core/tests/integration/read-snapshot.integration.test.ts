@@ -1,93 +1,107 @@
-import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { describe, expect, test } from "bun:test";
 import { ProjectDatabase } from "@relay/storage";
-import { KnowledgeService } from "../../src/knowledge";
-import { TasksService } from "../../src/tasks";
-import { PlanningService } from "../../src/planning";
-import { HistoryService } from "../../src/history";
+import { HistoryService } from "../../src/history/history";
+import { KnowledgeService } from "../../src/knowledge/knowledge";
+import { PlanningService } from "../../src/planning/planning";
+import { TasksService } from "../../src/tasks/tasks";
+import { entityWriteOptions, withEntityDatabase } from "./helpers/entity-fixture";
 
-test("предметные чтения видят согласованные данные, пока другое соединение удерживает запись", () => {
-  const artifacts = resolve(
-    import.meta.dir,
-    "../../../../.artifacts",
-    new Date().toISOString().slice(0, 10),
-  );
-  mkdirSync(artifacts, { recursive: true });
-  const directory = mkdtempSync(join(artifacts, "core-read-snapshot-"));
-  const writer = ProjectDatabase.create(join(directory, "project.sqlite"), {
-    id: crypto.randomUUID(),
-    name: "Параллельное чтение",
-    slug: "snapshot",
-  });
-  try {
-    const knowledge = new KnowledgeService(writer);
-    const tasks = new TasksService(writer);
-    const planning = new PlanningService(writer);
-    const history = new HistoryService(writer);
-    const document = knowledge.create("document", { name: "Правила", body: "До записи" }, "human");
-    const task = tasks.create({ title: "Работа" }, "human");
-    let plan = planning.create("work-plan", { title: "План", goal: "Проверить работу" }, "human");
-    plan = planning.stage(
-      plan.id,
-      "create",
-      { title: "Этап" },
-      { actor: "human", ifRevision: plan.revision },
-    );
-    const stageId = (plan.data.stages as Array<{ id: string }>)[0]!.id;
-    plan = planning.stageTask(plan.id, stageId, task.id, false, {
-      actor: "human",
-      ifRevision: plan.revision,
-    });
-    const session = history.start({ title: "Проверка" }, "agent");
-    const generation = writer.getGeneration();
-
-    writer.transaction(() => {
-      knowledge.update(
+describe("Предметное чтение при активном писателе", () => {
+  test("удерживаемая запись оставляет прежний снимок доступным всем предметным чтениям", () => {
+    withEntityDatabase((writer) => {
+      const knowledge = new KnowledgeService(writer);
+      const tasks = new TasksService(writer);
+      const planning = new PlanningService(writer);
+      const history = new HistoryService(writer);
+      const document = knowledge.create(
         "document",
-        document.id,
-        { body: "После записи" },
-        { actor: "human", ifRevision: document.revision },
+        { name: "Правила", body: "До записи" },
+        "human",
       );
-      tasks.move(task.id, { column: "done" }, { actor: "human", ifRevision: task.revision });
+      const task = tasks.create({ title: "Работа" }, "human");
+      const initialPlan = planning.create(
+        "work-plan",
+        { title: "План", goal: "Проверить работу" },
+        "human",
+      );
+      const stagedPlan = planning.stage(
+        initialPlan.id,
+        "create",
+        { title: "Этап" },
+        entityWriteOptions(initialPlan, "human"),
+      );
+      const stage = stagedPlan.data.stages[0];
+      if (!stage) {
+        throw new Error("Подготовка плана не создала этап");
+      }
+      const plan = planning.stageTask(
+        stagedPlan.id,
+        stage.id,
+        task.id,
+        false,
+        entityWriteOptions(stagedPlan, "human"),
+      );
+      const session = history.start({ title: "Проверка" }, "agent");
+      const generation = writer.getGeneration();
 
-      // Читатель открывается уже при удерживаемом write-lock. BEGIN IMMEDIATE
-      // в любом из этих чтений даст STORAGE_BUSY вместо прежнего снимка WAL.
+      writer.transaction(() => {
+        knowledge.update(
+          "document",
+          document.id,
+          { body: "После записи" },
+          entityWriteOptions(document, "human"),
+        );
+        tasks.move(task.id, { column: "done" }, entityWriteOptions(task, "human"));
+
+        // Читатель открывается уже при write-lock. BEGIN IMMEDIATE в любом из чтений
+        // дал бы STORAGE_BUSY; незавершённая запись должна остаться невидимой в WAL.
+        const reader = ProjectDatabase.open(writer.path);
+        try {
+          const readKnowledge = new KnowledgeService(reader);
+          const readTasks = new TasksService(reader);
+          const readPlanning = new PlanningService(reader);
+          const readHistory = new HistoryService(reader);
+
+          const storedDocument = readKnowledge.get("document", document.id);
+          const documents = readKnowledge.list("document");
+          const storedTasks = readTasks.list();
+          const taskProgress = readTasks.progress(task.id);
+          const dependencies = readTasks.dependencies(task.id);
+          const planProgress = readPlanning.progress("work-plan", plan.id);
+          const sessions = readHistory.list();
+          const tree = readHistory.tree(session.id);
+          const context = readHistory.context(session.id);
+          const intents = readHistory.intents(session.id);
+          const checkpoints = readHistory.history(session.id);
+
+          expect(storedDocument).toEqual(document);
+          expect(documents).toEqual([document]);
+          expect(storedTasks).toEqual([task]);
+          expect(taskProgress.completed).toBe(false);
+          expect(dependencies).toEqual([]);
+          expect(planProgress.completed).toBe(false);
+          expect(sessions).toEqual([session]);
+          expect(tree).toHaveLength(1);
+          expect(context.session).toEqual(session);
+          expect(intents).toEqual([]);
+          expect(checkpoints).toEqual([]);
+          expect(reader.getGeneration()).toBe(generation);
+        } finally {
+          reader.close();
+        }
+      });
+
+      // После commit новое соединение подтверждает, что конкурентная запись состоялась.
       const reader = ProjectDatabase.open(writer.path);
       try {
-        const readKnowledge = new KnowledgeService(reader);
-        const readTasks = new TasksService(reader);
-        const readPlanning = new PlanningService(reader);
-        const readHistory = new HistoryService(reader);
-        expect(readKnowledge.get("document", document.id).data.body).toBe("До записи");
-        expect(readKnowledge.list("document")[0]!.data.body).toBe("До записи");
-        expect(readTasks.list()[0]!.data.column).toBe("inbox");
-        expect(readTasks.progress(task.id).completed).toBe(false);
-        expect(readTasks.dependencies(task.id)).toEqual([]);
-        expect(readPlanning.progress("work-plan", plan.id).completed).toBe(false);
-        expect(readHistory.list()).toHaveLength(1);
-        expect(readHistory.tree(session.id)).toHaveLength(1);
-        expect(readHistory.context(session.id).session.id).toBe(session.id);
-        expect(readHistory.intents(session.id)).toEqual([]);
-        expect(readHistory.history(session.id)).toEqual([]);
-        expect(reader.getGeneration()).toBe(generation);
+        expect(new KnowledgeService(reader).get("document", document.id).data.body).toBe(
+          "После записи",
+        );
+        expect(new TasksService(reader).progress(task.id).completed).toBe(true);
+        expect(reader.getGeneration()).toBeGreaterThan(generation);
       } finally {
         reader.close();
       }
     });
-
-    const reader = ProjectDatabase.open(writer.path);
-    try {
-      expect(new KnowledgeService(reader).get("document", document.id).data.body).toBe(
-        "После записи",
-      );
-      expect(new TasksService(reader).progress(task.id).completed).toBe(true);
-      expect(reader.getGeneration()).toBeGreaterThan(generation);
-    } finally {
-      reader.close();
-    }
-  } finally {
-    writer.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
+  });
 });

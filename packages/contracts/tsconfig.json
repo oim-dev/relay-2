@@ -1,4 +1,5 @@
 {
   "extends": "@relay/typescript-config/base.json",
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/**/*.unit.test.ts"]
 }

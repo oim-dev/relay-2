@@ -1,43 +1,21 @@
-import type { EntityKind } from "./identity";
-
-export { ENTITY_KINDS, isEntityKind, validateActor, type EntityKind } from "./identity";
-export * from "./knowledge";
-export * from "./tasks";
-export * from "./planning";
-export * from "./history";
-export * from "./pagination";
-export * from "./records";
-
-export interface EntityRecord {
-  id: string;
-  kind: EntityKind;
-  key: string;
-  revision: number;
-  createdAt: string;
-  updatedAt: string;
-  createdBy: string;
-  updatedBy: string;
-  data: Record<string, unknown>;
-}
-
-/** Идентичность разрешённой ссылки без содержания сущности и журнала комментариев. */
-export type EntityIdentity = Pick<EntityRecord, "id" | "kind" | "key">;
-
-export interface WriteOptions {
-  actor: string;
-  ifRevision: number;
-}
-
-export class RelayError extends Error {
-  readonly code: string;
-  readonly exitCode: number;
-  readonly details?: Record<string, unknown>;
-
-  constructor(code: string, message: string, exitCode = 1, details?: Record<string, unknown>) {
-    super(message);
-    this.name = "RelayError";
-    this.code = code;
-    this.exitCode = exitCode;
-    if (details !== undefined) this.details = details;
-  }
-}
+export {
+  ENTITY_KINDS,
+  ENTITY_SLUG_LENGTH,
+  PROJECT_NAME_LENGTH,
+} from "./entities/identity.constants";
+export { isEntityKind, isEntitySlug, isProjectName, validateActor } from "./entities/identity";
+export type { EntityKind } from "./entities/identity.types";
+export type { EntityRecord, EntityIdentity, WriteOptions } from "./entities/entity.types";
+export { RelayError } from "./errors/relay-error";
+export * from "./knowledge/knowledge.constants";
+export type * from "./knowledge/knowledge.types";
+export * from "./tasks/tasks.constants";
+export type * from "./tasks/tasks.types";
+export * from "./planning/planning.constants";
+export type * from "./planning/planning.types";
+export type * from "./planning/planning-input.types";
+export * from "./history/history.constants";
+export type * from "./history/history.types";
+export { validateEntityPageRequest } from "./pagination/pagination";
+export type * from "./pagination/pagination.types";
+export type * from "./project-entity.types";

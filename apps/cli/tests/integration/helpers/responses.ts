@@ -1,73 +1,56 @@
 import assert from "node:assert/strict";
-import type { EntityKind, EntityRecord } from "@relay/contracts";
-import type { Page } from "../../../src/pagination";
+import { isEntityKind, type EntityRecord } from "@relay/contracts";
+import type { ErrorResponse, PageResponse, SuccessResponse } from "./responses.types";
 
-export interface SuccessResponse {
-  data: unknown;
-  meta?: Record<string, unknown>;
+/**
+ * Сужает внешнее значение до словаря полей JSON, исключая массивы и null.
+ */
+function isObjectValue(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-export interface PageResponse<T> {
-  data: Record<string, unknown> & { items: T[] };
-  meta: { page: Page };
-}
-
-export interface ErrorResponse {
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-}
-
+/**
+ * Проверяет объект на JSON-границе; неверная форма немедленно завершает тест.
+ */
 export function objectValue(value: unknown): Record<string, unknown> {
-  assert(
-    value !== null && typeof value === "object" && !Array.isArray(value),
-    "Ожидался JSON-объект",
-  );
-  return value as Record<string, unknown>;
+  assert(isObjectValue(value), "Ожидался JSON-объект");
+  return value;
 }
 
+/**
+ * Проверяет строку ответа, сохраняя пустое значение и значимые пробелы.
+ */
 export function stringValue(value: unknown): string {
-  assert.equal(typeof value, "string", "Ожидалась строка");
-  return value as string;
+  assert(typeof value === "string", "Ожидалась строка");
+  return value;
 }
 
+/**
+ * Проверяет массив ответа; декодирование элементов остаётся у вызывающего теста.
+ */
 export function arrayValue(value: unknown): unknown[] {
   assert(Array.isArray(value), "Ожидался массив");
   return value;
 }
 
+/**
+ * Проверяет числовое поле ответа, отвергая NaN и бесконечности.
+ */
 function numberValue(value: unknown): number {
   assert(typeof value === "number" && Number.isFinite(value), "Ожидалось конечное число");
   return value;
 }
 
-const kinds: readonly EntityKind[] = [
-  "project",
-  "product",
-  "feature",
-  "scenario",
-  "application",
-  "implementation",
-  "board",
-  "task",
-  "document",
-  "work-plan",
-  "release",
-  "work-session",
-  "work-checkpoint",
-];
-
-/** Тип результата подтверждаем на JSON-границе, а не произвольным success<T>(). */
+/**
+ * Декодирует запись на JSON-границе без предположений о предметной форме data.
+ */
 export function entityValue(value: unknown): EntityRecord {
   const record = objectValue(value);
   const kind = stringValue(record.kind);
-  assert(
-    kinds.some((candidate) => candidate === kind),
-    `Неизвестный вид сущности: ${kind}`,
-  );
+  assert(isEntityKind(kind), `Неизвестный вид сущности: ${kind}`);
   return {
     id: stringValue(record.id),
-    kind: kind as EntityKind,
+    kind,
     key: stringValue(record.key),
     revision: numberValue(record.revision),
     data: objectValue(record.data),
@@ -78,6 +61,9 @@ export function entityValue(value: unknown): EntityRecord {
   };
 }
 
+/**
+ * Проверяет успешный конверт, обязательное data и форму необязательных метаданных.
+ */
 export function successValue(value: unknown): SuccessResponse {
   const response = objectValue(value);
   assert.equal(response.ok, true, "Ожидался успешный ответ CLI");
@@ -88,6 +74,9 @@ export function successValue(value: unknown): SuccessResponse {
   };
 }
 
+/**
+ * Проверяет конверт отказа и декодирует код, сообщение и необязательные детали.
+ */
 export function errorValue(value: unknown): ErrorResponse {
   const response = objectValue(value);
   assert.equal(response.ok, false, "Ожидался ответ с ошибкой CLI");
@@ -99,6 +88,10 @@ export function errorValue(value: unknown): ErrorResponse {
   };
 }
 
+/**
+ * Декодирует окно списка и подтверждает snapshot-контракт метаданных.
+ * Декодер item проверяет каждый элемент; неверная форма не заменяется пустой страницей.
+ */
 export function pageValue<T>(
   response: SuccessResponse,
   item: (value: unknown) => T,

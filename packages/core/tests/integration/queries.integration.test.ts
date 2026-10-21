@@ -1,292 +1,585 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { RelayError, type EntityRecord } from "@relay/contracts";
+import { describe, expect, spyOn, test } from "bun:test";
+import type { EntityKind, EntityRecord, WriteOptions } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
-import { EntityService } from "../../src/entities";
-import { HistoryService } from "../../src/history";
-import { KnowledgeService } from "../../src/knowledge";
-import { PlanningService } from "../../src/planning";
-import { QueryService } from "../../src/queries";
-import { TasksService } from "../../src/tasks";
+import { HistoryService } from "../../src/history/history";
+import { KnowledgeService } from "../../src/knowledge/knowledge";
+import { PlanningService } from "../../src/planning/planning";
+import { QueryService } from "../../src/queries/queries";
+import { TasksService } from "../../src/tasks/tasks";
+import { entityWriteOptions, expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
 
-let directory: string;
-let db: ProjectDatabase;
-let queries: QueryService;
-let entities: EntityService;
-let knowledge: KnowledgeService;
-let tasks: TasksService;
 const actor = "автор-не-для-поиска";
-const write = (entity: EntityRecord) => ({ actor, ifRevision: entity.revision });
+const invalidSearches = [
+  { name: "пустой запрос", input: { q: "", kind: "task" } },
+  { name: "неизвестное поле", input: { q: "Работа", unexpected: true } },
+] as const;
+const referenceForms = [
+  { name: "ID", field: "id", typed: false },
+  { name: "алиас", field: "alias", typed: false },
+  { name: "ключ", field: "key", typed: false },
+  { name: "типизированный ID", field: "id", typed: true },
+  { name: "типизированный алиас", field: "alias", typed: true },
+  { name: "типизированный ключ", field: "key", typed: true },
+] as const;
+const excludedMetadata = [
+  { name: "автор", source: "actor" },
+  { name: "имя технического поля", source: "field" },
+  { name: "дата создания", source: "date" },
+] as const;
+const corruptedReads = [
+  { operation: "get", code: "CORRUPT_DATA" },
+  { operation: "search", code: "CORRUPT_DATA" },
+  { operation: "overview", code: "CORRUPT_DATA" },
+  { operation: "check", code: "INTEGRITY_ERROR" },
+] as const;
+const sectionStates = [
+  { name: "активные", retired: false },
+  { name: "удалённые", retired: true },
+] as const;
 
-beforeEach(() => {
-  const artifacts = resolve(
-    import.meta.dir,
-    "../../../../.artifacts",
-    new Date().toISOString().slice(0, 10),
-  );
-  mkdirSync(artifacts, { recursive: true });
-  directory = mkdtempSync(join(artifacts, "queries-integration-"));
-  db = ProjectDatabase.create(join(directory, "project.sqlite"), {
-    id: crypto.randomUUID(),
-    name: "Запросы",
-    slug: "queries",
-  });
-  queries = new QueryService(db);
-  entities = new EntityService(db);
-  knowledge = new KnowledgeService(db);
-  tasks = new TasksService(db);
-});
-afterEach(() => {
-  db.close();
-  rmSync(directory, { recursive: true, force: true });
-});
-
-function failure(operation: () => unknown, code: string): RelayError {
-  try {
-    operation();
-    throw new Error(`Ожидалась ошибка ${code}`);
-  } catch (error) {
-    expect(error).toBeInstanceOf(RelayError);
-    expect((error as RelayError).code).toBe(code);
-    return error as RelayError;
-  }
+/**
+ * Передаёт ревизию подготовленного снимка и технического автора поиска без перечитывания БД.
+ */
+function write(entity: EntityRecord): WriteOptions {
+  return entityWriteOptions(entity, actor);
 }
 
-describe("QueryService с настоящей SQLite", () => {
-  test("поиск читает предметные тексты, включая критерии, этапы и пояснения связей", () => {
-    const feature = knowledge.create(
-      "feature",
-      { name: "Яркое название", description: "Требование шага" },
-      actor,
-    );
-    const task = tasks.create(
-      {
-        title: "Работа",
-        acceptanceCriteria: [{ title: "Критерий", description: "Уникальный-критерий" }],
-      },
-      actor,
-    );
-    tasks.comment(task.id, "Секретный-комментарий", actor);
-    const document = knowledge.create(
-      "document",
-      { name: "Документ", body: "Глубокий Markdown\n\n    содержание" },
-      actor,
-    );
-    knowledge.linkDocument(document.id, feature.id, {
-      ...write(document),
-      description: "Уникальное-основание",
-    });
-    const planning = new PlanningService(db);
-    const plan = planning.create("work-plan", { title: "План", goal: "Результат" }, actor);
-    planning.stage(plan.id, "create", { title: "Этап", outcome: "Уникальный-итог" }, write(plan));
+describe("Предметные тексты поиска", () => {
+  test("название фичи находится без учёта регистра", () => {
+    withEntityDatabase((db) => {
+      const feature = new KnowledgeService(db).create(
+        "feature",
+        { name: "Яркое название", description: "Требование шага" },
+        actor,
+      );
+      const queries = new QueryService(db);
 
-    for (const [q, expected] of [
-      ["ЯРКОЕ", feature.id],
-      ["уникальный-критерий", task.id],
-      ["Глубокий Markdown", document.id],
-      ["Уникальное-основание", document.id],
-      ["Уникальный-итог", plan.id],
-    ]) {
-      expect(queries.search({ q }).map((item) => item.id)).toEqual([expected!]);
-    }
-    for (const q of [actor, "Секретный-комментарий", "createdAt", feature.createdAt])
-      expect(queries.search({ q })).toEqual([]);
-    expect(queries.search({ q: "Яркое", kind: "document" })).toEqual([]);
-    failure(() => queries.search({ q: "", kind: "task" }), "INVALID_ARGUMENT");
-    failure(() => queries.search({ q: "Работа", unexpected: true }), "INVALID_ARGUMENT");
-  });
+      const result = queries.search({ q: "ЯРКОЕ" });
 
-  test("точные алиасы и типизированные ссылки разрешаются общим EntityService", () => {
-    const feature = knowledge.create("feature", { name: "Поиск", description: "Описание" }, actor);
-    const renamed = knowledge.rename("feature", feature.id, "FIND", write(feature));
-    for (const ref of [
-      feature.id,
-      feature.key,
-      renamed.key,
-      `feature:${feature.id}`,
-      `feature:${feature.key}`,
-      `feature:${renamed.key}`,
-    ]) {
-      expect(queries.get(ref).id).toBe(feature.id);
-      expect(queries.search({ q: ref }).map((item) => item.id)).toEqual([feature.id]);
-    }
-    expect(queries.search({ q: feature.key, kind: "task" })).toEqual([]);
-    expect(queries.search({ q: "FEATURE-" })).toEqual([]);
-    failure(() => queries.get(`task:${feature.id}`), "NOT_FOUND");
-    failure(() => queries.get("unsupported:KEY"), "INVALID_ARGUMENT");
-  });
-
-  test("обзор и status сохраняют полные счётчики и формы результатов", () => {
-    const blocker = tasks.create({ title: "Блокер" }, actor);
-    tasks.create({ title: "Зависимая", column: "ready", dependencies: [blocker.id] }, actor);
-    const overview = queries.overview();
-    expect(overview.project.id).toBe(db.projectId);
-    expect(overview.items).toHaveLength(5);
-    expect(overview.counts.task).toBe(2);
-    expect(overview.tasks).toMatchObject({
-      total: 2,
-      blocked: 1,
-      columns: { inbox: 1, ready: 1, done: 0 },
-    });
-    const fullRead = spyOn(db, "list");
-    try {
-      const status = queries.status();
-      expect(status).toMatchObject({
-        projectId: db.projectId,
-        databasePath: db.path,
-        generation: overview.generation,
-        records: 5,
-      });
-      expect(status.bytes).toBeGreaterThan(0);
-      expect(fullRead).not.toHaveBeenCalled();
-    } finally {
-      fullRead.mockRestore();
-    }
-    expect(queries.check()).toEqual({
-      projectId: db.projectId,
-      generation: overview.generation,
-      valid: true,
-      records: 5,
-      issues: [],
+      expect(result).toEqual([feature]);
     });
   });
 
-  test("doctor проверяет реальные ссылки, их типы и граф обязательств", () => {
-    const first = tasks.create({ title: "Первая" }, actor);
-    const second = tasks.create({ title: "Вторая", dependencies: [first.id] }, actor);
-    db.update(
-      {
-        ...first,
-        revision: 2,
-        data: {
-          ...first.data,
-          boardId: second.id,
-          dependencies: [second.id],
-          targets: ["missing-id"],
+  test("описание критерия включено в поиск задачи", () => {
+    withEntityDatabase((db) => {
+      const task = new TasksService(db).create(
+        {
+          title: "Работа",
+          acceptanceCriteria: [{ title: "Критерий", description: "Уникальный-критерий" }],
         },
-      },
-      first.revision,
-    );
-    const error = failure(() => queries.check(), "INTEGRITY_ERROR");
-    expect(error.exitCode).toBe(1);
-    expect(error.details?.valid).toBe(false);
-    expect(String(error.details?.issues)).toContain("missing-id");
-    expect(String(error.details?.issues)).toContain("тип ссылки");
-    expect(String(error.details?.issues)).toContain("TASK_CYCLE");
-  });
+        actor,
+      );
+      const queries = new QueryService(db);
 
-  test("обычные запросы отвергают повреждённые данные, а doctor включает их в диагностику", () => {
-    const document = knowledge.create("document", { name: "Документ", body: "Содержание" }, actor);
-    // Намеренное повреждение вне предметного API: null не означает отсутствие связей.
-    const damaged = {
-      ...document,
-      revision: document.revision + 1,
-      data: { ...document.data, relations: null },
-    };
-    db.update(damaged, document.revision);
-    const generation = db.getGeneration();
-    failure(() => queries.get(document.id), "CORRUPT_DATA");
-    failure(() => queries.search({ q: "Документ" }), "CORRUPT_DATA");
-    failure(() => queries.overview(), "CORRUPT_DATA");
-    const error = failure(() => queries.check(), "INTEGRITY_ERROR");
-    expect(error.message).toContain(document.key);
-    expect(db.get(document.id)).toEqual(damaged);
-    expect(db.getGeneration()).toBe(generation);
-  });
+      const result = queries.search({ q: "уникальный-критерий" });
 
-  test("doctor различает удалённый и неизвестный раздел, проверяя общий индекс один раз", () => {
-    const project = knowledge.changeSection(
-      "create",
-      { id: "guides", name: "Руководства" },
-      write(knowledge.get("project")),
-    );
-    const first = knowledge.create(
-      "document",
-      { name: "Первый", body: "Первое руководство", sectionId: "guides" },
-      actor,
-    );
-    const second = knowledge.create(
-      "document",
-      { name: "Второй", body: "Второе руководство", sectionId: "guides" },
-      actor,
-    );
-    knowledge.changeSection("remove", { id: "guides" }, write(project));
-    const before = db.list();
-    const generation = db.getGeneration();
-    const reads = spyOn(db, "get");
-    try {
-      expect(queries.check().valid).toBe(true);
-      expect(reads.mock.calls.filter(([ref]) => ref === db.projectId)).toHaveLength(1);
-    } finally {
-      reads.mockRestore();
-    }
-    expect(knowledge.get("document", first.id).data.sectionId).toBeNull();
-    expect(db.list()).toEqual(before);
-    expect(db.getGeneration()).toBe(generation);
-
-    // Повреждаем только ссылку второго документа, а не имитируем легальное удаление раздела.
-    const damaged = {
-      ...second,
-      revision: second.revision + 1,
-      data: { ...second.data, sectionId: "never-existed" },
-    };
-    db.update(damaged, second.revision);
-    const damagedGeneration = db.getGeneration();
-    failure(() => queries.get(second.id), "CORRUPT_DATA");
-    const error = failure(() => queries.check(), "INTEGRITY_ERROR");
-    expect(error.message).toContain(second.key);
-    expect(db.get(second.id)).toEqual(damaged);
-    expect(db.get(first.id)).toEqual(first);
-    expect(db.getGeneration()).toBe(damagedGeneration);
-  });
-
-  test("doctor не принимает дублированный паспорт продукта и проверяет записи всех областей", () => {
-    const feature = knowledge.create("feature", { name: "Фича", description: "Содержание" }, actor);
-    const app = knowledge.create(
-      "application",
-      { name: "Web", slug: "web", description: "Интерфейс" },
-      actor,
-    );
-    knowledge.replaceParticipation(app.id, [feature.id], write(app));
-    const history = new HistoryService(db);
-    const session = history.start({ title: "Поручение" }, actor);
-    history.checkpoint(
-      session.id,
-      "open",
-      { title: "Намерение", body: "Материал", runId: session.data.currentRunId },
-      write(session),
-    );
-    expect(queries.check().valid).toBe(true);
-    entities.create("product", "PRODUCT", {}, actor);
-    expect(failure(() => queries.check(), "INTEGRITY_ERROR").message).toContain(
-      "единственный паспорт",
-    );
-  });
-
-  test("обзор удерживает поколение и состав снимка, пока другое соединение сохраняет данные", () => {
-    const writer = ProjectDatabase.open(db.path);
-    const originalList = db.list.bind(db);
-    const generation = db.getGeneration();
-    let written = false;
-    const list = spyOn(db, "list").mockImplementation((kind) => {
-      const records = originalList(kind);
-      if (!written) {
-        written = true;
-        new TasksService(writer).create({ title: "После начала снимка" }, actor);
-      }
-      return records;
+      expect(result).toEqual([task]);
     });
-    try {
+  });
+
+  test("полный Markdown документа включён в поиск", () => {
+    withEntityDatabase((db) => {
+      const document = new KnowledgeService(db).create(
+        "document",
+        { name: "Документ", body: "Глубокий Markdown\n\n    содержание" },
+        actor,
+      );
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "Глубокий Markdown" });
+
+      expect(result).toEqual([document]);
+    });
+  });
+
+  test("пояснение связи включено в поиск документа", () => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const feature = knowledge.create("feature", { name: "Цель" }, actor);
+      const document = knowledge.create("document", { name: "Документ", body: "Текст" }, actor);
+      const linked = knowledge.linkDocument(document.id, feature.id, {
+        ...write(document),
+        description: "Уникальное-основание",
+      });
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "Уникальное-основание" });
+
+      expect(result).toEqual([linked]);
+    });
+  });
+
+  test("ожидаемый итог этапа включён в поиск плана", () => {
+    withEntityDatabase((db) => {
+      const planning = new PlanningService(db);
+      const plan = planning.create("work-plan", { title: "План", goal: "Результат" }, actor);
+      const staged = planning.stage(
+        plan.id,
+        "create",
+        { title: "Этап", outcome: "Уникальный-итог" },
+        write(plan),
+      );
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "Уникальный-итог" });
+
+      expect(result).toEqual([staged]);
+    });
+  });
+
+  test("журнал комментариев не включён в поиск содержания задачи", () => {
+    withEntityDatabase((db) => {
+      const tasks = new TasksService(db);
+      const task = tasks.create({ title: "Работа" }, actor);
+      tasks.comment(task.id, "Секретный-комментарий", actor);
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "Секретный-комментарий" });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  test.each(excludedMetadata)("$name не включается в поиск содержания", ({ source }) => {
+    withEntityDatabase((db) => {
+      const feature = new KnowledgeService(db).create("feature", { name: "Фича" }, actor);
+      let q = actor;
+      if (source === "field") {
+        q = "createdAt";
+      } else if (source === "date") {
+        q = feature.createdAt;
+      }
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  test("фильтр вида исключает текстовое совпадение другой области", () => {
+    withEntityDatabase((db) => {
+      new KnowledgeService(db).create("feature", { name: "Яркое название" }, actor);
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "Яркое", kind: "document" });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  test.each(invalidSearches)("$name отклоняется с INVALID_ARGUMENT", ({ input }) => {
+    withEntityDatabase((db) => {
+      const queries = new QueryService(db);
+
+      expectRelayError(() => queries.search(input), "INVALID_ARGUMENT");
+    });
+  });
+});
+
+describe("Адреса в get и поиске", () => {
+  test.each(referenceForms)("$name после переименования находит ту же фичу", ({ field, typed }) => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const initial = knowledge.create(
+        "feature",
+        { name: "Поиск", description: "Описание" },
+        actor,
+      );
+      const renamed = knowledge.rename("feature", initial.id, "FIND", write(initial));
+      const address = field === "alias" ? initial.key : renamed[field];
+      const ref = typed ? `feature:${address}` : address;
+      const queries = new QueryService(db);
+
+      const exact = queries.get(ref);
+      const found = queries.search({ q: ref });
+
+      expect(exact).toEqual(renamed);
+      expect(found).toEqual([renamed]);
+    });
+  });
+
+  test("фильтр вида исключает точное совпадение алиаса чужой области", () => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const feature = knowledge.create("feature", { name: "Поиск" }, actor);
+      knowledge.rename("feature", feature.id, "FIND", write(feature));
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: feature.key, kind: "task" });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  test("часть старого алиаса не считается точным адресом", () => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const feature = knowledge.create("feature", { name: "Поиск" }, actor);
+      knowledge.rename("feature", feature.id, "FIND", write(feature));
+      const queries = new QueryService(db);
+
+      const result = queries.search({ q: "FEATURE-" });
+
+      expect(result).toEqual([]);
+    });
+  });
+
+  test("типизированная ссылка чужого вида даёт NOT_FOUND", () => {
+    withEntityDatabase((db) => {
+      const feature = new KnowledgeService(db).create("feature", { name: "Поиск" }, actor);
+      const queries = new QueryService(db);
+
+      expectRelayError(() => queries.get(`task:${feature.id}`), "NOT_FOUND");
+    });
+  });
+
+  test("неизвестный вид в ссылке даёт INVALID_ARGUMENT", () => {
+    withEntityDatabase((db) => {
+      const queries = new QueryService(db);
+
+      expectRelayError(() => queries.get("unsupported:KEY"), "INVALID_ARGUMENT");
+    });
+  });
+});
+
+describe("Обзор и стоимость status", () => {
+  test("обзор включает весь состав и считает блокировку незавершённой зависимостью", () => {
+    withEntityDatabase((db) => {
+      const tasks = new TasksService(db);
+      const blocker = tasks.create({ title: "Блокер" }, actor);
+      const dependent = tasks.create(
+        { title: "Зависимая", column: "ready", dependencies: [blocker.id] },
+        actor,
+      );
+      const queries = new QueryService(db);
+
       const overview = queries.overview();
-      expect(overview.generation).toBe(generation);
-      expect(overview.counts.task).toBe(0);
-      expect(overview.tasks.total).toBe(0);
-    } finally {
-      list.mockRestore();
-      writer.close();
-    }
-    expect(queries.overview().counts.task).toBe(1);
-    expect(db.getGeneration()).toBeGreaterThan(generation);
+
+      expect(overview.project.id).toBe(db.projectId);
+      expect(overview.items).toHaveLength(5);
+      expect(overview.items).toEqual(expect.arrayContaining([blocker, dependent]));
+      expect(overview.counts.task).toBe(2);
+      expect(overview.tasks).toMatchObject({
+        total: 2,
+        blocked: 1,
+        columns: { inbox: 1, ready: 1, done: 0 },
+      });
+    });
+  });
+
+  test("status возвращает полный счётчик и поколение без чтения списка карточек", () => {
+    withEntityDatabase((db) => {
+      new TasksService(db).create({ title: "Работа" }, actor);
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+      const fullRead = spyOn(db, "list");
+      try {
+        const status = queries.status();
+
+        expect(status).toMatchObject({
+          projectId: db.projectId,
+          databasePath: db.path,
+          generation,
+          records: 4,
+        });
+        expect(status.bytes).toBeGreaterThan(0);
+        expect(fullRead).not.toHaveBeenCalled();
+      } finally {
+        fullRead.mockRestore();
+      }
+    });
+  });
+
+  test("commit другого соединения между чтениями не меняет поколение и состав обзора", () => {
+    withEntityDatabase((db) => {
+      const queries = new QueryService(db);
+      const writer = ProjectDatabase.open(db.path);
+      /**
+       * Сохраняет настоящий метод чтения, чтобы перехват не рекурсировал в spy.
+       */
+      const originalList: (kind?: EntityKind) => EntityRecord[] = db.list.bind(db);
+      const generation = db.getGeneration();
+      let written = false;
+      const list = spyOn(db, "list").mockImplementation((kind) => {
+        const records = originalList(kind);
+        if (!written) {
+          // Commit попадает строго между чтением состава и остальных частей обзора.
+          written = true;
+          new TasksService(writer).create({ title: "После начала снимка" }, actor);
+        }
+        return records;
+      });
+      try {
+        const overview = queries.overview();
+
+        expect(written).toBe(true);
+        expect(overview.generation).toBe(generation);
+        expect(overview.items).toHaveLength(3);
+        expect(overview.counts.task).toBe(0);
+        expect(overview.tasks.total).toBe(0);
+      } finally {
+        list.mockRestore();
+        writer.close();
+      }
+      expect(queries.overview().counts.task).toBe(1);
+      expect(db.getGeneration()).toBeGreaterThan(generation);
+    });
+  });
+});
+
+describe("Диагностика целостности проекта", () => {
+  test("валидный проект возвращает проверенный состав и пустой список нарушений", () => {
+    withEntityDatabase((db) => {
+      const tasks = new TasksService(db);
+      const blocker = tasks.create({ title: "Блокер" }, actor);
+      tasks.create({ title: "Зависимая", dependencies: [blocker.id] }, actor);
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      const result = queries.check();
+
+      expect(result).toEqual({
+        projectId: db.projectId,
+        generation,
+        valid: true,
+        records: 5,
+        issues: [],
+      });
+    });
+  });
+
+  test("сочетание пропавшей цели, неверного вида и цикла возвращает все нарушения без записи", () => {
+    withEntityDatabase((db) => {
+      const tasks = new TasksService(db);
+      const first = tasks.create({ title: "Первая" }, actor);
+      const second = tasks.create({ title: "Вторая", dependencies: [first.id] }, actor);
+      // Намеренно повреждаем несколько связей через Storage: doctor должен собрать их вместе.
+      db.update(
+        {
+          ...first,
+          revision: first.revision + 1,
+          data: {
+            ...first.data,
+            boardId: second.id,
+            dependencies: [second.id],
+            targets: ["missing-id"],
+          },
+        },
+        first.revision,
+      );
+      const snapshot = db.list();
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      const error = expectRelayError(() => queries.check(), "INTEGRITY_ERROR");
+
+      expect(error.exitCode).toBe(1);
+      expect(error.details).toMatchObject({
+        valid: false,
+        issues: expect.arrayContaining([
+          expect.stringContaining("missing-id"),
+          expect.stringContaining("тип ссылки"),
+          expect.stringContaining("TASK_CYCLE"),
+        ]),
+      });
+      expect(db.list()).toEqual(snapshot);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test.each(corruptedReads)(
+    "$operation отклоняет повреждённые отношения без изменения документа",
+    ({ operation, code }) => {
+      withEntityDatabase((db) => {
+        const document = new KnowledgeService(db).create(
+          "document",
+          { name: "Документ", body: "Содержание" },
+          actor,
+        );
+        // Намеренное повреждение вне предметного API: null не означает отсутствие связей.
+        const corruptedRecord = {
+          ...document,
+          revision: document.revision + 1,
+          data: { ...document.data, relations: null },
+        };
+        db.update(corruptedRecord, document.revision);
+        const generation = db.getGeneration();
+        const queries = new QueryService(db);
+
+        const error = expectRelayError(() => {
+          switch (operation) {
+            case "get":
+              return queries.get(document.id);
+            case "search":
+              return queries.search({ q: "Документ" });
+            case "overview":
+              return queries.overview();
+            case "check":
+              return queries.check();
+          }
+        }, code);
+
+        if (operation === "check") {
+          expect(error.message).toContain(document.key);
+        }
+        expect(db.get(document.id)).toEqual(corruptedRecord);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test.each(sectionStates)(
+    "$name разделы проверяются одним общим индексом без записи",
+    ({ retired }) => {
+      withEntityDatabase((db) => {
+        const knowledge = new KnowledgeService(db);
+        const project = knowledge.changeSection(
+          "create",
+          { id: "guides", name: "Руководства" },
+          write(knowledge.get("project")),
+        );
+        const first = knowledge.create(
+          "document",
+          { name: "Первый", body: "Первое руководство", sectionId: "guides" },
+          actor,
+        );
+        knowledge.create(
+          "document",
+          { name: "Второй", body: "Второе руководство", sectionId: "guides" },
+          actor,
+        );
+        if (retired) {
+          knowledge.changeSection("remove", { id: "guides" }, write(project));
+        }
+        const snapshot = db.list();
+        const generation = db.getGeneration();
+        const queries = new QueryService(db);
+        const reads = spyOn(db, "get");
+        try {
+          const result = queries.check();
+
+          expect(result).toEqual({
+            projectId: db.projectId,
+            generation,
+            valid: true,
+            records: 5,
+            issues: [],
+          });
+          expect(reads.mock.calls.filter(([ref]) => ref === db.projectId)).toHaveLength(1);
+        } finally {
+          reads.mockRestore();
+        }
+        expect(knowledge.get("document", first.id).data.sectionId).toBe(retired ? null : "guides");
+        expect(db.list()).toEqual(snapshot);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test("неизвестный раздел диагностируется, а легально удалённый сохраняется без записи", () => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const project = knowledge.changeSection(
+        "create",
+        { id: "guides", name: "Руководства" },
+        write(knowledge.get("project")),
+      );
+      const first = knowledge.create(
+        "document",
+        { name: "Первый", body: "Текст", sectionId: "guides" },
+        actor,
+      );
+      const second = knowledge.create(
+        "document",
+        { name: "Второй", body: "Текст", sectionId: "guides" },
+        actor,
+      );
+      knowledge.changeSection("remove", { id: "guides" }, write(project));
+      // Этот ID никогда не был зарегистрирован, в отличие от раздела первого документа.
+      const corruptedRecord = {
+        ...second,
+        revision: second.revision + 1,
+        data: { ...second.data, sectionId: "never-existed" },
+      };
+      db.update(corruptedRecord, second.revision);
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      const error = expectRelayError(() => queries.check(), "INTEGRITY_ERROR");
+
+      expect(error.message).toContain(second.key);
+      expect(db.get(second.id)).toEqual(corruptedRecord);
+      expect(db.get(first.id)).toEqual(first);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("get не маскирует неизвестный раздел как удалённый", () => {
+    withEntityDatabase((db) => {
+      const document = new KnowledgeService(db).create(
+        "document",
+        { name: "Документ", body: "Текст" },
+        actor,
+      );
+      // Намеренное повреждение ссылки на раздел через Storage.
+      db.update(
+        {
+          ...document,
+          revision: document.revision + 1,
+          data: { ...document.data, sectionId: "never-existed" },
+        },
+        document.revision,
+      );
+      const queries = new QueryService(db);
+
+      expectRelayError(() => queries.get(document.id), "CORRUPT_DATA");
+    });
+  });
+
+  test("валидные реализации и история принимаются doctor вместе с остальными областями", () => {
+    withEntityDatabase((db) => {
+      const knowledge = new KnowledgeService(db);
+      const feature = knowledge.create("feature", { name: "Фича" }, actor);
+      const application = knowledge.create("application", { name: "Web", slug: "web" }, actor);
+      knowledge.replaceParticipation(application.id, [feature.id], write(application));
+      const history = new HistoryService(db);
+      const session = history.start({ title: "Поручение" }, actor);
+      history.checkpoint(
+        session.id,
+        "open",
+        { title: "Намерение", body: "Материал", runId: session.data.currentRunId },
+        write(session),
+      );
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      const result = queries.check();
+
+      expect(result).toEqual({
+        projectId: db.projectId,
+        generation,
+        valid: true,
+        records: 9,
+        issues: [],
+      });
+    });
+  });
+
+  test("второй паспорт продукта отклоняется doctor без изменения записей", () => {
+    withEntityDatabase((db) => {
+      const product = new KnowledgeService(db).get("product");
+      // Намеренно нарушаем уникальность singleton через Storage, недоступную в KnowledgeService.
+      db.insert({ ...product, id: crypto.randomUUID(), key: "PRODUCT-EXTRA" });
+      const snapshot = db.list();
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      const error = expectRelayError(() => queries.check(), "INTEGRITY_ERROR");
+
+      expect(error.message).toContain("единственный паспорт");
+      expect(db.list()).toEqual(snapshot);
+      expect(db.getGeneration()).toBe(generation);
+    });
   });
 });

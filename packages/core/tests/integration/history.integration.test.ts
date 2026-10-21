@@ -1,191 +1,201 @@
 import { describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { RelayError, type WriteOptions } from "@relay/contracts";
-import { ProjectDatabase } from "@relay/storage";
-import { HistoryService, type HistoryCheckpoint, type HistorySession } from "../../src/history";
-import { KnowledgeService } from "../../src/knowledge";
-import { TasksService } from "../../src/tasks";
+import type { WriteOptions } from "@relay/contracts";
+import { HistoryService } from "../../src/history/history";
+import { KnowledgeService } from "../../src/knowledge/knowledge";
+import { TasksService } from "../../src/tasks/tasks";
+import {
+  completeHistorySession,
+  corruptHistoryRuns,
+  currentHistoryRun,
+  expectHistoryError,
+  forkHistorySession,
+  historyOwner,
+  insertCorruptedHistoryCheckpoint,
+  openHistoryIntent,
+  recordHistoryMaterial,
+  snapshotHistoryStorage,
+  withHistoryFixture,
+  withHistorySessionUpdateFailure,
+} from "./history-fixture";
+import type { HistoryInputCase } from "./history-fixture.types";
 
-interface Fixture {
-  db: ProjectDatabase;
-  history: HistoryService;
-  path: string;
-  connect(): HistoryService;
-}
+const invalidStartCases = [
+  { name: "null вместо поручения отклоняется без создания сессии", input: null },
+  { name: "массив вместо поручения отклоняется без создания сессии", input: [] },
+  { name: "строка вместо поручения отклоняется без создания сессии", input: "поручение" },
+  { name: "отсутствующий заголовок отклоняется без создания сессии", input: {} },
+  { name: "пробельный заголовок отклоняется без создания сессии", input: { title: "  " } },
+  {
+    name: "многострочный заголовок отклоняется без создания сессии",
+    input: { title: "Первая\nВторая" },
+  },
+  {
+    name: "неизвестное поле поручения отклоняется без создания сессии",
+    input: { title: "Поручение", extra: true },
+  },
+  {
+    name: "числовое имя оператора отклоняется без создания сессии",
+    input: { title: "Поручение", operator: { name: 1, source: "explicit" } },
+  },
+] as const satisfies readonly HistoryInputCase[];
 
-function fixture(operation: (context: Fixture) => void): void {
-  const root = resolve(
-    import.meta.dir,
-    "../../../..",
-    ".artifacts",
-    new Date().toISOString().slice(0, 10),
-  );
-  mkdirSync(root, { recursive: true });
-  const directory = mkdtempSync(join(root, "history-integration-"));
-  const connections: ProjectDatabase[] = [];
-  try {
-    const path = join(directory, "project.sqlite");
-    const db = ProjectDatabase.create(path, {
-      id: crypto.randomUUID(),
-      name: "История работы",
-      slug: "history",
+const invalidCheckpointCases = [
+  { name: "пробельный текст материала отклоняется без записи", input: { body: "\n \t" } },
+  { name: "числовой заголовок материала отклоняется без записи", input: { title: 42 } },
+  { name: "число вместо ссылки материала отклоняется без записи", input: { references: [42] } },
+  {
+    name: "пропуск элемента в ссылках материала отклоняется без записи",
+    input: { references: new Array<unknown>(1) },
+  },
+  { name: "неизвестное поле материала отклоняется без записи", input: { unknown: true } },
+  {
+    name: "поле приёмки в новом намерении отклоняется даже с пустым массивом",
+    input: { acceptedSessionIds: [] },
+  },
+] as const satisfies readonly HistoryInputCase<Readonly<Record<string, unknown>>>[];
+
+const invalidRevisionCases = [
+  { name: "нулевая ревизия отклоняется без записи материала", input: 0 },
+  { name: "отрицательная ревизия отклоняется без записи материала", input: -1 },
+  { name: "дробная ревизия отклоняется без записи материала", input: 1.5 },
+  { name: "NaN вместо ревизии отклоняется без записи материала", input: NaN },
+  { name: "бесконечная ревизия отклоняется без записи материала", input: Infinity },
+  { name: "строковая ревизия отклоняется без записи материала", input: "1" },
+] as const satisfies readonly HistoryInputCase[];
+
+const corruptedDocumentNames = [
+  { name: "имя документа null блокирует снимок без изменения истории", input: null },
+  { name: "отсутствующее имя документа блокирует снимок без изменения истории", input: undefined },
+] as const satisfies readonly HistoryInputCase[];
+
+const rejectedRunReferences = [
+  { name: "ID прежнего участия со свежей ревизией отклоняется без записи", form: "previousId" },
+  { name: "ключ текущего участия вместо ID отклоняется без записи", form: "currentKey" },
+] as const;
+
+const blockedChildClosures = [
+  { name: "незавершённый ребёнок запрещает завершить исходное намерение", action: "complete" },
+  { name: "незавершённый ребёнок запрещает отменить исходное намерение", action: "cancel" },
+] as const;
+
+const rejectedAcceptanceReferences = [
+  { name: "ключ завершённого ребёнка отклоняется при приёмке без записи", form: "key" },
+  {
+    name: "типизированный адрес завершённого ребёнка отклоняется при приёмке без записи",
+    form: "typedId",
+  },
+] as const;
+
+const closedIntentActions = [
+  { name: "сохранение продолжения закрытого намерения отклоняется без записи", action: "save" },
+  { name: "повторное завершение намерения отклоняется без записи", action: "complete" },
+  { name: "отмена завершённого намерения отклоняется без записи", action: "cancel" },
+] as const;
+
+const acceptingClosureCases = [
+  {
+    name: "приёмка в материале завершения закрывает намерение и разрешает завершить сессию",
+    action: "complete",
+    expectedKind: "result",
+  },
+  {
+    name: "приёмка в материале отмены закрывает намерение и разрешает завершить сессию",
+    action: "cancel",
+    expectedKind: "cancel",
+  },
+] as const;
+
+const materialBody = "\n## Основания\r\n\r\n```ts\r\n  const вывод = true;\r\n```\r\n\n";
+
+describe("Снимки ссылок в материалах истории", () => {
+  test.each(corruptedDocumentNames)("$name", ({ input }) => {
+    withHistoryFixture((history, { db }) => {
+      const document = new KnowledgeService(db).create(
+        "document",
+        { name: "Исходное имя", body: "Текст" },
+        "автор",
+      );
+      const session = history.start({ title: "Проверить документ" }, "агент");
+      const corruptedData: Record<string, unknown> = { ...document.data };
+      // Намеренно портим обязательное имя через Storage: ключ не должен скрыть потерю содержания.
+      if (input === undefined) {
+        delete corruptedData.name;
+      } else {
+        corruptedData.name = input;
+      }
+      const corrupted = { ...document, revision: document.revision + 1, data: corruptedData };
+      db.update(corrupted, document.revision);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.checkpoint(
+            session.id,
+            "open",
+            {
+              title: "Прочитать документ",
+              body: "Сохранить основание работы",
+              runId: session.data.currentRunId,
+              references: [document.key],
+            },
+            historyOwner(session),
+          ),
+        "CORRUPT_DATA",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(db.get(document.id)).toEqual(corrupted);
     });
-    connections.push(db);
-    operation({
-      db,
-      history: new HistoryService(db),
-      path,
-      connect() {
-        const connection = ProjectDatabase.open(path);
-        connections.push(connection);
-        return new HistoryService(connection);
-      },
-    });
-  } finally {
-    for (const connection of connections) connection.close();
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
+  });
 
-function owner(session: HistorySession): WriteOptions {
-  const run = session.data.runs.find((entry) => entry.id === session.data.currentRunId)!;
-  return { actor: run.actor, ifRevision: session.revision };
-}
-
-function open(history: HistoryService, session: HistorySession, title = "Исследовать контракт") {
-  return history.checkpoint(
-    session.key,
-    "open",
-    {
-      title,
-      body: "Сопоставить поведение с предметными правилами.",
-      runId: session.data.currentRunId,
-    },
-    owner(session),
-  );
-}
-
-function material(
-  history: HistoryService,
-  intent: HistoryCheckpoint,
-  action: "save" | "complete" | "cancel",
-  input: Record<string, unknown> = {},
-): HistoryCheckpoint {
-  const session = history.get(intent.data.sessionId);
-  return history.checkpoint(
-    intent.id,
-    action,
-    {
-      title: "Проверен контракт истории",
-      body: "Проверены условия сохранения материалов и закрытия работы.",
-      runId: session.data.currentRunId,
-      ...input,
-    },
-    owner(session),
-  );
-}
-
-function fork(history: HistoryService, intent: HistoryCheckpoint): HistorySession {
-  const parent = history.get(intent.data.sessionId);
-  return history.transition(
-    intent.key,
-    "fork",
-    {
-      title: "Проверить отдельный сценарий",
-      description: "Проверить результат и приложить основания.",
-      runId: parent.data.currentRunId,
-    },
-    owner(parent),
-  );
-}
-
-function complete(history: HistoryService, session: HistorySession): HistorySession {
-  return history.transition(
-    session.id,
-    "complete",
-    { runId: session.data.currentRunId, result: "Проверка завершена, результат сохранён." },
-    owner(session),
-  );
-}
-
-function fails(operation: () => unknown, code: string): void {
-  try {
-    operation();
-  } catch (error) {
-    expect(error).toBeInstanceOf(RelayError);
-    expect((error as RelayError).code).toBe(code);
-    return;
-  }
-  throw new Error(`Ожидалась ошибка ${code}.`);
-}
-
-describe("HistoryService: реальная SQLite", () => {
-  test.each(["null", "отсутствует"] as const)(
-    "повреждённое обязательное имя цели (%s) не создаёт материал и не меняет сессию",
-    (variant) =>
-      fixture(({ db, history }) => {
-        const knowledge = new KnowledgeService(db);
-        const document = knowledge.create(
-          "document",
-          { name: "Исходное имя", body: "Текст" },
-          "author",
-        );
-        const session = history.start({ title: "Проверить документ" }, "author");
-        const data: Record<string, unknown> = { ...document.data };
-        // Намеренная порча обязательного имени; подстановка ключа скрыла бы потерю содержания.
-        if (variant === "null") data.name = null;
-        else delete data.name;
-        const damaged = { ...document, revision: document.revision + 1, data };
-        db.update(damaged, document.revision);
-        const generation = db.getGeneration();
-        fails(
-          () =>
-            history.checkpoint(
-              session.id,
-              "open",
-              {
-                title: "Прочитать документ",
-                body: "Сохранить основание работы",
-                runId: session.data.currentRunId,
-                references: [document.key],
-              },
-              owner(session),
-            ),
-          "CORRUPT_DATA",
-        );
-        expect(history.get(session.id)).toEqual(session);
-        expect(db.list("work-checkpoint")).toEqual([]);
-        expect(db.get(document.id)).toEqual(damaged);
-        expect(db.getGeneration()).toBe(generation);
-      }),
-  );
-
-  test("снимок допускает пустой паспорт продукта и пустой заголовок задачи без подмены текста", () =>
-    fixture(({ db, history }) => {
+  test("пустой паспорт продукта сохраняет ключ как название снимка", () => {
+    withHistoryFixture((history, { db }) => {
       const product = new KnowledgeService(db).get("product");
-      const task = new TasksService(db).create({}, "author");
-      const session = history.start({ title: "Начать работу" }, "author");
+      const session = history.start({ title: "Начать работу над продуктом" }, "агент");
+
       const checkpoint = history.checkpoint(
         session.id,
         "open",
         {
-          title: "Определить содержание",
-          body: "Паспорт и задача ещё не заполнены",
+          title: "Определить содержание продукта",
+          body: "Паспорт ещё не заполнен",
           runId: session.data.currentRunId,
-          references: [product.key, task.key],
+          references: [product.key],
         },
-        owner(session),
+        historyOwner(session),
       );
-      expect(checkpoint.data.references.map(({ id, title }) => ({ id, title }))).toEqual([
-        { id: product.id, title: product.key },
-        { id: task.id, title: "" },
-      ]);
-    }));
 
-  test("материал разрешает виртуальные типизированные ссылки и отвергает неверный вид и дубликаты", () => {
-    fixture(({ db, history }) => {
+      expect(checkpoint.data.references).toEqual([
+        { id: product.id, kind: "product", key: product.key, title: product.key },
+      ]);
+    });
+  });
+
+  test("пустой заголовок задачи сохраняется в снимке без подмены ключом", () => {
+    withHistoryFixture((history, { db }) => {
+      const task = new TasksService(db).create({}, "автор");
+      const session = history.start({ title: "Начать работу над задачей" }, "агент");
+
+      const checkpoint = history.checkpoint(
+        session.id,
+        "open",
+        {
+          title: "Определить содержание задачи",
+          body: "Задача ещё не заполнена",
+          runId: session.data.currentRunId,
+          references: [task.key],
+        },
+        historyOwner(session),
+      );
+
+      expect(checkpoint.data.references).toEqual([
+        { id: task.id, kind: "task", key: task.key, title: "" },
+      ]);
+    });
+  });
+
+  test("виртуальные типизированные ссылки сохраняют реальные ID и виды целей", () => {
+    withHistoryFixture((history, { db }) => {
       const knowledge = new KnowledgeService(db);
       const application = knowledge.create(
         "application",
@@ -194,69 +204,106 @@ describe("HistoryService: реальная SQLite", () => {
       );
       const board = knowledge.get("board", "board:product");
       const session = history.start({ title: "Ссылки из материала" }, "агент");
-      const input = {
-        title: "Проверить приложение",
-        body: "Сохранить основания.",
-        runId: session.data.currentRunId,
-      };
+
       const intent = history.checkpoint(
         `work-session:${session.id}`,
         "open",
         {
-          ...input,
+          title: "Проверить приложение",
+          body: "Сохранить основания.",
+          runId: session.data.currentRunId,
           references: ["board:product", "application:web"],
         },
-        owner(session),
+        historyOwner(session),
       );
-      expect(intent.data.references.map(({ id, kind }) => ({ id, kind }))).toEqual([
-        { id: board.id, kind: "board" },
-        { id: application.id, kind: "application" },
+
+      expect(intent.data.references).toEqual([
+        { id: board.id, kind: "board", key: board.key, title: board.data.name },
+        { id: application.id, kind: "application", key: application.key, title: "Веб-клиент" },
       ]);
-      const current = history.get(session.id);
-      const generation = db.getGeneration();
-      fails(() => history.get(`work-checkpoint:${session.id}`), "INVALID_ARGUMENT");
-      fails(() => history.getCheckpoint(`work-session:${intent.id}`), "INVALID_ARGUMENT");
-      fails(
-        () =>
-          history.checkpoint(
-            intent.id,
-            "save",
-            {
-              ...input,
-              references: [`task:${application.id}`],
-            },
-            owner(current),
-          ),
-        "NOT_FOUND",
-      );
-      fails(
-        () =>
-          history.checkpoint(
-            intent.id,
-            "save",
-            {
-              ...input,
-              references: ["board:product", `board:${board.id}`],
-            },
-            owner(current),
-          ),
-        "INVALID_INPUT",
-      );
-      expect(history.get(session.id)).toEqual(current);
-      expect(history.history(session.id)).toEqual([intent]);
-      expect(db.getGeneration()).toBe(generation);
     });
   });
 
-  test("постороннее поле name задачи не подменяет проверенный заголовок в истории", () =>
-    fixture(({ db, history }) => {
-      const task = new TasksService(db).create({ title: "Проверенный заголовок" }, "author");
-      // Внедряем не принадлежащее типу задачи поле через Storage. Оно не является названием задачи.
+  test("адрес материала вместо адреса сессии отклоняется при чтении сессии", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Типизированное чтение сессии" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.get(`work-checkpoint:${session.id}`), "INVALID_ARGUMENT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("адрес сессии вместо адреса материала отклоняется при чтении материала", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Типизированное чтение материала" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => history.getCheckpoint(`work-session:${intent.id}`),
+        "INVALID_ARGUMENT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("ссылка с неверным видом существующей цели отклоняется без записи материала", () => {
+    withHistoryFixture((history, { db }) => {
+      const application = new KnowledgeService(db).create(
+        "application",
+        { name: "Веб-клиент", slug: "web", prefix: "WEB" },
+        "автор",
+      );
+      const session = history.start({ title: "Проверить вид ссылки" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            references: [`task:${application.id}`],
+          }),
+        "NOT_FOUND",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("два адреса одной цели отклоняются как дубликат без записи материала", () => {
+    withHistoryFixture((history, { db }) => {
+      const board = new KnowledgeService(db).get("board", "board:product");
+      const session = history.start({ title: "Проверить уникальность ссылок" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            references: ["board:product", `board:${board.id}`],
+          }),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("постороннее поле name задачи не подменяет проверенный заголовок в снимке", () => {
+    withHistoryFixture((history, { db }) => {
+      const task = new TasksService(db).create({ title: "Проверенный заголовок" }, "автор");
+      // Внедряем чужое поле через Storage: оно не является названием задачи.
       db.update(
         { ...task, revision: task.revision + 1, data: { ...task.data, name: null } },
         task.revision,
       );
-      const session = history.start({ title: "Проверить задачу" }, "author");
+      const session = history.start({ title: "Проверить задачу" }, "агент");
+
       const checkpoint = history.checkpoint(
         session.id,
         "open",
@@ -266,33 +313,210 @@ describe("HistoryService: реальная SQLite", () => {
           runId: session.data.currentRunId,
           references: [task.id],
         },
-        owner(session),
+        historyOwner(session),
       );
+
       expect(checkpoint.data.references).toEqual([
         { id: task.id, kind: "task", key: task.key, title: "Проверенный заголовок" },
       ]);
       expect(history.getCheckpoint(checkpoint.id)).toEqual(checkpoint);
       expect(history.history(session.id)).toEqual([checkpoint]);
-    }));
+    });
+  });
+});
 
-  test.each(["start", "takeover", "checkpoint"] as const)(
-    "%s использует общее правило автора и отказывает без изменения истории",
-    (action) => {
-      fixture(({ db, history }) => {
-        const session = history.start({ title: "Владелец истории" }, "агент");
-        const generation = db.getGeneration();
-        const actor = "агент\u0000";
-        fails(() => {
-          if (action === "start") return history.start({ title: "Другое поручение" }, actor);
-          if (action === "takeover") {
-            return history.transition(
-              session.id,
-              "takeover",
-              { reason: "Смена участия" },
-              { actor, ifRevision: session.revision },
-            );
-          }
-          return history.checkpoint(
+describe("Проверка внешнего ввода истории", () => {
+  test.each(invalidStartCases)("$name", ({ input }) => {
+    withHistoryFixture((history, { db }) => {
+      const invalidInput = structuredClone(input);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.start(invalidInput, "агент"), "INVALID_INPUT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test.each(invalidCheckpointCases)("$name", ({ input }) => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка ввода материала" }, "агент");
+      const invalidInput = {
+        title: "Проверить вход",
+        body: "Содержательный материал.",
+        runId: session.data.currentRunId,
+        ...structuredClone(input),
+      };
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => history.checkpoint(session.id, "open", invalidInput, historyOwner(session)),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test.each(invalidRevisionCases)("$name", ({ input }) => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка ввода ревизии" }, "агент");
+      const invalidOptions = { actor: "агент", ifRevision: input };
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.checkpoint(
+            session.id,
+            "open",
+            {
+              title: "Проверить ревизию",
+              body: "Не записывать материал с неверной ревизией.",
+              runId: session.data.currentRunId,
+            },
+            // Намеренно нарушаем статический контракт для проверки внешней границы сервиса.
+            invalidOptions as WriteOptions,
+          ),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("несуществующая цель отклоняется без записи материала и изменения сессии", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка отсутствующей цели" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.checkpoint(
+            session.id,
+            "open",
+            {
+              title: "Прочитать цель",
+              body: "Цель должна существовать.",
+              runId: session.data.currentRunId,
+              references: [crypto.randomUUID()],
+            },
+            historyOwner(session),
+          ),
+        "NOT_FOUND",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("takeover без причины отклоняется без смены участия", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка причины передачи" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => history.transition(session.id, "takeover", {}, historyOwner(session)),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("pause с пробельной причиной отклоняется без смены состояния", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка причины паузы" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.transition(
+            session.id,
+            "pause",
+            { runId: session.data.currentRunId, reason: " " },
+            historyOwner(session),
+          ),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("complete с пробельным результатом отклоняется без закрытия сессии", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка результата" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.transition(
+            session.id,
+            "complete",
+            { runId: session.data.currentRunId, result: " " },
+            historyOwner(session),
+          ),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("унаследованное имя toString отклоняется как неизвестное действие без записи", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверка действия" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => history.transition(session.id, "toString", {}, historyOwner(session)),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("автор с нулевым символом отклоняется при start без создания сессии", () => {
+    withHistoryFixture((history, { db }) => {
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => history.start({ title: "Проверка автора" }, "агент\u0000"),
+        "INVALID_ARGUMENT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("автор с нулевым символом отклоняется при takeover без смены участия", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Владелец истории" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.transition(
+            session.id,
+            "takeover",
+            { reason: "Смена участия" },
+            { actor: "агент\u0000", ifRevision: session.revision },
+          ),
+        "INVALID_ARGUMENT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("автор с нулевым символом отклоняется при checkpoint без записи материала", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Владелец материала" }, "агент");
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.checkpoint(
             session.id,
             "open",
             {
@@ -300,39 +524,69 @@ describe("HistoryService: реальная SQLite", () => {
               title: "Намерение",
               body: "Проверить контракт",
             },
-            { actor, ifRevision: session.revision },
-          );
-        }, "INVALID_ARGUMENT");
-        expect(history.list()).toEqual([session]);
-        expect(history.history()).toEqual([]);
-        expect(db.getGeneration()).toBe(generation);
-      });
-    },
-  );
+            { actor: "агент\u0000", ifRevision: session.revision },
+          ),
+        "INVALID_ARGUMENT",
+      );
 
-  test("повреждённый runs отвергается чтением и записью без потери сохранённого состояния", () => {
-    fixture(({ db, history }) => {
-      const session = history.start({ title: "Проверка сохранённого участия" }, "агент");
-      // Намеренное повреждение через Storage: предметный сервис такого состояния не создаёт.
-      db.update({ ...session, revision: 2, data: { ...session.data, runs: null } }, 1);
-      const damaged = db.get(session.id)!;
-      const generation = db.getGeneration();
-      fails(() => history.get(session.id), "CORRUPT_DATA");
-      fails(() => history.list(), "CORRUPT_DATA");
-      fails(
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+});
+
+describe("Повреждённые сохранённые данные истории", () => {
+  test("runs: null отклоняется при чтении сессии без потери сохранённой строки", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённое участие" }, "агент");
+      corruptHistoryRuns(db, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.get(session.id), "CORRUPT_DATA");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("runs: null отклоняется при чтении списка вместо пропуска повреждённой сессии", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённое участие в списке" }, "агент");
+      corruptHistoryRuns(db, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.list(), "CORRUPT_DATA");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("runs: null блокирует takeover без перезаписи повреждённого состояния", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённое участие перед передачей" }, "агент");
+      const corrupted = corruptHistoryRuns(db, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.transition(
             session.id,
             "takeover",
             { reason: "Продолжить работу" },
-            {
-              actor: "второй-агент",
-              ifRevision: 2,
-            },
+            { actor: "второй-агент", ifRevision: corrupted.revision },
           ),
         "CORRUPT_DATA",
       );
-      fails(
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("runs: null блокирует новый материал без изменения сессии и поколения", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённый владелец материала" }, "агент");
+      const corrupted = corruptHistoryRuns(db, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.checkpoint(
             session.id,
@@ -342,79 +596,130 @@ describe("HistoryService: реальная SQLite", () => {
               title: "Намерение",
               body: "Проверить состояние",
             },
-            { actor: "агент", ifRevision: 2 },
+            { actor: "агент", ifRevision: corrupted.revision },
           ),
         "CORRUPT_DATA",
       );
-      expect(db.get(session.id)).toEqual(damaged);
-      expect(db.list("work-checkpoint")).toEqual([]);
-      expect(db.getGeneration()).toBe(generation);
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
     });
   });
 
-  test("повреждение checkpoint не выдаётся пустыми ссылками и блокирует продолжение без записи", () => {
-    fixture(({ db, history }) => {
-      const session = history.start({ title: "Проверка сохранённого материала" }, "агент");
-      const intent = open(history, session);
+  test("references: null отклоняется при чтении материала вместо пустого массива", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённый материал" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const corrupted = insertCorruptedHistoryCheckpoint(db, intent);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.getCheckpoint(corrupted.id), "CORRUPT_DATA");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("references: null отклоняется при чтении истории вместо пропуска материала", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Повреждённый материал в истории" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      insertCorruptedHistoryCheckpoint(db, intent);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => history.history(session.id), "CORRUPT_DATA");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("повреждённый соседний материал блокирует продолжение валидного намерения без записи", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Продолжение при повреждении истории" }, "агент");
+      const intent = openHistoryIntent(history, session);
       const current = history.get(session.id);
-      // Storage используется только для намеренно недопустимого материала, не для рабочего сценария.
-      const id = crypto.randomUUID();
-      db.insert({ ...intent, id, key: `CP-${id}`, data: { ...intent.data, references: null } });
-      const damaged = db.get(id)!;
-      const materials = db.list("work-checkpoint");
-      const generation = db.getGeneration();
-      fails(() => history.getCheckpoint(id), "CORRUPT_DATA");
-      fails(() => history.history(session.id), "CORRUPT_DATA");
-      fails(() => material(history, intent, "save"), "CORRUPT_DATA");
-      expect(db.get(id)).toEqual(damaged);
+      insertCorruptedHistoryCheckpoint(db, intent);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => recordHistoryMaterial(history, current, intent, "save"),
+        "CORRUPT_DATA",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
       expect(history.get(session.id)).toEqual(current);
-      expect(db.list("work-checkpoint")).toEqual(materials);
-      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+});
+
+describe("Неизменяемость материалов и снимков участия", () => {
+  test("создание материала сохраняет полный текст, основания и ревизию сессии", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Сохранить основания проверки" }, "агент");
+
+      const intent = history.checkpoint(
+        session.id,
+        "open",
+        {
+          title: "Сопоставить исходные материалы",
+          body: materialBody,
+          runId: session.data.currentRunId,
+          done: "- Прочитан контракт\n",
+          remaining: "  - Проверить сохранение\n",
+          nextStep: "Сопоставить данные после повторного открытия.",
+          checks: "```sh\n  bun test\n```\n",
+        },
+        historyOwner(session),
+      );
+
+      expect(intent).toMatchObject({
+        revision: 1,
+        createdBy: "агент",
+        updatedBy: "агент",
+        data: {
+          kind: "intent",
+          sessionId: session.id,
+          runId: session.data.currentRunId,
+          actor: "агент",
+          intentId: null,
+          sequence: 1,
+          sessionRevision: session.revision + 1,
+          title: "Сопоставить исходные материалы",
+          body: materialBody,
+          summary: null,
+          done: "- Прочитан контракт\n",
+          remaining: "  - Проверить сохранение\n",
+          nextStep: "Сопоставить данные после повторного открытия.",
+          checks: "```sh\n  bun test\n```\n",
+        },
+      });
+      expect(history.get(session.id).revision).toBe(intent.data.sessionRevision);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
     });
   });
 
-  test("материалы, авторство и снимки ссылок неизменяемы после нового участия и открытия БД", () => {
-    fixture(({ db, history, connect }) => {
+  test("после изменения документа и открытия БД материалы сохраняют старый и новый снимки", () => {
+    withHistoryFixture((history, { db, connect }) => {
       const knowledge = new KnowledgeService(db);
       const document = knowledge.create(
         "document",
         { name: "Первоначальный контракт", body: "Исходные предметные правила." },
         "автор",
       );
-      const session = history.start(
-        {
-          title: "Проверить историю",
-          description: "## Поручение\n\nСохранить основания.\n",
-          operator: { name: "Анна", email: null, source: "explicit" },
-          client: "терминал",
-          sourceSessionId: "внешняя-сессия",
-        },
-        "агент-исследователь",
-      );
-      const body = "\n## Основания\r\n\r\n```ts\r\n  const вывод = true;\r\n```\r\n\n";
+      const session = history.start({ title: "Проверить снимки документа" }, "агент");
       const intent = history.checkpoint(
         session.id,
         "open",
         {
-          title: "Сопоставить исходные материалы",
-          body,
+          title: "Сопоставить документ",
+          body: materialBody,
           runId: session.data.currentRunId,
           references: [document.key],
-          done: "- Прочитан контракт\n",
-          remaining: "  - Проверить сохранение\n",
-          nextStep: "Сопоставить данные после повторного открытия.",
-          checks: "```sh\n  bun test\n```\n",
         },
-        owner(session),
+        historyOwner(session),
       );
       const initial = structuredClone(intent);
-      expect(intent.data.body).toBe(body);
-      expect(intent.data.summary).toBeNull();
-      expect(intent.data.sessionRevision).toBe(2);
-      expect(intent.data.references).toEqual([
-        { id: document.id, kind: "document", key: "DOC-1", title: "Первоначальный контракт" },
-      ]);
+      const current = history.get(session.id);
+
       const updatedDocument = knowledge.update(
         "document",
         document.id,
@@ -425,81 +730,219 @@ describe("HistoryService: реальная SQLite", () => {
         actor: "автор",
         ifRevision: updatedDocument.revision,
       });
-      expect(history.getCheckpoint(intent.id)).toEqual(initial);
-      const transferred = history.transition(
-        session.key,
-        "takeover",
-        { reason: "Передать проверку другому агенту." },
-        { actor: "агент-проверяющий", ifRevision: 2 },
-      );
-      const progress = material(history, intent, "save", {
+      const progress = recordHistoryMaterial(history, current, intent, "save", {
         references: [`document:${document.id}`],
       });
-      const result = material(history, intent, "complete");
-      const finished = complete(history, history.get(session.id));
-      expect(finished.data.currentRunId).toBeNull();
-      expect(finished.data.runs.map((run) => run.state)).toEqual(["transferred", "completed"]);
-      expect(finished.data.runs[0]?.operator?.name).toBe("Анна");
-      expect(finished.data.runs[1]?.operator).toBeNull();
-      expect(progress.data.runId).toBe(transferred.data.currentRunId!);
+      db.close();
+      const reopened = new HistoryService(connect());
+
+      expect(reopened.getCheckpoint(intent.id)).toEqual(initial);
+      expect(reopened.getCheckpoint(progress.id)).toEqual(progress);
+      expect(initial.data.references).toEqual([
+        { id: document.id, kind: "document", key: "DOC-1", title: "Первоначальный контракт" },
+      ]);
       expect(progress.data.references).toEqual([
         { id: document.id, kind: "document", key: "DOC-2", title: "Новая редакция" },
       ]);
       expect(progress.data.intentId).toBe(intent.id);
-      expect(result.data.kind).toBe("result");
-      db.close();
-      const reopened = connect();
-      expect(reopened.getCheckpoint(`work-checkpoint:${intent.id}`)).toEqual(initial);
-      expect(reopened.getCheckpoint(progress.id)).toEqual(progress);
-      expect(reopened.get(`work-session:${session.id}`)).toEqual(finished);
-      expect(reopened.history(session.key).map((entry) => entry.data.sequence)).toEqual([1, 2, 3]);
-      expect(reopened.intents(session.id)).toEqual([]);
-      intent.data.body = "Изменение объекта ответа";
-      expect(reopened.getCheckpoint(intent.id).data.body).toBe(body);
-      fails(
-        () =>
-          reopened.transition(
-            session.id,
-            "resume",
-            {},
-            { actor: "агент", ifRevision: finished.revision },
-          ),
-        "CONFLICT",
-      );
     });
   });
 
-  test("две SQLite-связи: CAS и старый run со свежей ревизией независимо защищают запись", () => {
-    fixture(({ history, connect, db }) => {
-      const second = connect();
+  test("новое участие и повторное открытие БД сохраняют материалы, авторство и оператора", () => {
+    withHistoryFixture((history, { db, connect }) => {
+      const session = history.start(
+        {
+          title: "Проверить долговечность истории",
+          description: "## Поручение\n\nСохранить основания.\n",
+          operator: { name: "Анна", email: null, source: "explicit" },
+          client: "терминал",
+          sourceSessionId: "внешняя-сессия",
+        },
+        "агент-исследователь",
+      );
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const initial = structuredClone(intent);
+
+      const transferred = history.transition(
+        session.key,
+        "takeover",
+        { reason: "Передать проверку другому агенту." },
+        { actor: "агент-проверяющий", ifRevision: current.revision },
+      );
+      const progress = recordHistoryMaterial(history, transferred, intent, "save");
+      const result = recordHistoryMaterial(history, history.get(session.id), intent, "complete");
+      const finished = completeHistorySession(history, history.get(session.id));
+      db.close();
+      const reopened = new HistoryService(connect());
+
+      expect(finished.data.currentRunId).toBeNull();
+      expect(finished.data.runs.map((run) => run.state)).toEqual(["transferred", "completed"]);
+      expect(finished.data.description).toBe("## Поручение\n\nСохранить основания.\n");
+      expect(finished.data.runs[0]).toMatchObject({
+        actor: "агент-исследователь",
+        operator: { name: "Анна", email: null, source: "explicit" },
+        client: "терминал",
+        sourceSessionId: "внешняя-сессия",
+      });
+      expect(finished.data.runs[1]?.operator).toBeNull();
+      expect(progress).toMatchObject({
+        createdBy: "агент-проверяющий",
+        updatedBy: "агент-проверяющий",
+        data: {
+          runId: transferred.data.currentRunId,
+          actor: "агент-проверяющий",
+          intentId: intent.id,
+        },
+      });
+      expect(result.data.kind).toBe("result");
+      expect(reopened.getCheckpoint(`work-checkpoint:${intent.id}`)).toEqual(initial);
+      expect(reopened.getCheckpoint(progress.id)).toEqual(progress);
+      expect(reopened.getCheckpoint(result.id)).toEqual(result);
+      expect(reopened.get(`work-session:${session.id}`)).toEqual(finished);
+      expect(reopened.history(session.key)).toEqual([initial, progress, result]);
+      expect(reopened.history(session.key).map((entry) => entry.data.sequence)).toEqual([1, 2, 3]);
+      expect(reopened.intents(session.id)).toEqual([]);
+    });
+  });
+
+  test("изменение объекта ответа не переписывает сохранённый материал", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Проверить независимость ответа" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const initial = structuredClone(intent);
+
+      intent.data.body = "Изменение объекта ответа";
+
+      expect(history.getCheckpoint(intent.id)).toEqual(initial);
+    });
+  });
+});
+
+describe("CAS сессии и владение текущим участием", () => {
+  test("устаревшая ревизия второго SQLite-соединения сохраняет победившую запись", () => {
+    withHistoryFixture((history, { db, connect }) => {
+      const second = new HistoryService(connect());
       const session = history.start({ title: "Конкурентное сохранение" }, "агент");
       const stale = second.get(session.id);
-      const intent = open(history, session);
-      const before = db.getGeneration();
-      fails(() => open(second, stale), "REVISION_CONFLICT");
-      expect(db.getGeneration()).toBe(before);
-      expect(history.history(session.id)).toEqual([intent]);
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      const error = expectHistoryError(() => openHistoryIntent(second, stale), "REVISION_CONFLICT");
+
+      expect(error.details).toMatchObject({
+        sessionId: session.id,
+        expectedRevision: stale.revision,
+        actualRevision: current.revision,
+      });
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(second.get(session.id)).toEqual(current);
+      expect(second.history(session.id)).toEqual([intent]);
+    });
+  });
+
+  test("takeover тем же автором создаёт новый run и закрывает прежний как transferred", () => {
+    withHistoryFixture((history, { connect }) => {
+      const second = new HistoryService(connect());
+      const session = history.start({ title: "Продолжить после обрыва клиента" }, "агент");
+      const stale = second.get(session.id);
+
       const current = second.transition(
         session.id,
         "takeover",
         { reason: "Продолжить после обрыва клиента." },
-        { actor: "агент", ifRevision: 2 },
+        historyOwner(stale),
       );
+
       expect(current.data.currentRunId).not.toBe(session.data.currentRunId);
-      expect(current.data.runs[1]?.predecessorRunId).toBe(session.data.currentRunId);
-      for (const runId of [session.data.currentRunId, current.data.runs[1]!.key]) {
-        fails(
-          () =>
-            history.checkpoint(
-              intent.id,
-              "save",
-              { title: "Запоздалая запись", body: "Проверка fencing.", runId },
-              owner(current),
-            ),
-          "CONFLICT",
-        );
-      }
-      fails(
+      expect(current.data.runs[0]).toMatchObject({
+        id: session.data.currentRunId,
+        state: "transferred",
+        endReason: "Продолжить после обрыва клиента.",
+      });
+      expect(current.data.runs[1]).toMatchObject({
+        id: current.data.currentRunId,
+        predecessorRunId: session.data.currentRunId,
+        actor: "агент",
+        state: "active",
+      });
+      expect(history.get(session.id)).toEqual(current);
+    });
+  });
+
+  test("новый run после takeover тем же автором продолжает исходное намерение", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Продолжить после смены клиента" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const beforeTransfer = history.get(session.id);
+      const current = history.transition(
+        session.id,
+        "takeover",
+        { reason: "Тот же исполнитель подключился из нового клиента." },
+        historyOwner(beforeTransfer),
+      );
+
+      const progress = recordHistoryMaterial(history, current, intent, "save");
+
+      expect(progress.data).toMatchObject({
+        kind: "progress",
+        runId: current.data.currentRunId,
+        actor: "агент",
+        intentId: intent.id,
+        sessionRevision: current.revision + 1,
+      });
+      expect(history.history(session.id)).toEqual([intent, progress]);
+      expect(history.get(session.id).revision).toBe(current.revision + 1);
+    });
+  });
+
+  test.each(rejectedRunReferences)("$name", ({ form }) => {
+    withHistoryFixture((history, { db, connect }) => {
+      const second = new HistoryService(connect());
+      const session = history.start({ title: "Проверить владельца после передачи" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const beforeTransfer = second.get(session.id);
+      const current = second.transition(
+        session.id,
+        "takeover",
+        { reason: "Продолжить после обрыва клиента." },
+        historyOwner(beforeTransfer),
+      );
+      const references = {
+        previousId: currentHistoryRun(session).id,
+        currentKey: currentHistoryRun(current).key,
+      };
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.checkpoint(
+            intent.id,
+            "save",
+            {
+              title: "Запоздалая запись",
+              body: "Проверить границу владения.",
+              runId: references[form],
+            },
+            historyOwner(current),
+          ),
+        "CONFLICT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(history.get(session.id)).toEqual(current);
+    });
+  });
+
+  test("чужой автор с текущими runId и ревизией отклоняется без записи", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверить автора владельческой записи" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.checkpoint(
             intent.id,
@@ -513,27 +956,51 @@ describe("HistoryService: реальная SQLite", () => {
           ),
         "CONFLICT",
       );
-      expect(history.get(session.id)).toEqual(current);
-      expect(material(history, intent, "save").data.runId).toBe(current.data.currentRunId!);
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
     });
   });
+});
 
-  test("pause сохраняет открытые intents, resume создаёт новое участие; отмена требует закрытия", () => {
-    fixture(({ history }) => {
-      const session = history.start({ title: "Продолжение после паузы" }, "первый-агент");
-      const intent = open(history, session);
+describe("Пауза, продолжение и закрытие участия", () => {
+  test("pause закрывает участие с причиной и сохраняет открытое намерение", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Ожидать уточнения" }, "первый-агент");
+      const intent = openHistoryIntent(history, session);
       const active = history.get(session.id);
+
       const paused = history.transition(
         session.id,
         "pause",
         { runId: active.data.currentRunId, reason: "Ожидается уточнение поручения." },
-        owner(active),
+        historyOwner(active),
       );
+
       expect(paused.data.status).toBe("paused");
       expect(paused.data.currentRunId).toBeNull();
-      expect(paused.data.runs[0]?.endReason).toBe("Ожидается уточнение поручения.");
-      expect(history.intents(session.id).map((entry) => entry.id)).toEqual([intent.id]);
-      fails(
+      expect(paused.data.runs[0]).toMatchObject({
+        state: "paused",
+        endReason: "Ожидается уточнение поручения.",
+      });
+      expect(history.intents(session.id)).toEqual([intent]);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+    });
+  });
+
+  test("запись на паузе с прежним runId отклоняется без изменения истории", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Проверить запись на паузе" }, "первый-агент");
+      const intent = openHistoryIntent(history, session);
+      const active = history.get(session.id);
+      const paused = history.transition(
+        session.id,
+        "pause",
+        { runId: active.data.currentRunId, reason: "Ожидается уточнение." },
+        historyOwner(active),
+      );
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.checkpoint(
             intent.id,
@@ -547,7 +1014,25 @@ describe("HistoryService: реальная SQLite", () => {
           ),
         "CONFLICT",
       );
-      fails(
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("открытое намерение запрещает отмену сессии на паузе без потери состояния", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Отмена на паузе" }, "первый-агент");
+      openHistoryIntent(history, session);
+      const active = history.get(session.id);
+      const paused = history.transition(
+        session.id,
+        "pause",
+        { runId: active.data.currentRunId, reason: "Ожидается уточнение." },
+        historyOwner(active),
+      );
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.transition(
             session.id,
@@ -557,6 +1042,23 @@ describe("HistoryService: реальная SQLite", () => {
           ),
         "CONFLICT",
       );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("resume создаёт новое участие с оператором и сохраняет прежний run и намерение", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Продолжение после паузы" }, "первый-агент");
+      const intent = openHistoryIntent(history, session);
+      const active = history.get(session.id);
+      const paused = history.transition(
+        session.id,
+        "pause",
+        { runId: active.data.currentRunId, reason: "Ожидается уточнение." },
+        historyOwner(active),
+      );
+
       const resumed = history.transition(
         session.id,
         "resume",
@@ -566,22 +1068,106 @@ describe("HistoryService: реальная SQLite", () => {
         },
         { actor: "второй-агент", ifRevision: paused.revision },
       );
-      expect(resumed.data.runs[0]).toEqual(paused.data.runs[0]!);
-      expect(resumed.data.runs[1]?.predecessorRunId).toBe(session.data.currentRunId);
-      const cancelledIntent = material(history, intent, "cancel");
-      expect(cancelledIntent.data.kind).toBe("cancel");
+
+      expect(resumed.data.status).toBe("open");
+      expect(resumed.data.currentRunId).not.toBe(session.data.currentRunId);
+      expect(resumed.data.runs[0]).toEqual(paused.data.runs[0]);
+      expect(currentHistoryRun(resumed)).toMatchObject({
+        predecessorRunId: session.data.currentRunId,
+        actor: "второй-агент",
+        reason: "Получено уточнение.",
+        operator: { name: null, email: "user@example.test", source: "environment" },
+      });
+      expect(history.intents(session.id)).toEqual([intent]);
+    });
+  });
+
+  test("отмена намерения после resume добавляет материал и сохраняет исходное намерение", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Пересмотр после паузы" }, "первый-агент");
+      const intent = openHistoryIntent(history, session);
+      const active = history.get(session.id);
+      const paused = history.transition(
+        session.id,
+        "pause",
+        { runId: active.data.currentRunId, reason: "Ожидается уточнение." },
+        historyOwner(active),
+      );
+      const resumed = history.transition(
+        session.id,
+        "resume",
+        { reason: "Поручение пересмотрено." },
+        { actor: "второй-агент", ifRevision: paused.revision },
+      );
+
+      const cancellation = recordHistoryMaterial(history, resumed, intent, "cancel");
+
+      expect(cancellation.data).toMatchObject({
+        kind: "cancel",
+        intentId: intent.id,
+        runId: resumed.data.currentRunId,
+        actor: "второй-агент",
+      });
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.intents(session.id)).toEqual([]);
+      expect(history.history(session.id)).toEqual([intent, cancellation]);
+    });
+  });
+
+  test("отмена после resume закрывает текущее участие и сохраняет прежнее вместе с результатом", () => {
+    withHistoryFixture((history) => {
+      const session = history.start({ title: "Отменить поручение" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const active = history.get(session.id);
+      const paused = history.transition(
+        session.id,
+        "pause",
+        { runId: active.data.currentRunId, reason: "Ожидается уточнение." },
+        historyOwner(active),
+      );
+      const resumed = history.transition(
+        session.id,
+        "resume",
+        { reason: "Поручение пересмотрено." },
+        { actor: "второй-агент", ifRevision: paused.revision },
+      );
+      recordHistoryMaterial(history, resumed, intent, "cancel");
       const ready = history.get(session.id);
+
       const cancelled = history.transition(
         session.id,
         "cancel",
         { runId: ready.data.currentRunId, result: "Поручение больше не требуется." },
-        owner(ready),
+        historyOwner(ready),
       );
-      expect(cancelled.data.status).toBe("cancelled");
-      expect(cancelled.data.runs[1]?.state).toBe("cancelled");
-      expect(cancelled.data.result).toBe("Поручение больше не требуется.");
-      fails(
+
+      expect(cancelled.data).toMatchObject({
+        status: "cancelled",
+        currentRunId: null,
+        result: "Поручение больше не требуется.",
+      });
+      expect(cancelled.data.runs[0]).toEqual(paused.data.runs[0]);
+      expect(cancelled.data.runs[1]).toMatchObject({
+        id: resumed.data.currentRunId,
+        state: "cancelled",
+        endReason: "Поручение больше не требуется.",
+      });
+      expect(history.get(session.id)).toEqual(cancelled);
+    });
+  });
+
+  test("takeover отменённой сессии отклоняется без изменения результата", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Отменённое поручение" }, "агент");
+      const cancelled = history.transition(
+        session.id,
+        "cancel",
+        { runId: session.data.currentRunId, result: "Поручение больше не требуется." },
+        historyOwner(session),
+      );
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.transition(
             session.id,
@@ -591,20 +1177,43 @@ describe("HistoryService: реальная SQLite", () => {
           ),
         "CONFLICT",
       );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
     });
   });
 
-  test("fork/attach: наследование пользователя создателя, независимые runs и явное принятие результата", () => {
-    fixture(({ history }) => {
-      const parent = history.start(
-        {
-          title: "Родительское поручение",
-          operator: { name: "Анна", email: "anna@example.test", source: "explicit" },
-        },
-        "родитель",
+  test("resume завершённой сессии отклоняется без изменения результата", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Завершённое поручение" }, "агент");
+      const finished = completeHistorySession(history, session);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          history.transition(
+            session.id,
+            "resume",
+            {},
+            { actor: "агент", ifRevision: finished.revision },
+          ),
+        "CONFLICT",
       );
-      const intent = open(history, parent);
-      const child = fork(history, intent);
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+});
+
+describe("Создание и подключение дочерней работы", () => {
+  test("fork создаёт pending-ребёнка исходного намерения и повышает ревизию родителя", () => {
+    withHistoryFixture((history) => {
+      const parent = history.start({ title: "Родительское поручение" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const current = history.get(parent.id);
+
+      const child = forkHistorySession(history, current, intent);
+
+      expect(child.revision).toBe(1);
       expect(child.data).toMatchObject({
         status: "pending",
         currentRunId: null,
@@ -613,9 +1222,25 @@ describe("HistoryService: реальная SQLite", () => {
         originCheckpointId: intent.id,
         createdByRunId: parent.data.currentRunId,
       });
-      expect(history.get(parent.id).revision).toBe(3);
-      fails(() => material(history, intent, "complete"), "CONFLICT");
-      fails(() => material(history, intent, "cancel"), "CONFLICT");
+      expect(history.get(parent.id).revision).toBe(current.revision + 1);
+      expect(history.get(parent.id).data.runs).toEqual(current.data.runs);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.tree(parent.id).map((entry) => entry.id)).toEqual([parent.id, child.id]);
+    });
+  });
+
+  test("attach после takeover родителя наследует оператора создателя и открывает независимый run", () => {
+    withHistoryFixture((history) => {
+      const parent = history.start(
+        {
+          title: "Родительское поручение",
+          operator: { name: "Анна", email: "anna@example.test", source: "explicit" },
+        },
+        "родитель",
+      );
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const currentParent = history.get(parent.id);
       const transferred = history.transition(
         parent.id,
         "takeover",
@@ -623,284 +1248,675 @@ describe("HistoryService: реальная SQLite", () => {
           reason: "Передать корневое поручение.",
           operator: { name: "Борис", email: null, source: "explicit" },
         },
-        { actor: "новый-родитель", ifRevision: 3 },
+        { actor: "новый-родитель", ifRevision: currentParent.revision },
       );
-      expect(history.get(child.id)).toEqual(child);
-      fails(
+      const beforeAttach = history.get(child.id);
+
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
+      );
+
+      expect(beforeAttach).toEqual(child);
+      expect(attached.revision).toBe(child.revision + 1);
+      expect(attached.data.status).toBe("open");
+      expect(currentHistoryRun(attached)).toMatchObject({
+        actor: "субагент",
+        operator: { name: "Анна", email: "anna@example.test", source: "inherited" },
+        predecessorRunId: null,
+      });
+      expect(attached.data.currentRunId).not.toBe(parent.data.currentRunId);
+      expect(attached.data.currentRunId).not.toBe(transferred.data.currentRunId);
+      expect(history.get(parent.id)).toEqual(transferred);
+    });
+  });
+
+  test("явный operator: null при attach отключает наследование оператора родителя", () => {
+    withHistoryFixture((history) => {
+      const parent = history.start(
+        {
+          title: "Родитель с оператором",
+          operator: { name: "Анна", email: null, source: "explicit" },
+        },
+        "родитель",
+      );
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+
+      const attached = history.transition(
+        child.id,
+        "attach",
+        { operator: null },
+        { actor: "субагент", ifRevision: child.revision },
+      );
+
+      expect(currentHistoryRun(attached).operator).toBeNull();
+      expect(history.get(child.id)).toEqual(attached);
+    });
+  });
+
+  test("переданный runId родителя при attach отклоняется без изменения ребёнка", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Родительское поручение" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
         () =>
           history.transition(
             child.id,
             "attach",
             { runId: parent.data.currentRunId },
-            { actor: "субагент", ifRevision: 1 },
+            { actor: "субагент", ifRevision: child.revision },
           ),
         "INVALID_INPUT",
       );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+});
+
+describe("Приёмка результата и закрытие дочерней работы", () => {
+  test.each(blockedChildClosures)("$name", ({ action }) => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Ожидать дочернюю работу" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      forkHistorySession(history, history.get(parent.id), intent);
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => recordHistoryMaterial(history, current, intent, action), "CONFLICT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("незавершённый подключённый ребёнок не принимается как результат", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Дождаться результата" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      history.transition(child.id, "attach", {}, { actor: "субагент", ifRevision: child.revision });
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            acceptedSessionIds: [child.id],
+          }),
+        "CONFLICT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("завершённый, но непринятый ребёнок запрещает закрыть исходное намерение", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Явно принять результат" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
       const attached = history.transition(
         child.id,
         "attach",
         {},
-        { actor: "субагент", ifRevision: 1 },
+        { actor: "субагент", ifRevision: child.revision },
       );
-      expect(attached.data.runs[0]?.operator).toEqual({
-        name: "Анна",
-        email: "anna@example.test",
-        source: "inherited",
-      });
-      expect(attached.data.currentRunId).not.toBe(transferred.data.currentRunId);
-      fails(
-        () => material(history, intent, "save", { acceptedSessionIds: [child.id] }),
+      completeHistorySession(history, attached);
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => recordHistoryMaterial(history, current, intent, "complete"),
         "CONFLICT",
       );
-      const childIntent = open(history, attached);
-      material(history, childIntent, "complete");
-      const completedChild = complete(history, history.get(child.id));
-      fails(() => material(history, intent, "complete"), "CONFLICT");
-      fails(
-        () => material(history, intent, "save", { acceptedSessionIds: [child.key] }),
-        "INVALID_INPUT",
-      );
-      fails(
-        () =>
-          material(history, intent, "save", { acceptedSessionIds: [`work-session:${child.id}`] }),
-        "INVALID_INPUT",
-      );
-      const acceptance = material(history, intent, "save", { acceptedSessionIds: [child.id] });
-      expect(acceptance.data.acceptedSessionIds).toEqual([child.id]);
-      expect(history.get(child.id)).toEqual(completedChild);
-      material(history, intent, "complete");
-      expect(complete(history, history.get(parent.id)).data.status).toBe("completed");
-      expect(history.tree(parent.id).map((entry) => entry.id)).toEqual([parent.id, child.id]);
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
     });
   });
 
-  test("принятие принадлежит исходному intent и прямому родителю; отменённый ребёнок не результат", () => {
-    fixture(({ history }) => {
-      const parent = history.start({ title: "Проверить границы принятия" }, "родитель");
-      const first = open(history, parent);
-      const second = open(history, history.get(parent.id), "Проверить другой сценарий");
-      const child = fork(history, first);
+  test.each(rejectedAcceptanceReferences)("$name", ({ form }) => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Приёмка по постоянному ID" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
       const attached = history.transition(
         child.id,
         "attach",
-        { operator: null },
-        { actor: "субагент", ifRevision: 1 },
+        {},
+        { actor: "субагент", ifRevision: child.revision },
       );
-      const childIntent = open(history, attached);
-      const grandchild = fork(history, childIntent);
+      completeHistorySession(history, attached);
+      const current = history.get(parent.id);
+      const references = { key: child.key, typedId: `work-session:${child.id}` };
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            acceptedSessionIds: [references[form]],
+          }),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("приёмка прямого ребёнка исходным намерением разрешает завершение родителя", () => {
+    withHistoryFixture((history) => {
+      const parent = history.start({ title: "Принять дочернюю проверку" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
+      );
+      const childIntent = openHistoryIntent(history, attached);
+      recordHistoryMaterial(history, history.get(child.id), childIntent, "complete");
+      const completedChild = completeHistorySession(history, history.get(child.id));
+      const current = history.get(parent.id);
+
+      const acceptance = recordHistoryMaterial(history, current, intent, "save", {
+        acceptedSessionIds: [child.id],
+      });
+      recordHistoryMaterial(history, history.get(parent.id), intent, "complete");
+      const finished = completeHistorySession(history, history.get(parent.id));
+
+      expect(acceptance.data.acceptedSessionIds).toEqual([child.id]);
+      expect(acceptance.data.intentId).toBe(intent.id);
+      expect(history.get(child.id)).toEqual(completedChild);
+      expect(finished.data.status).toBe("completed");
+      expect(history.tree(parent.id)).toEqual([finished, completedChild]);
+    });
+  });
+
+  test("результат внука отклоняется при приёмке корневым родителем без записи", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Проверить прямое родительство" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
+      );
+      const childIntent = openHistoryIntent(history, attached);
+      const grandchild = forkHistorySession(history, history.get(child.id), childIntent);
       const grandAttached = history.transition(
         grandchild.id,
         "attach",
         {},
-        { actor: "вложенный-агент", ifRevision: 1 },
+        { actor: "вложенный-агент", ifRevision: grandchild.revision },
       );
-      complete(history, grandAttached);
-      fails(
-        () => material(history, first, "save", { acceptedSessionIds: [grandchild.id] }),
+      completeHistorySession(history, grandAttached);
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            acceptedSessionIds: [grandchild.id],
+          }),
         "CONFLICT",
       );
-      material(history, childIntent, "complete", { acceptedSessionIds: [grandchild.id] });
-      complete(history, history.get(child.id));
-      fails(
-        () => material(history, second, "complete", { acceptedSessionIds: [child.id] }),
-        "CONFLICT",
-      );
-      material(history, first, "cancel", { acceptedSessionIds: [child.id] });
-      const cancelledChild = fork(history, second);
-      history.transition(
-        cancelledChild.id,
-        "cancel",
-        { result: "Проверка отменена до подключения." },
-        { actor: "родитель", ifRevision: 1 },
-      );
-      fails(
-        () => material(history, second, "save", { acceptedSessionIds: [cancelledChild.id] }),
-        "CONFLICT",
-      );
-      material(history, second, "complete");
-      expect(complete(history, history.get(parent.id)).data.status).toBe("completed");
-      expect(history.get(cancelledChild.id).data.result).toBe("Проверка отменена до подключения.");
-      expect(history.tree(parent.id)).toHaveLength(4);
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(history.tree(parent.id).map((entry) => entry.id)).toEqual([
+        parent.id,
+        child.id,
+        grandchild.id,
+      ]);
     });
   });
 
-  test("отказ SQLite после вставки checkpoint или ребёнка откатывает составную запись и поколение", () => {
-    fixture(({ db, history, path, connect }) => {
-      const session = history.start({ title: "Атомарная история" }, "агент");
-      const intent = open(history, session);
-      const before = history.get(session.id);
-      const generation = db.getGeneration();
-      const connection = new Database(path, { create: false, readwrite: true });
-      try {
-        connection.exec(`
-          CREATE TRIGGER history_fail_session BEFORE UPDATE ON entities
-          WHEN OLD.kind = 'work-session'
-          BEGIN SELECT RAISE(ABORT, 'Проверка отката составной записи'); END;
-        `);
-        fails(() => material(history, intent, "save"), "CONFLICT");
-        fails(() => fork(history, intent), "CONFLICT");
-        expect(db.getGeneration()).toBe(generation);
-        expect(history.get(session.id)).toEqual(before);
-        expect(history.history(session.id)).toEqual([intent]);
-        expect(history.list()).toHaveLength(1);
-        connection.exec("DROP TRIGGER history_fail_session");
-      } finally {
-        connection.close();
-      }
-      expect(material(history, intent, "save").data.sequence).toBe(2);
-      const saved = history.get(session.id);
+  test("другое намерение того же родителя не принимает ребёнка исходного намерения", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Проверить границы намерения" }, "родитель");
+      const first = openHistoryIntent(history, parent);
+      const second = openHistoryIntent(
+        history,
+        history.get(parent.id),
+        "Проверить другой сценарий",
+      );
+      const child = forkHistorySession(history, history.get(parent.id), first);
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
+      );
+      completeHistorySession(history, attached);
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, second, "complete", {
+            acceptedSessionIds: [child.id],
+          }),
+        "CONFLICT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test.each(acceptingClosureCases)("$name", ({ action, expectedKind }) => {
+    withHistoryFixture((history) => {
+      const parent = history.start({ title: "Закрыть пересмотренное намерение" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
+      );
+      const completedChild = completeHistorySession(history, attached);
+      const current = history.get(parent.id);
+
+      const closure = recordHistoryMaterial(history, current, intent, action, {
+        acceptedSessionIds: [child.id],
+      });
+      const finished = completeHistorySession(history, history.get(parent.id));
+
+      expect(closure.data).toMatchObject({
+        kind: expectedKind,
+        intentId: intent.id,
+        acceptedSessionIds: [child.id],
+      });
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.get(child.id)).toEqual(completedChild);
+      expect(finished.data.status).toBe("completed");
+    });
+  });
+
+  test("отменённый ребёнок отклоняется при приёмке как незавершённый результат", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Проверить отменённый результат" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      history.transition(
+        child.id,
+        "cancel",
+        { result: "Проверка отменена до подключения." },
+        { actor: "родитель", ifRevision: child.revision },
+      );
+      const current = history.get(parent.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () =>
+          recordHistoryMaterial(history, current, intent, "save", {
+            acceptedSessionIds: [child.id],
+          }),
+        "CONFLICT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("отмена pending-ребёнка сохраняет причину и разрешает закрыть родителя без приёмки", () => {
+    withHistoryFixture((history) => {
+      const parent = history.start({ title: "Закрыть ненужную дочернюю работу" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+
+      const cancelled = history.transition(
+        child.id,
+        "cancel",
+        { result: "Проверка отменена до подключения." },
+        { actor: "родитель", ifRevision: child.revision },
+      );
+      recordHistoryMaterial(history, history.get(parent.id), intent, "complete");
+      const finished = completeHistorySession(history, history.get(parent.id));
+
+      expect(cancelled.data).toMatchObject({
+        status: "cancelled",
+        currentRunId: null,
+        runs: [],
+        result: "Проверка отменена до подключения.",
+      });
+      expect(history.get(child.id)).toEqual(cancelled);
+      expect(finished.data.status).toBe("completed");
+      expect(history.tree(parent.id)).toEqual([finished, cancelled]);
+    });
+  });
+});
+
+describe("Атомарность составной записи истории", () => {
+  test("отказ SQLite после вставки материала откатывает запись и не расходует sequence", () => {
+    withHistoryFixture((history, { db, path }) => {
+      const session = history.start({ title: "Атомарное сохранение материала" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      withHistorySessionUpdateFailure(path, () => {
+        const error = expectHistoryError(
+          () => recordHistoryMaterial(history, current, intent, "save"),
+          "CONFLICT",
+        );
+
+        expect(error.details).toMatchObject({ reason: "Проверка отката составной записи" });
+      });
+      const rolledBack = snapshotHistoryStorage(db);
+      const saved = recordHistoryMaterial(history, current, intent, "save");
+
+      expect(rolledBack).toEqual(before);
+      expect(saved.data.sequence).toBe(2);
+      expect(saved.data.sessionRevision).toBe(current.revision + 1);
+      expect(history.history(session.id)).toEqual([intent, saved]);
+    });
+  });
+
+  test("отказ SQLite после вставки ребёнка откатывает ребёнка, родителя и поколение", () => {
+    withHistoryFixture((history, { db, path }) => {
+      const session = history.start({ title: "Атомарное создание ребёнка" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      withHistorySessionUpdateFailure(path, () => {
+        const error = expectHistoryError(
+          () => forkHistorySession(history, current, intent),
+          "CONFLICT",
+        );
+
+        expect(error.details).toMatchObject({ reason: "Проверка отката составной записи" });
+      });
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(history.list()).toEqual([current]);
+      expect(history.history(session.id)).toEqual([intent]);
+    });
+  });
+
+  test("отказ внешней транзакции откатывает fork и attach для другого SQLite-соединения", () => {
+    withHistoryFixture((history, { db, connect }) => {
+      const session = history.start({ title: "Вложенная составная операция" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      const current = history.get(session.id);
       const observer = connect();
+      const before = snapshotHistoryStorage(db);
+
       expect(() =>
         db.transaction(() => {
-          const nested = fork(history, intent);
-          history.transition(nested.id, "attach", {}, { actor: "субагент", ifRevision: 1 });
+          const child = forkHistorySession(history, current, intent);
+          history.transition(
+            child.id,
+            "attach",
+            {},
+            { actor: "субагент", ifRevision: child.revision },
+          );
+          // Отказ следует после обеих внутренних записей и должен откатить их внешней транзакцией.
           throw new Error("Отказ внешней составной операции");
         }),
       ).toThrow("Отказ внешней составной операции");
-      expect(observer.get(session.id)).toEqual(saved);
-      expect(observer.list()).toHaveLength(1);
+
+      expect(snapshotHistoryStorage(observer)).toEqual(before);
+      expect(new HistoryService(observer).get(session.id)).toEqual(current);
+    });
+  });
+});
+
+describe("Продолжение и закрытие намерений", () => {
+  test("открытое намерение запрещает завершение сессии без изменения истории", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Закрыть намерения перед сессией" }, "агент");
+      openHistoryIntent(history, session);
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => completeHistorySession(history, current), "CONFLICT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
     });
   });
 
-  test("закрытый intent и не-intent не принимают продолжение и fork, session требует закрытия", () => {
-    fixture(({ history }) => {
-      const session = history.start({ title: "Закрытие намерений" }, "агент");
-      const intent = open(history, session);
-      fails(() => complete(history, history.get(session.id)), "CONFLICT");
-      const progress = material(history, intent, "save");
-      fails(() => material(history, progress, "save"), "INVALID_INPUT");
-      fails(() => fork(history, progress), "INVALID_INPUT");
-      material(history, intent, "complete");
-      for (const action of ["save", "complete", "cancel"] as const) {
-        fails(() => material(history, intent, action), "CONFLICT");
-      }
-      fails(() => fork(history, intent), "CONFLICT");
+  test("материал progress вместо intent отклоняется при продолжении без записи", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Продолжить исходное намерение" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const progress = recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(
+        () => recordHistoryMaterial(history, current, progress, "save"),
+        "INVALID_INPUT",
+      );
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test("материал progress вместо intent отклоняется при fork без создания ребёнка", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Ответвление исходного намерения" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      const progress = recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => forkHistorySession(history, current, progress), "INVALID_INPUT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+    });
+  });
+
+  test.each(closedIntentActions)("$name", ({ action }) => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Неизменяемое завершённое намерение" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      recordHistoryMaterial(history, history.get(session.id), intent, "complete");
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => recordHistoryMaterial(history, current, intent, action), "CONFLICT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
       expect(history.history(session.id)).toHaveLength(3);
     });
   });
 
-  test("чтения находят старые открытые intents, фильтруют сессии и не изменяют поколение", () => {
-    fixture(({ db, history }) => {
-      const session = history.start(
-        { title: "Поиск старого намерения", description: "Основания поиска" },
-        "основной-агент",
-      );
-      const old = open(history, session);
+  test("fork закрытого намерения отклоняется без создания ребёнка и изменения родителя", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Ответвление после завершения" }, "агент");
+      const intent = openHistoryIntent(history, session);
+      recordHistoryMaterial(history, history.get(session.id), intent, "complete");
+      const current = history.get(session.id);
+      const before = snapshotHistoryStorage(db);
+
+      expectHistoryError(() => forkHistorySession(history, current, intent), "CONFLICT");
+
+      expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+    });
+  });
+});
+
+describe("Чтение намерений, контекста и списка сессий", () => {
+  test("старое намерение и полный журнал доступны после восьми новых закрытых намерений", () => {
+    withHistoryFixture((history, { db }) => {
+      const session = history.start({ title: "Поиск старого намерения" }, "агент");
+      const old = openHistoryIntent(history, session);
+      const expectedMaterials = [old];
       for (let index = 0; index < 8; index += 1) {
-        const intent = open(history, history.get(session.id), `Проверить случай ${index + 1}`);
-        material(history, intent, "complete");
+        const intent = openHistoryIntent(
+          history,
+          history.get(session.id),
+          `Проверить случай ${index + 1}`,
+        );
+        const result = recordHistoryMaterial(history, history.get(session.id), intent, "complete");
+        expectedMaterials.push(intent, result);
       }
-      const child = fork(history, old);
-      const attached = history.transition(
-        child.id,
-        "attach",
-        {},
-        { actor: "субагент", ifRevision: 1 },
-      );
-      const childIntent = open(history, attached);
-      const closed = complete(
-        history,
-        history.start({ title: "Закрытое поручение" }, "другой-агент"),
-      );
       const generation = db.getGeneration();
-      expect(history.intents(session.id).map((entry) => entry.id)).toEqual([old.id]);
-      expect(history.intents(session.id, true).map((entry) => entry.id)).toEqual([
-        old.id,
-        childIntent.id,
-      ]);
-      expect(history.list({ unfinished: false }).map((entry) => entry.id)).toEqual([closed.id]);
-      expect(history.list({ parent: session.key }).map((entry) => entry.id)).toEqual([child.id]);
-      expect(
-        history
-          .list({ status: "open", actor: "основной-агент", q: "ОСНОВАНИЯ", parent: null })
-          .map((entry) => entry.id),
-      ).toEqual([session.id]);
-      expect(history.history()).toHaveLength(18);
+
+      const intents = history.intents(session.id);
+      const allMaterials = history.history();
       const context = history.context(session.id);
-      expect(context.checkpoints).toHaveLength(17);
-      expect(context.children.map((entry) => entry.id)).toEqual([child.id]);
+
+      expect(intents).toEqual([old]);
+      expect(allMaterials).toEqual(expectedMaterials);
+      expect(context.checkpoints).toEqual(expectedMaterials);
       expect(context.intents).toEqual([old]);
       expect(db.getGeneration()).toBe(generation);
     });
   });
 
-  test("непроверенный ввод, пустые материалы, вымышленные ссылки и ревизии отвергаются без записи", () => {
-    fixture(({ db, history }) => {
-      for (const input of [
-        null,
-        [],
-        "поручение",
+  test("includeChildren добавляет открытые намерения ребёнка к намерениям родителя", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Общее чтение намерений" }, "родитель");
+      const parentIntent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), parentIntent);
+      const attached = history.transition(
+        child.id,
+        "attach",
         {},
-        { title: "  " },
-        { title: "Первая\nВторая" },
-        { title: "Поручение", extra: true },
-        { title: "Поручение", operator: { name: 1, source: "explicit" } },
-      ]) {
-        fails(() => history.start(input as Record<string, unknown>, "агент"), "INVALID_INPUT");
-      }
-      expect(history.list()).toEqual([]);
-      const session = history.start({ title: "Проверка ввода" }, "агент");
+        { actor: "субагент", ifRevision: child.revision },
+      );
+      const childIntent = openHistoryIntent(history, attached);
       const generation = db.getGeneration();
-      const valid = {
-        title: "Проверить вход",
-        body: "Содержательный материал.",
-        runId: session.data.currentRunId,
-      };
-      for (const input of [
-        { ...valid, body: "\n \t" },
-        { ...valid, title: 42 },
-        { ...valid, references: [42] },
-        { ...valid, references: new Array(1) },
-        { ...valid, unknown: true },
-        { ...valid, acceptedSessionIds: [] },
-      ]) {
-        fails(() => history.checkpoint(session.id, "open", input, owner(session)), "INVALID_INPUT");
-      }
-      for (const ifRevision of [0, -1, 1.5, NaN, Infinity, "1"]) {
-        fails(
-          () =>
-            history.checkpoint(session.id, "open", valid, {
-              actor: "агент",
-              ifRevision,
-            } as WriteOptions),
-          "INVALID_INPUT",
-        );
-      }
-      fails(
-        () =>
-          history.checkpoint(
-            session.id,
-            "open",
-            { ...valid, references: [crypto.randomUUID()] },
-            owner(session),
-          ),
-        "NOT_FOUND",
+
+      const ownIntents = history.intents(parent.id);
+      const allIntents = history.intents(parent.id, true);
+
+      expect(ownIntents).toEqual([parentIntent]);
+      // В одной миллисекунде разные сессии упорядочиваются по ID, а не по родительству.
+      expect(allIntents).toHaveLength(2);
+      expect(allIntents).toEqual(expect.arrayContaining([parentIntent, childIntent]));
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("контекст включает свои материалы и детей, а общая история также включает материалы ребёнка", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Контекст поручения" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const progress = recordHistoryMaterial(history, history.get(parent.id), intent, "save");
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      const attached = history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "субагент", ifRevision: child.revision },
       );
-      fails(() => history.transition(session.id, "takeover", {}, owner(session)), "INVALID_INPUT");
-      fails(
-        () =>
-          history.transition(
-            session.id,
-            "pause",
-            { runId: session.data.currentRunId, reason: " " },
-            owner(session),
-          ),
-        "INVALID_INPUT",
+      const childIntent = openHistoryIntent(history, attached);
+      const currentParent = history.get(parent.id);
+      const currentChild = history.get(child.id);
+      const generation = db.getGeneration();
+
+      const context = history.context(parent.id);
+      const allMaterials = history.history();
+
+      expect(context).toEqual({
+        session: currentParent,
+        checkpoints: [intent, progress],
+        children: [currentChild],
+        intents: [intent],
+      });
+      expect(allMaterials).toHaveLength(3);
+      expect(allMaterials).toEqual(expect.arrayContaining([intent, progress, childIntent]));
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("unfinished: false возвращает только закрытую сессию без изменения поколения", () => {
+    withHistoryFixture((history, { db }) => {
+      history.start({ title: "Открытое поручение" }, "агент");
+      const closed = completeHistorySession(
+        history,
+        history.start({ title: "Закрытое поручение" }, "другой-агент"),
       );
-      fails(
-        () =>
-          history.transition(
-            session.id,
-            "complete",
-            { runId: session.data.currentRunId, result: " " },
-            owner(session),
-          ),
-        "INVALID_INPUT",
+      const generation = db.getGeneration();
+
+      const sessions = history.list({ unfinished: false });
+
+      expect(sessions).toEqual([closed]);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("фильтр по ключу родителя возвращает только его прямого ребёнка", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start({ title: "Корневое поручение" }, "родитель");
+      const intent = openHistoryIntent(history, parent);
+      const child = forkHistorySession(history, history.get(parent.id), intent);
+      history.start({ title: "Другое корневое поручение" }, "другой-агент");
+      const generation = db.getGeneration();
+
+      const sessions = history.list({ parent: parent.key });
+
+      expect(sessions).toEqual([child]);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("совместные фильтры находят открытую корневую сессию автора по описанию без учёта регистра", () => {
+    withHistoryFixture((history, { db }) => {
+      const parent = history.start(
+        { title: "Поиск поручения", description: "Основания поиска" },
+        "основной-агент",
       );
-      fails(() => history.transition(session.id, "toString", {}, owner(session)), "INVALID_INPUT");
-      expect(history.get(session.id)).toEqual(session);
-      expect(history.history()).toEqual([]);
+      const intent = openHistoryIntent(history, parent);
+      const beforeFork = history.get(parent.id);
+      const child = history.transition(
+        intent.id,
+        "fork",
+        {
+          title: "Дочернее поручение",
+          description: "Основания поиска",
+          runId: currentHistoryRun(beforeFork).id,
+        },
+        historyOwner(beforeFork),
+      );
+      history.transition(
+        child.id,
+        "attach",
+        {},
+        { actor: "основной-агент", ifRevision: child.revision },
+      );
+      // Каждая лишняя сессия нарушает ровно один фильтр, чтобы условия не маскировали друг друга.
+      history.start(
+        { title: "Другое поручение", description: "Иное содержание" },
+        "основной-агент",
+      );
+      history.start(
+        { title: "Поручение другого автора", description: "Основания поиска" },
+        "другой-агент",
+      );
+      completeHistorySession(
+        history,
+        history.start(
+          { title: "Закрытое поручение", description: "Основания поиска" },
+          "основной-агент",
+        ),
+      );
+      const session = history.get(parent.id);
+      const generation = db.getGeneration();
+
+      const sessions = history.list({
+        status: "open",
+        actor: "основной-агент",
+        q: "ОСНОВАНИЯ",
+        parent: null,
+      });
+
+      expect(sessions).toEqual([session]);
       expect(db.getGeneration()).toBe(generation);
     });
   });
