@@ -16,6 +16,7 @@
       "name": "@relay/cli",
       "version": "0.0.0",
       "dependencies": {
+        "@gunshi/plugin-completion": "1.0.0-rc.1",
         "@gunshi/plugin-i18n": "1.0.0-rc.1",
         "@relay/contracts": "workspace:*",
         "@relay/core": "workspace:*",
@@ -106,7 +107,11 @@
     },
   },
   "packages": {
+    "@bomb.sh/tab": ["@bomb.sh/tab@0.0.22", "", { "peerDependencies": { "cac": "^6.7.14 || ^7.0.0", "citty": "^0.1.6 || ^0.2.0", "commander": "^13.1.0 || ^14.0.0 || ^15.0.0" }, "optionalPeers": ["cac", "citty", "commander"], "bin": { "tab": "dist/bin/cli.mjs" } }, "sha512-l5IuWpV7szqG4MM6A7I+qPMmP2qPMq2TD4veIXaOH0sD53dV0Tv8WZPARp5O5Kp4+y4fnVCl3VL1HZKNghO1yg=="],
+
     "@gunshi/plugin": ["@gunshi/plugin@1.0.0-rc.1", "", {}, "sha512-zVR8mHRsUmjxU/2g3Tr+sMgJMwTFfjZDY+KK9OXYtauPdj0E6QFmkbcUoc/LUwOVXjR+QPjfC4OYSnFMuu/2bQ=="],
+
+    "@gunshi/plugin-completion": ["@gunshi/plugin-completion@1.0.0-rc.1", "", { "dependencies": { "@bomb.sh/tab": "^0.0.22", "@gunshi/plugin": "1.0.0-rc.1" }, "peerDependencies": { "@gunshi/plugin-i18n": "1.0.0-rc.1" } }, "sha512-JxsNeEjAK9ntS+xuM8Hw9dAw2FOo18SVV7VinukyaNBipGMlC16sz4nP6vnpCgybZ0VZGEf63KgTvZZTxZe0qQ=="],
 
     "@gunshi/plugin-i18n": ["@gunshi/plugin-i18n@1.0.0-rc.1", "", { "dependencies": { "@gunshi/plugin": "1.0.0-rc.1" }, "peerDependencies": { "@gunshi/plugin-global": "1.0.0-rc.1" }, "optionalPeers": ["@gunshi/plugin-global"] }, "sha512-KIsUtwcjT+ecGd4Q0KU4AogKNHorYX96jfbeNSIu4ezSZ79DH2x3MXmjB0YQDYpL92inaLbj1mg8qbDWKZVNAQ=="],
 

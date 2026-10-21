@@ -1,11 +1,12 @@
 import type { CliOptions, Command, CommandContext } from "gunshi";
+import type { RegistryCommand } from "../execution/registry.types";
 
 /**
  * Конфигурация Gunshi с обязательными частями, на которые опирается встраиваемый runCli.
  */
 export interface CliProgramOptions extends CliOptions {
   /* Изолированное дерево корневых команд текущего запуска. */
-  subCommands: Map<string, Command>;
+  subCommands: Map<string, RegistryCommand>;
 
   /**
    * Проверяет оставшиеся позиционные аргументы до вызова предметного обработчика.

@@ -13,6 +13,7 @@
     "test:process": "bun test .process.test.ts"
   },
   "dependencies": {
+    "@gunshi/plugin-completion": "1.0.0-rc.1",
     "@gunshi/plugin-i18n": "1.0.0-rc.1",
     "@relay/contracts": "workspace:*",
     "@relay/core": "workspace:*",

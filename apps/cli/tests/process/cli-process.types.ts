@@ -9,9 +9,13 @@ export interface BinaryResult extends InvocationResult {
 }
 
 /**
- * Параметры принимающей стороны настоящего stdout дочернего процесса.
+ * Параметры процессной проверки CLI с изолированными HOME, cwd и путём к бинарнику.
  */
 export interface BinaryOptions {
   /* Закрыть чтение stdout сразу после запуска; по умолчанию поток полностью читается. */
   readonly closeStdout?: boolean;
+  /* Оставить stdin открытым без данных, чтобы обнаружить его неожиданное чтение. */
+  readonly openStdin?: boolean;
+  /* Явный процесс-обёртка, например Bash; по умолчанию запускается сам бинарник. */
+  readonly command?: readonly string[];
 }

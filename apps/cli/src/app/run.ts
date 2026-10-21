@@ -8,6 +8,7 @@ import { createProgram } from "./program";
 import type { CliOutput } from "./run.types";
 import { processRuntime } from "../execution/runtime";
 import type { CliRuntime } from "../execution/runtime.types";
+import type { CliProgram } from "./program.types";
 
 export type { CliRuntime } from "../execution/runtime.types";
 export type { CliOutput } from "./run.types";
@@ -23,10 +24,23 @@ export async function runCli(
   output: CliOutput,
   runtime: CliRuntime = processRuntime(),
 ): Promise<number> {
+  return runProgram(argv, output, () => createProgram(runtime));
+}
+
+/**
+ * Создаёт и выполняет программу с общей обработкой результата, диагностики и EPIPE.
+ * Процессный вход может подключать плагины с собственным stdout; изолированный runCli
+ * передаёт только плагины, использующие явные потоки. Программа принадлежит одному запуску.
+ */
+export async function runProgram(
+  argv: readonly string[],
+  output: CliOutput,
+  create: () => CliProgram,
+): Promise<number> {
   let inputFailure: ValidationFailure | undefined;
   let format = "text";
   try {
-    const { command, options } = createProgram(runtime);
+    const { command, options } = create();
     const result = await cli([...argv], command, {
       ...options,
       /**
