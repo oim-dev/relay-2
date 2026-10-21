@@ -46,18 +46,18 @@ describe("Локальные регистрации workspace", () => {
     expect(existsSync(home)).toBe(false);
   });
 
-  test("регистрация каталога и конфига сохраняет нормализованные пути в порядке добавления", () => {
+  test("регистрация каталогов сохраняет абсолютные пути в порядке добавления", () => {
     const { cwd, home, root } = fixture;
     initializeWorkspace({ cwd, home });
-    const alpha = initializeProject({ cwd: join(cwd, "alpha"), home });
+    initializeProject({ cwd: join(cwd, "alpha"), home });
     const beta = initializeProject({ cwd: join(root, "beta"), home });
 
     registerProject({ cwd, home }, "alpha", "alpha");
-    registerProject({ cwd, home }, "beta", beta.configPath);
+    registerProject({ cwd, home }, "beta", dirname(beta.configPath));
 
     expect(listProjects({ cwd, home })).toEqual([
-      { name: "alpha", configPath: alpha.configPath },
-      { name: "beta", configPath: beta.configPath },
+      { name: "alpha", path: join(cwd, "alpha") },
+      { name: "beta", path: join(root, "beta") },
     ]);
   });
 
@@ -70,12 +70,12 @@ describe("Локальные регистрации workspace", () => {
     // нарушит снимок независимо от скорости записи и планирования другого процесса.
     const reader = openSync(workspace.configPath, "r");
     try {
-      registerProject({ cwd, home }, "alpha", project.configPath);
+      registerProject({ cwd, home }, "alpha", dirname(project.configPath));
 
       expect(readFileSync(reader, "utf8")).toBe(original);
       expect(JSON.parse(readFileSync(workspace.configPath, "utf8"))).toEqual({
         version: 1,
-        projects: [{ name: "alpha", configPath: project.configPath }],
+        projects: [{ name: "alpha", path: join(root, "alpha") }],
       });
     } finally {
       closeSync(reader);
@@ -98,7 +98,7 @@ describe("Локальные регистрации workspace", () => {
     });
     try {
       const code = runtimeErrorCode(() =>
-        registerProject({ cwd, home }, "alpha", project.configPath),
+        registerProject({ cwd, home }, "alpha", dirname(project.configPath)),
       );
 
       expect(code).toBe("IO_ERROR");
@@ -111,10 +111,8 @@ describe("Локальные регистрации workspace", () => {
       publisher.mockRestore();
     }
     // После снятия отказа та же операция проходит без ручного освобождения замка.
-    registerProject({ cwd, home }, "alpha", project.configPath);
-    expect(listProjects({ cwd, home })).toEqual([
-      { name: "alpha", configPath: project.configPath },
-    ]);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
+    expect(listProjects({ cwd, home })).toEqual([{ name: "alpha", path: join(root, "alpha") }]);
   });
 
   test("workspace требует явного выбора имени проекта", () => {
@@ -130,30 +128,36 @@ describe("Локальные регистрации workspace", () => {
     const { cwd, home } = fixture;
     initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(cwd, "alpha"), home });
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
 
     const selected = resolveProject({ cwd, home, project: "alpha" });
 
     expect(selected).toEqual(project);
   });
 
-  test("выбор регистрации из cwd другого проекта использует родительский workspace", () => {
+  test("выбор регистрации и список из каталога проекта не используют родительский workspace", () => {
     const { cwd, home } = fixture;
     initializeWorkspace({ cwd, home });
     initializeProject({ cwd: join(cwd, "alpha"), home });
     const beta = initializeProject({ cwd: join(cwd, "beta"), home });
-    registerProject({ cwd, home }, "beta", beta.configPath);
+    registerProject({ cwd, home }, "beta", dirname(beta.configPath));
 
-    const selected = resolveProject({ cwd: join(cwd, "alpha"), home, project: "beta" });
+    const code = runtimeErrorCode(() =>
+      resolveProject({ cwd: join(cwd, "alpha"), home, project: "beta" }),
+    );
 
-    expect(selected).toEqual(beta);
+    expect(code).toBe("PROJECT_NOT_FOUND");
+    expect(runtimeErrorCode(() => listProjects({ cwd: join(cwd, "alpha"), home }))).toBe(
+      "WORKSPACE_NOT_FOUND",
+    );
+    expect(resolveProject({ cwd, home, project: "beta" })).toEqual(beta);
   });
 
   test("явный workspace позволяет выбрать регистрацию из внешнего cwd", () => {
     const { cwd, home, root } = fixture;
     const workspace = initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(cwd, "beta"), home });
-    registerProject({ cwd, home }, "beta", project.configPath);
+    registerProject({ cwd, home }, "beta", dirname(project.configPath));
 
     const selected = resolveProject({
       cwd: root,
@@ -174,21 +178,19 @@ describe("Локальные регистрации workspace", () => {
     expect(code).toBe("PROJECT_NOT_FOUND");
   });
 
-  test("повтор регистрации через symlink является no-op для того же физического конфига", () => {
+  test("повтор регистрации через symlink является no-op для того же физического каталога", () => {
     const { cwd, home, root } = fixture;
     const workspace = initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(root, "alpha"), home });
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
     const original = readFileSync(workspace.configPath, "utf8");
     const inode = statSync(workspace.configPath).ino;
-    const alias = join(root, "project-link.json");
-    symlinkSync(project.configPath, alias);
+    const alias = join(root, "project-link");
+    symlinkSync(dirname(project.configPath), alias);
 
     registerProject({ cwd, home }, "alpha", alias);
 
-    expect(listProjects({ cwd, home })).toEqual([
-      { name: "alpha", configPath: project.configPath },
-    ]);
+    expect(listProjects({ cwd, home })).toEqual([{ name: "alpha", path: join(root, "alpha") }]);
     expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
     expect(statSync(workspace.configPath).ino).toBe(inode);
   });
@@ -198,21 +200,23 @@ describe("Локальные регистрации workspace", () => {
     const workspace = initializeWorkspace({ cwd, home });
     const alpha = initializeProject({ cwd: join(root, "alpha"), home });
     const beta = initializeProject({ cwd: join(root, "beta"), home });
-    registerProject({ cwd, home }, "alpha", alpha.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(alpha.configPath));
     const original = readFileSync(workspace.configPath, "utf8");
 
-    const code = runtimeErrorCode(() => registerProject({ cwd, home }, "alpha", beta.configPath));
+    const code = runtimeErrorCode(() =>
+      registerProject({ cwd, home }, "alpha", dirname(beta.configPath)),
+    );
 
     expect(code).toBe("PROJECT_EXISTS");
     expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
-    expect(listProjects({ cwd, home })).toEqual([{ name: "alpha", configPath: alpha.configPath }]);
+    expect(listProjects({ cwd, home })).toEqual([{ name: "alpha", path: join(root, "alpha") }]);
   });
 
   test("удаление регистрации сохраняет конфиг и данные доступного проекта", () => {
     const { cwd, home, root } = fixture;
     initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(root, "alpha"), home, name: "Сохранённый" });
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
     const original = readFileSync(project.configPath, "utf8");
 
     const removed = unregisterProject({ cwd, home }, "alpha");
@@ -243,7 +247,7 @@ describe("Локальные регистрации workspace", () => {
     const { cwd, home, root } = fixture;
     initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(root, "alpha"), home });
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
     unregisterProject({ cwd, home }, "alpha");
 
     const removed = unregisterProject({ cwd, home }, "alpha");
@@ -256,10 +260,10 @@ describe("Локальные регистрации workspace", () => {
     const { cwd, home, root } = fixture;
     initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(root, "alpha"), home });
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
     unregisterProject({ cwd, home }, "alpha");
 
-    registerProject({ cwd, home }, "alpha", project.configPath);
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
 
     expect(resolveProject({ cwd, home, project: "alpha" })).toEqual(project);
   });
@@ -267,12 +271,12 @@ describe("Локальные регистрации workspace", () => {
   test("недоступную регистрацию можно перечислить и удалить без восстановления проекта", () => {
     const { cwd, home, root } = fixture;
     const workspace = initializeWorkspace({ cwd, home });
-    const missing = join(root, "missing", ".relay", "config.json");
+    const missing = join(root, "missing");
     writeConfig(workspace.configPath, {
       version: 1,
-      projects: [{ name: "broken", configPath: relative(cwd, missing) }],
+      projects: [{ name: "broken", path: relative(cwd, missing) }],
     });
-    expect(listProjects({ cwd, home })).toEqual([{ name: "broken", configPath: missing }]);
+    expect(listProjects({ cwd, home })).toEqual([{ name: "broken", path: missing }]);
     expect(runtimeErrorCode(() => resolveProject({ cwd, home, project: "broken" }))).toBe(
       "CONFIG_NOT_FOUND",
     );
@@ -312,20 +316,23 @@ describe("Локальные регистрации workspace", () => {
     expect(existsSync(home)).toBe(false);
   });
 
-  test("workspace нельзя зарегистрировать вместо проекта", () => {
-    const { cwd, home } = fixture;
+  test("валидный нестандартный файл конфига не принимается вместо каталога проекта", () => {
+    const { cwd, home, root } = fixture;
     const workspace = initializeWorkspace({ cwd, home });
+    const directory = join(root, "alpha");
+    const project = initializeProject({ cwd: directory, home, config: "custom.json" });
     const original = readFileSync(workspace.configPath, "utf8");
 
     const code = runtimeErrorCode(() =>
-      registerProject({ cwd, home }, "workspace", workspace.configPath),
+      registerProject({ cwd, home }, "alpha", project.configPath),
     );
 
     expect(code).toBe("INVALID_CONFIG");
     expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
     expect(listProjects({ cwd, home })).toEqual([]);
     expect(readdirSync(cwd)).toEqual(["relay.workspace.json"]);
-    expect(existsSync(home)).toBe(false);
+    expect(readdirSync(directory)).toEqual(["custom.json"]);
+    expect(resolveProject({ cwd: directory, home, config: "custom.json" })).toEqual(project);
   });
 
   test("пустое имя регистрации отклоняется без изменения workspace", () => {
@@ -340,5 +347,21 @@ describe("Локальные регистрации workspace", () => {
     expect(listProjects({ cwd, home })).toEqual([]);
     expect(readdirSync(cwd)).toEqual(["relay.workspace.json"]);
     expect(existsSync(home)).toBe(false);
+  });
+
+  test("каталог без своего relay.config.json не использует конфиг родителя при регистрации", () => {
+    const { cwd, home, root } = fixture;
+    const workspace = initializeWorkspace({ cwd, home });
+    const parent = initializeProject({ cwd: join(root, "parent"), home });
+    const nested = join(root, "parent", "nested");
+    fs.mkdirSync(nested);
+    const original = readFileSync(workspace.configPath, "utf8");
+
+    const code = runtimeErrorCode(() => registerProject({ cwd, home }, "nested", nested));
+
+    expect(code).toBe("CONFIG_NOT_FOUND");
+    expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
+    expect(readdirSync(nested)).toEqual([]);
+    expect(resolveProject({ cwd: join(root, "parent"), home })).toEqual(parent);
   });
 });

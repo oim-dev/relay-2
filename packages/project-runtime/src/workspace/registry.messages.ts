@@ -6,7 +6,7 @@ export const workspaceMessages = {
   emptyProjectPath: "Путь проекта не должен быть пустым",
 
   /**
-   * Описывает отсутствие workspace над рабочим каталогом.
+   * Описывает отсутствие workspace в рабочем каталоге.
    */
   workspaceNotFound: (cwd: string): string => `Workspace не найден: ${cwd}`,
 
@@ -17,7 +17,7 @@ export const workspaceMessages = {
     `Нельзя зарегистрировать workspace вместо проекта: ${path}`,
 
   /**
-   * Указывает имя регистрации, уже связанное с другим конфигом.
+   * Указывает имя регистрации, уже связанное с другим каталогом проекта.
    */
   registrationExists: (name: string): string => `Имя проекта уже зарегистрировано: ${name}`,
 } as const;

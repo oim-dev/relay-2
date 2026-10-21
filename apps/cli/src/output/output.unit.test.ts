@@ -6,6 +6,27 @@ const unsafeText =
 const longBody = "# Полный текст\n\n" + "    строка с отступом\n".repeat(20_000) + "КОНЕЦ";
 
 describe("Представление результата CLI", () => {
+  test("текстовый список workspace показывает путь к каталогу проекта", () => {
+    const rendered = renderResult(
+      {
+        data: { items: [{ name: "commerce", path: "/projects/commerce" }] },
+        meta: {
+          page: {
+            count: 1,
+            total: 1,
+            limit: 20,
+            nextCursor: null,
+            nextCommand: null,
+            consistency: "snapshot",
+          },
+        },
+      },
+      "text",
+    );
+
+    expect(rendered).toContain("/projects/commerce");
+  });
+
   test("терминальный текст обезвреживает ANSI/OSC, C0/C1 и bidi, сохраняя Markdown и Unicode", () => {
     const rendered = terminalText(unsafeText);
 

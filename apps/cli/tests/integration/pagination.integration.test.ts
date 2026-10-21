@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { EntityRecord } from "@relay/contracts";
 import { KnowledgeService, TasksService } from "@relay/core";
 import { initializeWorkspace, registerProject } from "@relay/project-runtime";
@@ -73,8 +73,8 @@ describe("Пагинация списков CLI", () => {
       const cwd = join(cli.root, "workspace");
       const options = { cwd, config: "registry.json" };
       const workspace = initializeWorkspace(options);
-      registerProject(options, "alpha", firstProject.configPath);
-      registerProject(options, "beta", secondProject.configPath);
+      registerProject(options, "alpha", dirname(firstProject.configPath));
+      registerProject(options, "beta", dirname(secondProject.configPath));
 
       const first = await cli.page(
         ["workspace", "project", "list", "--config", options.config, "--limit", "1"],
@@ -100,14 +100,14 @@ describe("Пагинация списков CLI", () => {
       );
 
       expect(first.data).toEqual({
-        items: [{ name: "alpha", configPath: firstProject.configPath }],
+        items: [{ name: "alpha", path: cli.runtime.cwd }],
       });
       expect(first.meta.page).toMatchObject({ count: 1, limit: 1, total: 2 });
       expect(first.meta.page.nextCommand).toContain(`--config=${workspace.configPath}`);
       expect(first.meta.page.nextCommand).toContain("--limit=1");
       expect(first.meta.page.nextCommand).toContain(`--cursor=${cursor}`);
       expect(last).toEqual({
-        data: { items: [{ name: "beta", configPath: secondProject.configPath }] },
+        data: { items: [{ name: "beta", path: join(cli.root, "other") }] },
         meta: {
           page: {
             count: 1,

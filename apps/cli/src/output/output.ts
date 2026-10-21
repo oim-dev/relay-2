@@ -96,7 +96,7 @@ function renderSummary(value: unknown): string {
       value.title ?? value.name,
       value.status,
       completion,
-      value.configPath,
+      value.path ?? value.configPath,
     ].filter((part) => part !== undefined);
     return outputMessages.summary(parts) || renderFullValue(value);
   }

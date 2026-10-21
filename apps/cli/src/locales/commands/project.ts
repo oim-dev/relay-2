@@ -13,5 +13,5 @@ export const projectCommandMessages = {
   projectAdd: "Зарегистрировать существующий локальный проект",
   projectRemove: "Удалить регистрацию проекта",
   registrationName: "Имя регистрации",
-  registrationPath: "Каталог или конфигурация проекта",
+  registrationPath: "Каталог проекта с relay.config.json",
 } as const;

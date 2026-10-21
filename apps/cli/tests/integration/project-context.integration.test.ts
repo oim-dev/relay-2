@@ -1,7 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { KnowledgeService } from "@relay/core";
 import { initializeWorkspace, registerProject } from "@relay/project-runtime";
 import { ProjectDatabase } from "@relay/storage";
@@ -38,11 +38,28 @@ describe("Локальный проект CLI", () => {
         databasePath: stringValue(data.databasePath),
         configPath: stringValue(data.configPath),
       };
+      expect(project.configPath).toBe(join(cli.runtime.cwd, "relay.config.json"));
       expect(cli.withDatabase(project, (db) => db.get(project.projectId)?.data)).toEqual({
         name: "Новый проект",
         slug: "new-project",
       });
       expect((await cli.entity(["project", "get"])).id).toBe(project.projectId);
+    });
+  });
+
+  test("из вложенного каталога требуется явный config, родительский проект не выбирается", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+      const cwd = join(cli.runtime.cwd, "nested");
+      mkdirSync(cwd);
+
+      const error = await cli.error(["project", "get"], 3, { cwd });
+
+      expect(error.code).toBe("PROJECT_NOT_FOUND");
+      const selected = await cli.entity(["project", "get", "--config", "../relay.config.json"], {
+        cwd,
+      });
+      expect(selected.id).toBe(project.projectId);
     });
   });
 
@@ -150,8 +167,8 @@ describe("Выбор и регистрация проектов workspace", () =
       const cwd = join(cli.root, "workspace");
       mkdirSync(cwd);
       initializeWorkspace({ cwd });
-      registerProject({ cwd }, "one", first.configPath);
-      registerProject({ cwd }, "two", second.configPath);
+      registerProject({ cwd }, "one", dirname(first.configPath));
+      registerProject({ cwd }, "two", dirname(second.configPath));
 
       const error = await cli.error(["project", "get"], 2, { cwd });
 
@@ -170,8 +187,8 @@ describe("Выбор и регистрация проектов workspace", () =
         const cwd = join(cli.root, "workspace");
         mkdirSync(cwd);
         initializeWorkspace({ cwd });
-        registerProject({ cwd }, "one", projects.one.configPath);
-        registerProject({ cwd }, "two", projects.two.configPath);
+        registerProject({ cwd }, "one", dirname(projects.one.configPath));
+        registerProject({ cwd }, "two", dirname(projects.two.configPath));
 
         const selected = await cli.entity(argv, { cwd });
 
@@ -193,20 +210,22 @@ describe("Выбор и регистрация проектов workspace", () =
     });
   });
 
-  test("добавление регистрации публикует её имя и путь к конфигурации проекта", async () => {
+  test("добавление регистрации публикует её имя и путь к каталогу проекта", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const cwd = join(cli.root, "workspace");
       mkdirSync(cwd);
       initializeWorkspace({ cwd });
 
-      await cli.success(["workspace", "project", "add", "one", project.configPath], { cwd });
+      await cli.success(["workspace", "project", "add", "one", dirname(project.configPath)], {
+        cwd,
+      });
 
       const registered = await cli.page(["workspace", "project", "list"], objectValue, { cwd });
       expect(registered.meta.page.total).toBe(1);
-      expect(registered.data.items[0]).toMatchObject({
+      expect(registered.data.items[0]).toEqual({
         name: "one",
-        configPath: project.configPath,
+        path: cli.runtime.cwd,
       });
     });
   });
@@ -217,7 +236,7 @@ describe("Выбор и регистрация проектов workspace", () =
       const cwd = join(cli.root, "workspace");
       mkdirSync(cwd);
       initializeWorkspace({ cwd });
-      registerProject({ cwd }, "one", project.configPath);
+      registerProject({ cwd }, "one", dirname(project.configPath));
 
       await cli.success(["workspace", "project", "remove", "one"], { cwd });
 

@@ -1,8 +1,13 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { readConfig } from "../configuration/config";
-import { explicitConfig, findConfig, validateOptions } from "../configuration/paths";
+import {
+  explicitConfig,
+  findConfig,
+  projectConfigName,
+  validateOptions,
+} from "../configuration/paths";
 import type { ProjectConfig, WorkspaceConfig } from "../configuration/config.types";
 import { withFileErrors } from "../configuration/files";
 import type { ProjectLocation } from "./location.types";
@@ -30,8 +35,8 @@ export function readProjectLocation(path: string, config: ProjectConfig): Projec
 }
 
 /**
- * Выбирает регистрацию из уже прочитанного workspace и проверяет её проектную конфигурацию.
- * Отсутствующий выбор, неизвестное имя и ссылка на workspace имеют разные диагностики.
+ * Выбирает каталог из workspace и читает обязательный relay.config.json в его корне.
+ * Отсутствующий выбор, неизвестное имя и неверная проектная конфигурация имеют разные диагностики.
  */
 function resolveWorkspaceProject(
   config: WorkspaceConfig,
@@ -47,20 +52,21 @@ function resolveWorkspaceProject(
   if (!registration) {
     throw new RelayError("PROJECT_NOT_FOUND", projectMessages.registrationNotFound(projectName), 3);
   }
-  const project = readConfig(registration.configPath);
+  const configPath = join(registration.path, projectConfigName);
+  const project = readConfig(configPath);
   if ("projects" in project) {
     throw new RelayError(
       "INVALID_CONFIG",
-      projectMessages.registrationRequiresProject(registration.configPath),
+      projectMessages.registrationRequiresProject(configPath),
       2,
     );
   }
-  return readProjectLocation(registration.configPath, project);
+  return readProjectLocation(configPath, project);
 }
 
 /**
- * Разрешает явный конфиг либо ближайший проект/workspace и проверяет доступность выбранной базы.
- * project ограничивает неявный поиск workspace; с явным проектным конфигом он недопустим.
+ * Разрешает явный конфиг либо проект/workspace только в cwd и проверяет выбранную базу.
+ * project выбирает workspace в cwd; с явным проектным конфигом он недопустим.
  * Чтение конфигов не создаёт файлов. Проверка базы открывает и закрывает соединение Storage;
  * это проверка на момент выбора, а не удержание снимка до следующего открытия вызывающим.
  */

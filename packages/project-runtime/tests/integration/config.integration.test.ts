@@ -43,6 +43,25 @@ const invalidConfigs = [
       projects: [],
     }),
   },
+  {
+    name: "регистрация со старым полем configPath",
+    contents: JSON.stringify({ version: 1, projects: [{ name: "old", configPath: "/old" }] }),
+  },
+  {
+    name: "регистрация с конфликтующими path и configPath",
+    contents: JSON.stringify({
+      version: 1,
+      projects: [{ name: "mixed", path: "/current", configPath: "/old/config.json" }],
+    }),
+  },
+  {
+    name: "регистрация с пустым путём каталога",
+    contents: JSON.stringify({ version: 1, projects: [{ name: "empty", path: " " }] }),
+  },
+  {
+    name: "регистрация с нестроковым путём каталога",
+    contents: JSON.stringify({ version: 1, projects: [{ name: "invalid", path: 42 }] }),
+  },
 ] as const;
 
 describe("Диагностика локальной конфигурации", () => {
@@ -60,8 +79,7 @@ describe("Диагностика локальной конфигурации", (
     "повреждённый конфиг сохраняется без побочных записей: $name",
     ({ contents }) => {
       const { cwd, home } = fixture;
-      const path = join(cwd, ".relay", "config.json");
-      mkdirSync(dirname(path));
+      const path = join(cwd, "relay.config.json");
       // Намеренно сохраняем некорректный JSON или неподдерживаемую схему.
       writeFileSync(path, contents);
 
@@ -75,11 +93,11 @@ describe("Диагностика локальной конфигурации", (
     },
   );
 
-  test("повреждённый ближайший конфиг не пропускается ради родительского", () => {
+  test("повреждённый конфиг в cwd отклоняется при наличии проекта в родителе", () => {
     const { cwd, home } = fixture;
     initializeProject({ cwd, home });
     const nested = join(cwd, "nested");
-    writeConfig(join(nested, ".relay", "config.json"), {});
+    writeConfig(join(nested, "relay.config.json"), {});
 
     const code = runtimeErrorCode(() => resolveProject({ cwd: nested, home }));
 
@@ -88,7 +106,7 @@ describe("Диагностика локальной конфигурации", (
 
   test("каталог вместо конфига отклоняется при чтении и сохраняется при init", () => {
     const { cwd, home } = fixture;
-    const path = join(cwd, ".relay", "config.json");
+    const path = join(cwd, "relay.config.json");
     mkdirSync(path, { recursive: true });
 
     const readCode = runtimeErrorCode(() => resolveProject({ cwd, home }));
@@ -102,9 +120,8 @@ describe("Диагностика локальной конфигурации", (
 
   test("битая символьная ссылка не перезаписывается при init", () => {
     const { cwd, home, root } = fixture;
-    const path = join(cwd, ".relay", "config.json");
+    const path = join(cwd, "relay.config.json");
     const absent = join(root, "absent.json");
-    mkdirSync(dirname(path));
     symlinkSync(absent, path);
 
     const readCode = runtimeErrorCode(() => resolveProject({ cwd, home }));
@@ -123,8 +140,8 @@ describe("Диагностика локальной конфигурации", (
     writeConfig(workspace.configPath, {
       version: 1,
       projects: [
-        { name: "same", configPath: "a" },
-        { name: "same", configPath: "b" },
+        { name: "same", path: "a" },
+        { name: "same", path: "b" },
       ],
     });
 
@@ -138,8 +155,9 @@ describe("Диагностика локальной конфигурации", (
     const workspace = initializeWorkspace({ cwd, home });
     writeConfig(workspace.configPath, {
       version: 1,
-      projects: [{ name: "loop", configPath: workspace.configPath }],
+      projects: [{ name: "loop", path: "." }],
     });
+    symlinkSync(workspace.configPath, join(cwd, "relay.config.json"));
 
     const code = runtimeErrorCode(() => resolveProject({ cwd, home, project: "loop" }));
 
@@ -153,5 +171,47 @@ describe("Диагностика локальной конфигурации", (
     const code = runtimeErrorCode(() => listProjects({ cwd, home, config: project.configPath }));
 
     expect(code).toBe("WORKSPACE_REQUIRED");
+  });
+
+  test("относительный каталог проекта разрешается от физического workspace через symlink", () => {
+    const { cwd, home, root } = fixture;
+    const workspace = initializeWorkspace({ cwd, home });
+    const project = initializeProject({ cwd: join(cwd, "projects", "alpha"), home });
+    writeConfig(workspace.configPath, {
+      version: 1,
+      projects: [{ name: "alpha", path: "projects/alpha" }],
+    });
+    const alias = join(root, "workspace-link.json");
+    symlinkSync(workspace.configPath, alias);
+
+    const selected = resolveProject({ cwd: root, config: alias, project: "alpha" });
+
+    expect(selected).toEqual(project);
+    expect(listProjects({ cwd: root, config: alias })).toEqual([
+      { name: "alpha", path: join(cwd, "projects", "alpha") },
+    ]);
+  });
+
+  test("workspace читает актуальные ID и путь базы из проектного конфига при каждом выборе", () => {
+    const { cwd, home, root } = fixture;
+    const workspace = initializeWorkspace({ cwd, home });
+    const first = initializeProject({ cwd: join(root, "first"), home });
+    const second = initializeProject({ cwd: join(root, "second"), home });
+    writeConfig(workspace.configPath, {
+      version: 1,
+      projects: [{ name: "selected", path: dirname(first.configPath) }],
+    });
+    expect(resolveProject({ cwd, project: "selected" })).toEqual(first);
+
+    writeConfig(first.configPath, {
+      version: 1,
+      projectId: second.projectId,
+      databasePath: second.databasePath,
+    });
+
+    expect(resolveProject({ cwd, project: "selected" })).toEqual({
+      ...second,
+      configPath: first.configPath,
+    });
   });
 });

@@ -1,11 +1,11 @@
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { validText } from "./config";
 import { configMessages } from "./config.messages";
 import { configExists, fileExists } from "./files";
 import type { RuntimeOptions } from "./runtime-options.types";
 
-export const projectConfigName = join(".relay", "config.json");
+export const projectConfigName = "relay.config.json";
 export const workspaceConfigName = "relay.workspace.json";
 
 /**
@@ -22,7 +22,7 @@ export function validateOptions(options: RuntimeOptions): void {
 }
 
 /**
- * Разрешает явный конфиг от cwd; undefined сохраняет выбор через поиск предков.
+ * Разрешает явный конфиг от cwd; undefined сохраняет выбор конфигурации в самом cwd.
  */
 export function explicitConfig(options: RuntimeOptions): string | undefined {
   if (options.config === undefined) {
@@ -32,45 +32,25 @@ export function explicitConfig(options: RuntimeOptions): string | undefined {
 }
 
 /**
- * Перечисляет лексические абсолютные каталоги от cwd до корня включительно.
- * Существование cwd не требуется; физические ссылки разрешаются позже при чтении конфига.
- */
-function* ancestors(cwd: string): Generator<string, void, undefined> {
-  let directory = resolve(cwd);
-  for (;;) {
-    yield directory;
-    const parent = dirname(directory);
-    if (parent === directory) {
-      return;
-    }
-    directory = parent;
-  }
-}
-
-/**
- * Находит ближайший конфиг, не пропуская повреждённый файл или битую ссылку.
- * В одном каталоге проект имеет приоритет; workspaceOnly исключает проектные конфиги.
+ * Ищет конфиг только в cwd, включая повреждённый файл или битую ссылку.
+ * Проект имеет приоритет; workspaceOnly исключает проектный конфиг. Родители не проверяются.
  */
 export function findConfig(cwd: string, workspaceOnly: boolean): string | undefined {
-  for (const directory of ancestors(cwd)) {
-    if (!workspaceOnly) {
-      const project = join(directory, projectConfigName);
-      if (fileExists(project)) {
-        return project;
-      }
-    }
-    const workspace = join(directory, workspaceConfigName);
-    if (fileExists(workspace)) {
-      return workspace;
+  const directory = resolve(cwd);
+  if (!workspaceOnly) {
+    const project = join(directory, projectConfigName);
+    if (fileExists(project)) {
+      return project;
     }
   }
-  return undefined;
+  const workspace = join(directory, workspaceConfigName);
+  return fileExists(workspace) ? workspace : undefined;
 }
 
 /**
  * Выбирает свободный путь начальной публикации, не создавая каталогов.
- * Неявный init не создаёт вложенный проект внутри проекта; внутри workspace проект допустим.
- * Явный config обходит поиск предков, но никогда не разрешает замену существующего пути.
+ * Неявный init проверяет оба стандартных конфига только в cwd; вложенные проекты независимы.
+ * Явный config проверяет только переданный путь. Занятый путь никогда не заменяется.
  */
 export function initializationPath(options: RuntimeOptions, workspace: boolean): string {
   validateOptions(options);
@@ -85,18 +65,9 @@ export function initializationPath(options: RuntimeOptions, workspace: boolean):
   }
 
   if (explicit === undefined) {
-    for (const directory of ancestors(options.cwd)) {
-      const project = join(directory, projectConfigName);
-      if (fileExists(project)) {
-        throw configExists(project);
-      }
-      const existingWorkspace = join(directory, workspaceConfigName);
-      if (fileExists(existingWorkspace)) {
-        if (directory === resolve(options.cwd) || workspace) {
-          throw configExists(existingWorkspace);
-        }
-        break;
-      }
+    const other = resolve(options.cwd, workspace ? projectConfigName : workspaceConfigName);
+    if (fileExists(other)) {
+      throw configExists(other);
     }
   }
   return path;

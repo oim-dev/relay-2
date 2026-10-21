@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import {
@@ -14,12 +14,7 @@ import {
   projectConfigName,
   validateOptions,
 } from "../configuration/paths";
-import {
-  fileExists,
-  withFileErrors,
-  withWorkspaceLock,
-  writeJsonAtomic,
-} from "../configuration/files";
+import { withFileErrors, withWorkspaceLock, writeJsonAtomic } from "../configuration/files";
 import { readProjectLocation } from "../project/selection";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import { workspaceMessages } from "./registry.messages";
@@ -54,17 +49,15 @@ function workspacePath(options: RuntimeOptions): string {
 }
 
 /**
- * Проверяет регистрируемый каталог или конфиг вместе с базой и возвращает физический путь.
- * Workspace вместо проекта отклоняется; сама регистрация здесь ещё не изменяется.
+ * Читает обязательный relay.config.json в регистрируемом каталоге и проверяет его базу.
+ * Возвращает физический путь каталога. Workspace вместо проекта отклоняется без записи.
  */
-function registrationConfigPath(cwd: string, path: string): string {
+function registrationDirectory(cwd: string, path: string): string {
   if (!validText(path)) {
     throw new RelayError("INVALID_ARGUMENT", workspaceMessages.emptyProjectPath, 2);
   }
-  let configPath = resolve(cwd, path);
-  if (fileExists(configPath) && statSync(configPath).isDirectory()) {
-    configPath = join(configPath, projectConfigName);
-  }
+  const directory = resolve(cwd, path);
+  const configPath = join(directory, projectConfigName);
   const config = readConfig(configPath);
   if ("projects" in config) {
     throw new RelayError(
@@ -74,7 +67,7 @@ function registrationConfigPath(cwd: string, path: string): string {
     );
   }
   readProjectLocation(configPath, config);
-  return realpathSync(configPath);
+  return realpathSync(directory);
 }
 
 /**
@@ -99,7 +92,7 @@ export function listProjects(options: RuntimeOptions): ProjectRegistration[] {
 }
 
 /**
- * Проверяет целевой проект и добавляет его физический путь под межпроцессным mutex workspace.
+ * Проверяет целевой проект и добавляет физический путь его каталога под mutex workspace.
  * Чтение текущего реестра, проверка имени и атомарная замена файла входят в одну секцию.
  * То же имя с тем же путём — no-op; другой путь даёт PROJECT_EXISTS без записи.
  */
@@ -107,18 +100,18 @@ export function registerProject(options: RuntimeOptions, name: string, path: str
   withFileErrors(() => {
     validateRegistrationName(name);
     const workspace = workspacePath(options);
-    const configPath = registrationConfigPath(options.cwd, path);
+    const directory = registrationDirectory(options.cwd, path);
 
     withWorkspaceLock(workspace, () => {
       const current = readWorkspace(workspace);
       const existing = current.projects.find((entry) => entry.name === name);
       if (existing) {
-        if (existing.configPath === configPath) {
+        if (existing.path === directory) {
           return;
         }
         throw new RelayError("PROJECT_EXISTS", workspaceMessages.registrationExists(name), 4);
       }
-      current.projects.push({ name, configPath });
+      current.projects.push({ name, path: directory });
       writeJsonAtomic(workspace, current, "replace");
     });
   });

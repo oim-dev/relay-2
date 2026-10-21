@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, symlinkSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   initializeProject,
   initializeWorkspace,
@@ -102,7 +102,7 @@ describe("Инициализация в отдельных процессах", 
       const { location } = winner;
       expect(resolveProject({ cwd, home })).toEqual(location);
       expect(readdirSync(join(home, "projects"))).toEqual([location.projectId]);
-      expect(readdirSync(join(cwd, ".relay"))).toEqual(["config.json"]);
+      expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
     },
     INITIALIZATION_TEST_TIMEOUT_MS,
   );
@@ -127,7 +127,7 @@ describe("Межпроцессное изменение workspace", () => {
       const project = initializeProject({ cwd: join(root, "project"), home });
       const alias = join(root, "workspace-link.json");
       symlinkSync(workspace.configPath, alias);
-      const common = { cwd, home, target: project.configPath, count: REGISTRATION_COUNT };
+      const common = { cwd, home, target: dirname(project.configPath), count: REGISTRATION_COUNT };
       const reader = await startWorkspaceReader(fixture, {
         ...common,
         config: workspace.configPath,
@@ -167,10 +167,10 @@ describe("Межпроцессное изменение workspace", () => {
         version: 1,
         projects: expectedRegistrationNames("alpha", "beta").map((name) => ({
           name,
-          configPath: project.configPath,
+          path: dirname(project.configPath),
         })),
       });
-      const common = { cwd, home, target: project.configPath, count: REGISTRATION_COUNT };
+      const common = { cwd, home, target: dirname(project.configPath), count: REGISTRATION_COUNT };
       const reader = await startWorkspaceReader(fixture, {
         ...common,
         config: workspace.configPath,

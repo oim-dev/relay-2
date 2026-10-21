@@ -34,13 +34,13 @@ describe("Инициализация и выбор локального прое
     const project = initializeProject({ cwd, home, name: "Первый проект", slug: "first" });
 
     expect(project.databasePath).toBe(join(home, "projects", project.projectId, "project.sqlite"));
-    expect(project.configPath).toBe(join(cwd, ".relay", "config.json"));
+    expect(project.configPath).toBe(join(cwd, "relay.config.json"));
     expect(JSON.parse(readFileSync(project.configPath, "utf8"))).toEqual({
       version: 1,
       projectId: project.projectId,
       databasePath: project.databasePath,
     });
-    expect(readdirSync(join(cwd, ".relay"))).toEqual(["config.json"]);
+    expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
     withProjectDatabase(project, (database) => {
       expect(database.get("PROJECT")?.data).toEqual({ name: "Первый проект", slug: "first" });
     });
@@ -76,28 +76,28 @@ describe("Инициализация и выбор локального прое
     });
   });
 
-  test("вложенный cwd выбирает ближайший проект в родительском каталоге", () => {
+  test("вложенный cwd без своего конфига не выбирает проект родителя", () => {
     const { cwd, home } = fixture;
     const project = initializeProject({ cwd, home });
     const nested = join(cwd, "src", "deep");
     mkdirSync(nested, { recursive: true });
 
-    const selected = resolveProject({ cwd: nested, home });
+    const code = runtimeErrorCode(() => resolveProject({ cwd: nested, home }));
 
-    expect(selected).toEqual(project);
+    expect(code).toBe("PROJECT_NOT_FOUND");
+    expect(readdirSync(nested)).toEqual([]);
+    expect(resolveProject({ cwd, home })).toEqual(project);
   });
 
   test("явный относительный config имеет приоритет над проектом cwd", () => {
     const { cwd, home, root } = fixture;
     initializeProject({ cwd, home });
     const selectedProject = initializeProject({ cwd: join(root, "second"), home });
-    const nested = join(cwd, "src", "deep");
-    mkdirSync(nested, { recursive: true });
 
     const selected = resolveProject({
-      cwd: nested,
+      cwd,
       home,
-      config: relative(nested, selectedProject.configPath),
+      config: relative(cwd, selectedProject.configPath),
     });
 
     expect(selected).toEqual(selectedProject);
@@ -122,7 +122,7 @@ describe("Инициализация и выбор локального прое
     initializeWorkspace({ cwd, home });
     const alpha = initializeProject({ cwd: join(cwd, "alpha"), home });
     const beta = initializeProject({ cwd: join(cwd, "beta"), home });
-    registerProject({ cwd, home }, "beta", beta.configPath);
+    registerProject({ cwd, home }, "beta", dirname(beta.configPath));
     renameSync(alpha.databasePath, `${alpha.databasePath}.saved`);
     const open = spyOn(ProjectDatabase, "open");
     try {
@@ -152,20 +152,61 @@ describe("Инициализация и выбор локального прое
     expect(resolveProject({ cwd, home })).toEqual(project);
   });
 
-  test("повтор init во вложенном каталоге не создаёт вложенный проект", () => {
+  test("init проекта в каталоге workspace отклоняется без создания конфига и базы", () => {
+    const { cwd, home } = fixture;
+    const workspace = initializeWorkspace({ cwd, home });
+    const original = readFileSync(workspace.configPath, "utf8");
+
+    const code = runtimeErrorCode(() => initializeProject({ cwd, home }));
+
+    expect(code).toBe("CONFIG_EXISTS");
+    expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
+    expect(readdirSync(cwd)).toEqual(["relay.workspace.json"]);
+    expect(existsSync(home)).toBe(false);
+  });
+
+  test("init workspace в каталоге проекта отклоняется с сохранением конфига и базы", () => {
+    const { cwd, home } = fixture;
+    const project = initializeProject({ cwd, home });
+    const original = readFileSync(project.configPath, "utf8");
+
+    const code = runtimeErrorCode(() => initializeWorkspace({ cwd, home }));
+
+    expect(code).toBe("CONFIG_EXISTS");
+    expect(readFileSync(project.configPath, "utf8")).toBe(original);
+    expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
+    expect(readdirSync(join(home, "projects"))).toEqual([project.projectId]);
+    expect(resolveProject({ cwd, home })).toEqual(project);
+  });
+
+  test("init во вложенном каталоге создаёт независимый проект и сохраняет родительский", () => {
     const { cwd, home } = fixture;
     const project = initializeProject({ cwd, home });
     const original = readFileSync(project.configPath, "utf8");
     const nested = join(cwd, "src", "deep");
     mkdirSync(nested, { recursive: true });
 
-    const code = runtimeErrorCode(() => initializeProject({ cwd: nested, home }));
+    const child = initializeProject({ cwd: nested, home });
 
-    expect(code).toBe("CONFIG_EXISTS");
+    expect(child.projectId).not.toBe(project.projectId);
+    expect(child.configPath).toBe(join(nested, "relay.config.json"));
     expect(readFileSync(project.configPath, "utf8")).toBe(original);
-    expect(readdirSync(join(home, "projects"))).toEqual([project.projectId]);
-    expect(existsSync(join(nested, ".relay"))).toBe(false);
+    expect(readdirSync(join(home, "projects")).sort()).toEqual(
+      [project.projectId, child.projectId].sort(),
+    );
+    expect(resolveProject({ cwd: nested, home })).toEqual(child);
     expect(resolveProject({ cwd, home })).toEqual(project);
+  });
+
+  test("старый .relay/config.json доступен только через явный config", () => {
+    const { cwd, home } = fixture;
+    const project = initializeProject({ cwd, home, config: ".relay/config.json" });
+
+    const code = runtimeErrorCode(() => resolveProject({ cwd, home }));
+
+    expect(code).toBe("PROJECT_NOT_FOUND");
+    expect(existsSync(join(cwd, "relay.config.json"))).toBe(false);
+    expect(resolveProject({ cwd, home, config: project.configPath })).toEqual(project);
   });
 
   test("init создаёт отсутствующий вложенный cwd", () => {

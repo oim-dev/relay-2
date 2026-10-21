@@ -7,7 +7,7 @@ export interface RuntimeOptions {
   readonly cwd: string;
   /* Корень локальных баз; при отсутствии используется homedir()/.relay. */
   readonly home?: string;
-  /* Явный путь конфигурации; при отсутствии выполняется поиск вверх от cwd. */
+  /* Явный путь конфигурации; при отсутствии стандартные конфиги ищутся только в cwd. */
   readonly config?: string;
   /* Имя регистрации для выбора проекта из workspace; регистрации по умолчанию нет. */
   readonly project?: string;

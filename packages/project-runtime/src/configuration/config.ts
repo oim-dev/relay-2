@@ -50,7 +50,8 @@ function parseConfig(text: string, path: string): Record<string, unknown> {
 }
 
 /**
- * Декодирует регистрации одного снимка, отвергает повторы имён и нормализует их пути.
+ * Декодирует регистрации одного снимка и разрешает пути каталогов от workspace.
+ * Повторы имён, записи без path и со старым configPath отклоняются; проекты здесь не открываются.
  */
 function readRegistrations(
   entries: readonly unknown[],
@@ -63,13 +64,14 @@ function readRegistrations(
     if (
       !isObject(entry) ||
       !validRegistrationName(entry.name) ||
-      !validText(entry.configPath) ||
+      "configPath" in entry ||
+      !validText(entry.path) ||
       names.has(entry.name)
     ) {
       throw invalidConfig(path);
     }
     names.add(entry.name);
-    projects.push({ name: entry.name, configPath: resolve(directory, entry.configPath) });
+    projects.push({ name: entry.name, path: resolve(directory, entry.path) });
   }
   return projects;
 }
@@ -77,7 +79,7 @@ function readRegistrations(
 /**
  * Читает один целый JSON и проверяет локальный формат без открытия базы проекта.
  * Относительные ссылки разрешаются от физического каталога файла, включая symlink.
- * Отсутствие файла даёт CONFIG_NOT_FOUND, неверная схема или каталог — INVALID_CONFIG.
+ * Отсутствие файла даёт CONFIG_NOT_FOUND, неверная схема или тип компонента пути — INVALID_CONFIG.
  */
 export function readConfig(path: string): ProjectConfig | WorkspaceConfig {
   let text: string;
@@ -89,7 +91,7 @@ export function readConfig(path: string): ProjectConfig | WorkspaceConfig {
     if (hasCode(error, "ENOENT")) {
       throw new RelayError("CONFIG_NOT_FOUND", configMessages.configNotFound(path), 3, { path });
     }
-    if (hasCode(error, "EISDIR")) {
+    if (hasCode(error, "EISDIR") || hasCode(error, "ENOTDIR")) {
       throw invalidConfig(path);
     }
     throw error;
