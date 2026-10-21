@@ -1,9 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
+import {
+  RelayError,
+  type EntityRecord,
+  type WorkPlanRecord,
+  type WriteOptions,
+} from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../../src/entities";
 import { PlanningService, type PlanStage } from "../../src/planning";
@@ -16,8 +21,8 @@ function write(record: EntityRecord): WriteOptions {
   return { actor, ifRevision: record.revision };
 }
 
-function stages(record: EntityRecord): PlanStage[] {
-  return record.data.stages as PlanStage[];
+function stages(record: WorkPlanRecord): PlanStage[] {
+  return record.data.stages;
 }
 
 function fails(operation: () => unknown, code: string): void {
@@ -52,7 +57,7 @@ function fixture(
   }
 }
 
-function planWithStage(service: PlanningService, title = "План"): EntityRecord {
+function planWithStage(service: PlanningService, title = "План"): WorkPlanRecord {
   const plan = service.create("work-plan", { title, goal: markdown }, actor);
   return service.stage(
     plan.id,
@@ -62,11 +67,330 @@ function planWithStage(service: PlanningService, title = "План"): EntityReco
   );
 }
 
-function include(service: PlanningService, plan: EntityRecord, task: EntityRecord): EntityRecord {
+function include(
+  service: PlanningService,
+  plan: WorkPlanRecord,
+  task: EntityRecord,
+): WorkPlanRecord {
   return service.stageTask(plan.id, stages(plan)[0]!.id, task.key, false, write(plan));
 }
 
 describe("PlanningService: реальная SQLite", () => {
+  test("страница обычных планов читает только окно Storage, фильтр сохраняет предметный отбор и total", () => {
+    fixture((db, service) => {
+      const second = service.create("work-plan", { title: "Бета" }, actor);
+      const first = service.create("work-plan", { title: "Альфа" }, actor);
+      const release = service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [first.id] },
+        actor,
+      );
+      const fullRead = spyOn(db, "list").mockImplementation(() => {
+        throw new Error("Полное чтение обычной страницы запрещено");
+      });
+      try {
+        expect(service.listPage("work-plan", {}, { offset: 0, limit: 1, sort: "title" })).toEqual({
+          total: 2,
+          items: [first],
+        });
+        expect(service.listPage("work-plan", {}, { offset: 1, limit: 1, sort: "title" })).toEqual({
+          total: 2,
+          items: [second],
+        });
+        expect(service.listPage("release", {}, { offset: 0, limit: 1, sort: "key" })).toEqual({
+          total: 1,
+          items: [release],
+        });
+      } finally {
+        fullRead.mockRestore();
+      }
+      expect(
+        service.listPage(
+          "work-plan",
+          { status: "draft", q: "Альфа" },
+          { offset: 0, limit: 1, sort: "key" },
+        ),
+      ).toEqual({ total: 1, items: [first] });
+      fails(
+        () =>
+          service.listPage("work-plan", { status: "banana" }, { offset: 0, limit: 1, sort: "key" }),
+        "INVALID_ARGUMENT",
+      );
+    });
+  });
+
+  test("предметные фильтры проверяют статус и ищут содержание этапов и типизированный адрес", () => {
+    fixture((db, service) => {
+      const draft = planWithStage(service, "Черновик");
+      const historical = planWithStage(service, "История");
+      const cancelled = service.transition(
+        "work-plan",
+        historical.id,
+        "cancel",
+        { result: "Закрыто" },
+        write(historical),
+      );
+      const release = service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [draft.id] },
+        actor,
+      );
+      const generation = db.getGeneration();
+      expect(service.list("work-plan", { status: "draft", q: "Полный Markdown" })).toEqual([draft]);
+      expect(service.list("work-plan", { q: `work-plan:${cancelled.key}` })).toEqual([cancelled]);
+      expect(service.list("release", { status: "planned" })).toEqual([release]);
+      for (const [kind, status] of [
+        ["work-plan", "banana"],
+        ["work-plan", "planned"],
+        ["release", "active"],
+        ["release", ""],
+      ] as const)
+        fails(() => service.list(kind, { status }), "INVALID_ARGUMENT");
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("составы Core сохраняют порядок и ревизию владельца, memberships включают закрытые планы", () => {
+    fixture((_db, service, tasks) => {
+      const task = tasks.create({ title: "Работа" }, actor);
+      const first = include(service, planWithStage(service, "Первый"), task);
+      const history = service.transition(
+        "work-plan",
+        first.id,
+        "cancel",
+        { result: "Пересмотр" },
+        write(first),
+      );
+      const current = include(service, planWithStage(service, "Текущий"), task);
+      const stage = stages(current)[0]!;
+      const release = service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [current.key] },
+        actor,
+      );
+      expect(service.listStages(current.key)).toEqual({
+        plan: current.key,
+        revision: current.revision,
+        items: stages(current),
+      });
+      expect(service.getStage(current.id, stage.id)).toEqual({
+        plan: current.key,
+        revision: current.revision,
+        stage,
+      });
+      expect(service.stageTasks(current.key, stage.id)).toEqual({
+        plan: current.key,
+        revision: current.revision,
+        items: [task],
+      });
+      expect(service.memberships(task.key)).toEqual({
+        task: task.key,
+        items: [history, current].map((plan) => ({
+          plan: plan.key,
+          revision: plan.revision,
+          stage: stages(plan)[0]!,
+        })),
+      });
+      expect(service.releasePlans(release.key)).toEqual({
+        release: release.key,
+        revision: release.revision,
+        items: [current],
+      });
+      fails(() => service.getStage(current.id, "missing"), "NOT_FOUND");
+    });
+  });
+
+  test("состав этапа и задачи читаются из одного снимка при конкурентной записи после чтения плана", () => {
+    fixture((db, service, tasks) => {
+      const task = tasks.create({ title: "Работа", description: "До записи" }, actor);
+      const plan = include(service, planWithStage(service), task);
+      const writer = ProjectDatabase.open(db.path);
+      const originalGet = db.get.bind(db);
+      let changed = false;
+      const get = spyOn(db, "get").mockImplementation((ref, kind) => {
+        const record = originalGet(ref, kind);
+        if (record?.id === plan.id && !changed) {
+          changed = true;
+          writer.transaction(() => {
+            new PlanningService(writer).update(
+              "work-plan",
+              plan.id,
+              { summary: "После записи" },
+              write(plan),
+            );
+            new TasksService(writer).update(task.id, { description: "После записи" }, write(task));
+          });
+        }
+        return record;
+      });
+      try {
+        expect(service.stageTasks(plan.id, stages(plan)[0]!.id)).toEqual({
+          plan: plan.key,
+          revision: plan.revision,
+          items: [task],
+        });
+        expect(changed).toBe(true);
+      } finally {
+        get.mockRestore();
+        writer.close();
+      }
+      expect(service.get("work-plan", plan.id).revision).toBe(plan.revision + 1);
+      expect(tasks.get(task.id).data.description).toBe("После записи");
+    });
+  });
+
+  test.each([
+    { name: "null вместо stages", damage: () => null },
+    { name: "нестроковый title этапа", damage: (stage: PlanStage) => [{ ...stage, title: 42 }] },
+    { name: "null вместо taskIds", damage: (stage: PlanStage) => [{ ...stage, taskIds: null }] },
+    {
+      name: "нестроковое условие завершения",
+      damage: (stage: PlanStage) => [{ ...stage, completionConditions: false }],
+    },
+  ])("повреждённый $name отвергает чтение и изменение без записи", ({ damage }) => {
+    fixture((db, service, tasks) => {
+      const task = tasks.create({ title: "Работа" }, actor);
+      const plan = include(service, planWithStage(service), task);
+      // Намеренно повреждаем сохранённую форму через Storage, обходя предметный API.
+      const corrupted = {
+        ...plan,
+        revision: plan.revision + 1,
+        data: { ...plan.data, stages: damage(stages(plan)[0]!) },
+      };
+      db.update(corrupted, plan.revision);
+      const generation = db.getGeneration();
+      for (const operation of [
+        () => service.get("work-plan", plan.id),
+        () => service.list("work-plan"),
+        () => service.getStage(plan.id, stages(plan)[0]!.id),
+        () => service.memberships(task.id),
+        () => service.update("work-plan", plan.id, { summary: "Не сохранять" }, write(corrupted)),
+        () => service.stage(plan.id, "create", { title: "Не сохранять" }, write(corrupted)),
+      ])
+        fails(operation, "CORRUPT_DATA");
+      expect(db.get(plan.id)).toEqual(corrupted);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("повреждённый состав релиза не маскируется пустым списком и не допускает обновление", () => {
+    fixture((db, service) => {
+      const plan = planWithStage(service);
+      const release = service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [plan.id] },
+        actor,
+      );
+      // Низкоуровневый fixture моделирует недопустимый сохранённый JSON.
+      const corrupted = {
+        ...release,
+        revision: release.revision + 1,
+        data: { ...release.data, planIds: null },
+      };
+      db.update(corrupted, release.revision);
+      const generation = db.getGeneration();
+      fails(() => service.releasePlans(release.id), "CORRUPT_DATA");
+      fails(() => service.progress("release", release.id), "CORRUPT_DATA");
+      fails(
+        () => service.update("release", release.id, { title: "Не сохранять" }, write(corrupted)),
+        "CORRUPT_DATA",
+      );
+      expect(db.get(release.id)).toEqual(corrupted);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("progress, complete и publish строят один граф без чтения текстов и журналов задач состава", () => {
+    fixture((db, service, tasks) => {
+      const descriptionMarker = "НЕ-ЧИТАТЬ-ОПИСАНИЕ-ПРИ-ПРОГРЕССЕ";
+      const commentMarker = "НЕ-ЧИТАТЬ-КОММЕНТАРИЙ-ПРИ-ПРОГРЕССЕ";
+      const firstTask = tasks.create(
+        { title: "Первая", description: descriptionMarker, column: "done" },
+        actor,
+      );
+      const secondTask = tasks.create(
+        { title: "Вторая", description: descriptionMarker, column: "done" },
+        actor,
+      );
+      const thirdTask = tasks.create(
+        { title: "Третья", description: descriptionMarker, column: "done" },
+        actor,
+      );
+      for (const task of [firstTask, secondTask, thirdTask])
+        tasks.comment(task.id, commentMarker, actor);
+      let first = include(
+        service,
+        include(service, planWithStage(service, "Первый"), firstTask),
+        secondTask,
+      );
+      let second = include(service, planWithStage(service, "Второй"), thirdTask);
+      const graphReads = spyOn(db, "listTaskGraph");
+      const parse = JSON.parse;
+      const decoded: string[] = [];
+      const decoder = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+        decoded.push(text);
+        return parse(text, reviver);
+      });
+      try {
+        expect(service.progress("work-plan", first.id)).toMatchObject({
+          completed: true,
+          counts: { total: 2, completed: 2 },
+          blockers: [],
+        });
+        expect(graphReads).toHaveBeenCalledTimes(1);
+        expect(
+          decoded.some((text) => text.includes(descriptionMarker) || text.includes(commentMarker)),
+        ).toBe(false);
+        graphReads.mockClear();
+        first = service.transition(
+          "work-plan",
+          first.id,
+          "complete",
+          { result: "Готово" },
+          write(first),
+        );
+        expect(first.data.status).toBe("completed");
+        expect(graphReads).toHaveBeenCalledTimes(1);
+        graphReads.mockClear();
+        second = service.transition(
+          "work-plan",
+          second.id,
+          "complete",
+          { result: "Готово" },
+          write(second),
+        );
+        expect(graphReads).toHaveBeenCalledTimes(1);
+        const release = service.create(
+          "release",
+          { title: "Выпуск", version: "1", planIds: [first.id, second.id] },
+          actor,
+        );
+        graphReads.mockClear();
+        expect(service.progress("release", release.id)).toMatchObject({
+          completed: true,
+          counts: { total: 2, completed: 2 },
+          plans: [
+            { id: first.id, completed: true },
+            { id: second.id, completed: true },
+          ],
+          blockers: [],
+        });
+        expect(graphReads).toHaveBeenCalledTimes(1);
+        graphReads.mockClear();
+        expect(
+          service.transition("release", release.id, "publish", {}, write(release)).data.status,
+        ).toBe("released");
+        expect(graphReads).toHaveBeenCalledTimes(1);
+        expect(
+          decoded.some((text) => text.includes(descriptionMarker) || text.includes(commentMarker)),
+        ).toBe(false);
+      } finally {
+        decoder.mockRestore();
+        graphReads.mockRestore();
+      }
+    });
+  });
+
   test("полные тексты, ссылки ID и порядок этапов сохраняются после повторного открытия", () => {
     fixture((db, service, tasks) => {
       const task = tasks.create({ title: "Существующая задача", description: markdown }, actor);
@@ -131,7 +455,7 @@ describe("PlanningService: реальная SQLite", () => {
         const fresh = new PlanningService(reopened);
         expect(fresh.get("work-plan", plan.key)).toEqual(plan);
         expect(fresh.list("work-plan")).toEqual([plan]);
-        for (const field of ["goal", "rationale", "boundaries", "expectedResult"])
+        for (const field of ["goal", "rationale", "boundaries", "expectedResult"] as const)
           expect(plan.data[field]).toBe(markdown);
         expect(stages(plan)[0]!.outcome).toBe(markdown);
         expect(fresh.progress("work-plan", plan.id).completed).toBe(false);
@@ -702,23 +1026,24 @@ describe("PlanningService: реальная SQLite", () => {
           write(current),
         );
         expect(updated.revision).toBe(current.revision + 1);
-        expect(updated.data[field]).toEqual(current.data[field]);
+        expect(updated.data).toEqual({ ...current.data, title: "Допустимое изменение" });
       });
     },
   );
 
   test("повреждённая ссылка не превращается в готовый или пустой состав", () => {
     fixture((db, service) => {
-      let plan = planWithStage(service);
-      const entity = new EntityService(db);
-      plan = entity.update(
-        plan.id,
-        "work-plan",
-        {
-          stages: stages(plan).map((stage) => ({ ...stage, taskIds: ["missing-task-id"] })),
+      const initial = planWithStage(service);
+      // Намеренная битая ссылка сохраняется низкоуровневым fixture Storage.
+      const plan = {
+        ...initial,
+        revision: initial.revision + 1,
+        data: {
+          ...initial.data,
+          stages: stages(initial).map((stage) => ({ ...stage, taskIds: ["missing-task-id"] })),
         },
-        write(plan),
-      );
+      };
+      db.update(plan, initial.revision);
       const release = service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [plan.id] },

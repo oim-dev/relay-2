@@ -1,27 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
 import {
   RelayError,
+  isEntityKind,
+  validateActor,
+  type EntityIdentity,
   type EntityKind,
   type EntityRecord,
   type WriteOptions,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
-
-const entityKinds: readonly EntityKind[] = [
-  "project",
-  "product",
-  "feature",
-  "scenario",
-  "application",
-  "implementation",
-  "board",
-  "task",
-  "document",
-  "work-plan",
-  "release",
-  "work-session",
-  "work-checkpoint",
-];
 
 function validateText(value: string, field: string, key = false): void {
   if (
@@ -62,7 +49,7 @@ function validateData(data: Record<string, unknown>): void {
 }
 
 function validateWrite(entity: EntityRecord, options: WriteOptions): void {
-  validateText(options.actor, "actor");
+  validateActor(options.actor);
   if (!Number.isSafeInteger(options.ifRevision) || options.ifRevision < 1) {
     throw new RelayError("VALIDATION_ERROR", "Требуется положительная целая ревизия.", 2);
   }
@@ -75,16 +62,41 @@ function validateWrite(entity: EntityRecord, options: WriteOptions): void {
   }
 }
 
+/** Внутренний примитив Core: разрешение адресов и запись уже проверенного предметным сервисом JSON. */
 export class EntityService {
-  constructor(readonly db: ProjectDatabase) {}
+  constructor(private readonly db: ProjectDatabase) {}
 
+  /**
+   * Разрешает kind:ref, ID, ключи и алиасы в одном снимке без загрузки содержания.
+   * Slug/prefix доступны для board/application при явном или ожидаемом виде;
+   * прямой адрес имеет приоритет. Неоднозначный виртуальный адрес — CORRUPT_DATA.
+   */
+  resolve(ref: string, kind?: EntityKind): EntityIdentity {
+    return this.db.snapshot(() => this.resolveInSnapshot(ref, kind));
+  }
+
+  /** Разрешение адреса и полная карточка относятся к одному снимку, включая конкурентный rename. */
   get(ref: string, kind?: EntityKind): EntityRecord {
+    return this.db.snapshot(() => {
+      const identity = this.resolveInSnapshot(ref, kind);
+      const record = this.db.get(identity.id, identity.kind);
+      if (!record) {
+        throw new RelayError("CORRUPT_DATA", "Разрешённая запись отсутствует в снимке.", 1, {
+          id: identity.id,
+        });
+      }
+      return record;
+    });
+  }
+
+  /** Вызывается только из resolve/get под их снимком; повторный snapshot здесь не нужен. */
+  private resolveInSnapshot(ref: string, kind?: EntityKind): EntityIdentity {
     validateText(ref, "ref");
     const colon = ref.indexOf(":");
     if (colon !== -1) {
-      const explicitKind = ref.slice(0, colon) as EntityKind;
+      const explicitKind = ref.slice(0, colon);
       const address = ref.slice(colon + 1);
-      if (!entityKinds.includes(explicitKind) || !address.trim() || address.includes(":")) {
+      if (!isEntityKind(explicitKind) || !address.trim() || address.includes(":")) {
         throw new RelayError("INVALID_ARGUMENT", "Ожидается ссылка вида kind:ID или kind:ref.", 2);
       }
       if (kind !== undefined && kind !== explicitKind) {
@@ -93,14 +105,19 @@ export class EntityService {
       // Сначала разбираем синтаксис, даже если в старой базе есть такой буквальный ключ.
       kind = explicitKind;
       ref = address;
+      validateText(ref, "ref");
     }
-    const entity = this.db.get(ref, kind);
+    const entity = this.db.getIdentity(ref, kind);
     if (entity) return entity;
     if (kind === "board" || kind === "application") {
-      const virtual = this.db
-        .list(kind)
-        .find((record) => record.data.slug === ref || record.data.prefix === ref);
-      if (virtual) return virtual;
+      const virtual = this.db.findAddressIdentities(ref, kind);
+      if (virtual.length > 1) {
+        throw new RelayError("CORRUPT_DATA", "Адрес принадлежит нескольким записям.", 1, {
+          ref,
+          kind,
+        });
+      }
+      if (virtual[0]) return virtual[0];
     }
     throw new RelayError("NOT_FOUND", "Запись не найдена.", 3, { ref, kind });
   }
@@ -116,7 +133,7 @@ export class EntityService {
     actor: string,
     key?: string,
   ): EntityRecord {
-    validateText(actor, "actor");
+    validateActor(actor);
     validateText(prefix, "prefix", true);
     if (key !== undefined) validateText(key, "key", true);
     validateData(data);

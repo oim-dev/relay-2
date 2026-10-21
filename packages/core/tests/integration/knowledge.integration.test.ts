@@ -1,8 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
+import {
+  RelayError,
+  type EntityPageRequest,
+  type EntityRecord,
+  type WriteOptions,
+} from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge";
 import { PlanningService } from "../../src/planning";
@@ -66,6 +71,254 @@ function requirements(service: KnowledgeService) {
 }
 
 describe("KnowledgeService и файловая SQLite", () => {
+  test("окно знаний сохраняет count и одинаковый порядок с предметным фильтром", () =>
+    fixture((service) => {
+      for (const name of ["Äther", "alpha", "Zulu"])
+        service.create("document", { name, body: "needle" }, "tester");
+      const request = { offset: 1, limit: 1, sort: "title" } as const;
+      for (const filters of [{}, { q: "needle" }]) {
+        const page = service.listPage("document", filters, request);
+        expect(page.total).toBe(3);
+        expect(page.items.map((item) => item.data.name)).toEqual(["alpha"]);
+      }
+      expect(service.listPage("document", {}, { ...request, offset: 3 })).toEqual({
+        total: 3,
+        items: [],
+      });
+    }));
+
+  test("страницы одинаково сравнивают сохранённый Unicode, включая непарные суррогаты", () =>
+    fixture((service) => {
+      const names = ["\ud800", "\udc00", "\ue000", "😀"];
+      for (const name of names) service.create("feature", { name, description: "edge" }, "tester");
+      for (const filters of [{}, { q: "edge" }]) {
+        const page = service.listPage("feature", filters, { offset: 0, limit: 4, sort: "title" });
+        expect(page.items.map((item) => item.data.name)).toEqual(names);
+      }
+    }));
+
+  test("окно документов проецирует раздел по тому же снимку, что и записи страницы", () =>
+    fixture((service, db) => {
+      const project = service.changeSection(
+        "create",
+        { id: "guides", name: "Руководства" },
+        write(service.get("project")),
+      );
+      service.create(
+        "document",
+        { name: "Документ", body: "Текст", sectionId: "guides" },
+        "tester",
+      );
+      const writer = ProjectDatabase.open(db.path);
+      const original = db.listPage.bind(db);
+      const intercepted = spyOn(db, "listPage").mockImplementation((kind, request) => {
+        const page = original(kind, request);
+        // Конкурентная запись после SQL-окна, но до чтения разделов: нужен внешний snapshot Core.
+        new KnowledgeService(writer).changeSection("remove", { id: "guides" }, write(project));
+        return page;
+      });
+      try {
+        const page = service.listPage("document", {}, { offset: 0, limit: 1, sort: "key" });
+        expect(page.total).toBe(1);
+        expect(page.items[0]!.data.sectionId).toBe("guides");
+      } finally {
+        intercepted.mockRestore();
+        writer.close();
+      }
+      const after = service.listPage("document", {}, { offset: 0, limit: 1, sort: "key" });
+      expect(after.items[0]!.data.sectionId).toBeNull();
+      expect(db.list("document")[0]!.data.sectionId).toBe("guides");
+    }));
+
+  test("окно знаний проверяется до чтения как с фильтром, так и без него", () =>
+    fixture((service) => {
+      for (const request of [
+        { offset: -1, limit: 1, sort: "key" },
+        { offset: 0, limit: 0, sort: "key" },
+        { offset: 0, limit: 101, sort: "key" },
+        { offset: 0, limit: 1, sort: "invalid" },
+      ]) {
+        for (const filters of [{}, { q: "needle" }])
+          // Намеренно неверный транспортный запрос проверяет runtime-границу API.
+          fails(
+            () => service.listPage("document", filters, request as EntityPageRequest),
+            "INVALID_ARGUMENT",
+          );
+      }
+    }));
+
+  test("чтение разделов и связей возвращает проверенный состав и ревизию владельца", () =>
+    fixture((service) => {
+      let project = service.get("project");
+      expect(service.documentSections()).toEqual({
+        project: project.key,
+        revision: project.revision,
+        items: [],
+      });
+      project = service.changeSection(
+        "create",
+        { id: "guides", name: "Руководства" },
+        write(project),
+      );
+      expect(service.documentSections()).toEqual({
+        project: project.key,
+        revision: project.revision,
+        items: [{ id: "guides", name: "Руководства" }],
+      });
+      const feature = service.create("feature", { name: "Поиск" }, "tester");
+      const document = service.create(
+        "document",
+        { name: "Инструкция", body: "Текст", targets: [feature.id] },
+        "tester",
+      );
+      expect(service.documentLinks(document.key)).toEqual({
+        ref: document.key,
+        revision: document.revision,
+        items: [
+          { target: { kind: "feature", id: feature.id }, type: "documents", description: "" },
+        ],
+      });
+    }));
+
+  test.each([
+    ["null вместо списка", null],
+    ["неверная цель", [{ target: null, type: "documents", description: "" }]],
+    [
+      "неверный вид цели",
+      [{ target: { id: "target", kind: "work-session" }, type: "documents", description: "" }],
+    ],
+    [
+      "неверный тип отношения",
+      [{ target: { id: "target", kind: "feature" }, type: "invalid", description: "" }],
+    ],
+    [
+      "неверное описание",
+      [{ target: { id: "target", kind: "feature" }, type: "documents", description: 42 }],
+    ],
+    [
+      "повтор пары",
+      Array.from({ length: 2 }, () => ({
+        target: { id: "target", kind: "feature" },
+        type: "documents",
+        description: "",
+      })),
+    ],
+  ])(
+    "повреждённые отношения: %s — отказ чтения и записи без потери исходного состояния",
+    (_label, relations) =>
+      fixture((service, db) => {
+        const feature = service.create("feature", { name: "Цель" }, "tester");
+        const document = service.create(
+          "document",
+          { name: "Документ", body: "Текст", targets: [feature.id] },
+          "tester",
+        );
+        // Намеренное повреждение через Storage: это не допустимый предметный ввод.
+        db.update(
+          { ...document, revision: document.revision + 1, data: { ...document.data, relations } },
+          document.revision,
+        );
+        const snapshot = db.list();
+        const generation = db.getGeneration();
+        const options = { actor: "tester", ifRevision: document.revision + 1 };
+        for (const operation of [
+          () => service.get("document", document.id),
+          () => service.documentLinks(document.id),
+          () => service.list("document", { target: feature.id }),
+          () => service.update("document", document.id, { summary: "Правка" }, options),
+          () => service.linkDocument(document.id, feature.id, options),
+        ])
+          fails(operation, "CORRUPT_DATA");
+        expect(db.list()).toEqual(snapshot);
+        expect(db.getGeneration()).toBe(generation);
+      }),
+  );
+
+  test.each([
+    { documentSections: null },
+    { documentSections: [{ id: "guides" }] },
+    {
+      documentSections: [
+        { id: "guides", name: "Первый" },
+        { id: "guides", name: "Второй" },
+      ],
+    },
+    { retiredDocumentSectionIds: null },
+    { retiredDocumentSectionIds: ["guides", "guides"] },
+    {
+      documentSections: [{ id: "guides", name: "Активный" }],
+      retiredDocumentSectionIds: ["guides"],
+    },
+  ])("повреждённый состав разделов %j не выдаётся за пустой и не перезаписывается", (patch) =>
+    fixture((service, db) => {
+      const project = service.get("project");
+      // Намеренное повреждение коллекций проекта низкоуровневым API.
+      db.update(
+        { ...project, revision: project.revision + 1, data: { ...project.data, ...patch } },
+        project.revision,
+      );
+      const snapshot = db.list();
+      const generation = db.getGeneration();
+      fails(() => service.documentSections(), "CORRUPT_DATA");
+      fails(() => service.list("document"), "CORRUPT_DATA");
+      fails(
+        () =>
+          service.changeSection(
+            "create",
+            { id: "new", name: "Новый" },
+            { actor: "tester", ifRevision: project.revision + 1 },
+          ),
+        "CORRUPT_DATA",
+      );
+      expect(db.list()).toEqual(snapshot);
+      expect(db.getGeneration()).toBe(generation);
+    }),
+  );
+
+  test("декодируются поля всех видов знаний, а не только вложения документов", () =>
+    fixture((service, db) => {
+      const { feature, scenario, application } = requirements(service);
+      const implementation = service.create(
+        "implementation",
+        { application: application.id, target: feature.id, title: "Вклад" },
+        "tester",
+      );
+      const product = service.get("product");
+      const board = service.get("board", application.data.boardId);
+      for (const [entity, patch] of [
+        [feature, { summary: null }],
+        [scenario, { featureId: 42 }],
+        [service.get("application", application.id), { implementationIds: null }],
+        [implementation, { active: "false" }],
+        [board, { prefix: 42 }],
+        [product, { name: null }],
+      ] as const) {
+        // Каждый недопустимый payload вводится явно, чтобы проверить границу чтения.
+        db.update(
+          { ...entity, revision: entity.revision + 1, data: { ...entity.data, ...patch } },
+          entity.revision,
+        );
+        fails(() => service.get(entity.kind, entity.id), "CORRUPT_DATA");
+        fails(() => service.list(entity.kind), "CORRUPT_DATA");
+      }
+    }));
+
+  test("ссылка на никогда не существовавший раздел не маскируется как удалённый раздел", () =>
+    fixture((service, db) => {
+      const document = service.create("document", { name: "Документ", body: "Текст" }, "tester");
+      // В отличие от легально удалённого раздела, этот ID отсутствует и в retired-реестре.
+      db.update(
+        {
+          ...document,
+          revision: document.revision + 1,
+          data: { ...document.data, sectionId: "missing" },
+        },
+        document.revision,
+      );
+      fails(() => service.get("document", document.id), "CORRUPT_DATA");
+      fails(() => service.list("document", { section: "none" }), "CORRUPT_DATA");
+    }));
+
   test("project update согласован с Runtime: trim имени, границы длины и строгий slug", () =>
     fixture((service, db) => {
       let project = service.get("project");
@@ -132,7 +385,7 @@ describe("KnowledgeService и файловая SQLite", () => {
       for (const [slug, prefix] of [
         ["ab", "SHORT"],
         ["a".repeat(64), "LONG"],
-      ]) {
+      ] as const) {
         const app = service.create("application", { name: "Приложение", slug, prefix }, "tester");
         expect(service.get("board", app.data.boardId as string).data.slug).toBe(slug);
       }

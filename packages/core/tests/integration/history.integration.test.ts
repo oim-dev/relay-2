@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
+import { RelayError, type WriteOptions } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { HistoryService, type HistoryCheckpoint, type HistorySession } from "../../src/history";
+import { KnowledgeService } from "../../src/knowledge";
+import { TasksService } from "../../src/tasks";
 
 interface Fixture {
   db: ProjectDatabase;
@@ -120,21 +122,266 @@ function fails(operation: () => unknown, code: string): void {
 }
 
 describe("HistoryService: реальная SQLite", () => {
+  test.each(["null", "отсутствует"] as const)(
+    "повреждённое обязательное имя цели (%s) не создаёт материал и не меняет сессию",
+    (variant) =>
+      fixture(({ db, history }) => {
+        const knowledge = new KnowledgeService(db);
+        const document = knowledge.create(
+          "document",
+          { name: "Исходное имя", body: "Текст" },
+          "author",
+        );
+        const session = history.start({ title: "Проверить документ" }, "author");
+        const data: Record<string, unknown> = { ...document.data };
+        // Намеренная порча обязательного имени; подстановка ключа скрыла бы потерю содержания.
+        if (variant === "null") data.name = null;
+        else delete data.name;
+        const damaged = { ...document, revision: document.revision + 1, data };
+        db.update(damaged, document.revision);
+        const generation = db.getGeneration();
+        fails(
+          () =>
+            history.checkpoint(
+              session.id,
+              "open",
+              {
+                title: "Прочитать документ",
+                body: "Сохранить основание работы",
+                runId: session.data.currentRunId,
+                references: [document.key],
+              },
+              owner(session),
+            ),
+          "CORRUPT_DATA",
+        );
+        expect(history.get(session.id)).toEqual(session);
+        expect(db.list("work-checkpoint")).toEqual([]);
+        expect(db.get(document.id)).toEqual(damaged);
+        expect(db.getGeneration()).toBe(generation);
+      }),
+  );
+
+  test("снимок допускает пустой паспорт продукта и пустой заголовок задачи без подмены текста", () =>
+    fixture(({ db, history }) => {
+      const product = new KnowledgeService(db).get("product");
+      const task = new TasksService(db).create({}, "author");
+      const session = history.start({ title: "Начать работу" }, "author");
+      const checkpoint = history.checkpoint(
+        session.id,
+        "open",
+        {
+          title: "Определить содержание",
+          body: "Паспорт и задача ещё не заполнены",
+          runId: session.data.currentRunId,
+          references: [product.key, task.key],
+        },
+        owner(session),
+      );
+      expect(checkpoint.data.references.map(({ id, title }) => ({ id, title }))).toEqual([
+        { id: product.id, title: product.key },
+        { id: task.id, title: "" },
+      ]);
+    }));
+
+  test("материал разрешает виртуальные типизированные ссылки и отвергает неверный вид и дубликаты", () => {
+    fixture(({ db, history }) => {
+      const knowledge = new KnowledgeService(db);
+      const application = knowledge.create(
+        "application",
+        { name: "Веб-клиент", slug: "web", prefix: "WEB" },
+        "автор",
+      );
+      const board = knowledge.get("board", "board:product");
+      const session = history.start({ title: "Ссылки из материала" }, "агент");
+      const input = {
+        title: "Проверить приложение",
+        body: "Сохранить основания.",
+        runId: session.data.currentRunId,
+      };
+      const intent = history.checkpoint(
+        `work-session:${session.id}`,
+        "open",
+        {
+          ...input,
+          references: ["board:product", "application:web"],
+        },
+        owner(session),
+      );
+      expect(intent.data.references.map(({ id, kind }) => ({ id, kind }))).toEqual([
+        { id: board.id, kind: "board" },
+        { id: application.id, kind: "application" },
+      ]);
+      const current = history.get(session.id);
+      const generation = db.getGeneration();
+      fails(() => history.get(`work-checkpoint:${session.id}`), "INVALID_ARGUMENT");
+      fails(() => history.getCheckpoint(`work-session:${intent.id}`), "INVALID_ARGUMENT");
+      fails(
+        () =>
+          history.checkpoint(
+            intent.id,
+            "save",
+            {
+              ...input,
+              references: [`task:${application.id}`],
+            },
+            owner(current),
+          ),
+        "NOT_FOUND",
+      );
+      fails(
+        () =>
+          history.checkpoint(
+            intent.id,
+            "save",
+            {
+              ...input,
+              references: ["board:product", `board:${board.id}`],
+            },
+            owner(current),
+          ),
+        "INVALID_INPUT",
+      );
+      expect(history.get(session.id)).toEqual(current);
+      expect(history.history(session.id)).toEqual([intent]);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("постороннее поле name задачи не подменяет проверенный заголовок в истории", () =>
+    fixture(({ db, history }) => {
+      const task = new TasksService(db).create({ title: "Проверенный заголовок" }, "author");
+      // Внедряем не принадлежащее типу задачи поле через Storage. Оно не является названием задачи.
+      db.update(
+        { ...task, revision: task.revision + 1, data: { ...task.data, name: null } },
+        task.revision,
+      );
+      const session = history.start({ title: "Проверить задачу" }, "author");
+      const checkpoint = history.checkpoint(
+        session.id,
+        "open",
+        {
+          title: "Исследовать задачу",
+          body: "Сохранить корректное название цели",
+          runId: session.data.currentRunId,
+          references: [task.id],
+        },
+        owner(session),
+      );
+      expect(checkpoint.data.references).toEqual([
+        { id: task.id, kind: "task", key: task.key, title: "Проверенный заголовок" },
+      ]);
+      expect(history.getCheckpoint(checkpoint.id)).toEqual(checkpoint);
+      expect(history.history(session.id)).toEqual([checkpoint]);
+    }));
+
+  test.each(["start", "takeover", "checkpoint"] as const)(
+    "%s использует общее правило автора и отказывает без изменения истории",
+    (action) => {
+      fixture(({ db, history }) => {
+        const session = history.start({ title: "Владелец истории" }, "агент");
+        const generation = db.getGeneration();
+        const actor = "агент\u0000";
+        fails(() => {
+          if (action === "start") return history.start({ title: "Другое поручение" }, actor);
+          if (action === "takeover") {
+            return history.transition(
+              session.id,
+              "takeover",
+              { reason: "Смена участия" },
+              { actor, ifRevision: session.revision },
+            );
+          }
+          return history.checkpoint(
+            session.id,
+            "open",
+            {
+              runId: session.data.currentRunId,
+              title: "Намерение",
+              body: "Проверить контракт",
+            },
+            { actor, ifRevision: session.revision },
+          );
+        }, "INVALID_ARGUMENT");
+        expect(history.list()).toEqual([session]);
+        expect(history.history()).toEqual([]);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test("повреждённый runs отвергается чтением и записью без потери сохранённого состояния", () => {
+    fixture(({ db, history }) => {
+      const session = history.start({ title: "Проверка сохранённого участия" }, "агент");
+      // Намеренное повреждение через Storage: предметный сервис такого состояния не создаёт.
+      db.update({ ...session, revision: 2, data: { ...session.data, runs: null } }, 1);
+      const damaged = db.get(session.id)!;
+      const generation = db.getGeneration();
+      fails(() => history.get(session.id), "CORRUPT_DATA");
+      fails(() => history.list(), "CORRUPT_DATA");
+      fails(
+        () =>
+          history.transition(
+            session.id,
+            "takeover",
+            { reason: "Продолжить работу" },
+            {
+              actor: "второй-агент",
+              ifRevision: 2,
+            },
+          ),
+        "CORRUPT_DATA",
+      );
+      fails(
+        () =>
+          history.checkpoint(
+            session.id,
+            "open",
+            {
+              runId: session.data.currentRunId,
+              title: "Намерение",
+              body: "Проверить состояние",
+            },
+            { actor: "агент", ifRevision: 2 },
+          ),
+        "CORRUPT_DATA",
+      );
+      expect(db.get(session.id)).toEqual(damaged);
+      expect(db.list("work-checkpoint")).toEqual([]);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("повреждение checkpoint не выдаётся пустыми ссылками и блокирует продолжение без записи", () => {
+    fixture(({ db, history }) => {
+      const session = history.start({ title: "Проверка сохранённого материала" }, "агент");
+      const intent = open(history, session);
+      const current = history.get(session.id);
+      // Storage используется только для намеренно недопустимого материала, не для рабочего сценария.
+      const id = crypto.randomUUID();
+      db.insert({ ...intent, id, key: `CP-${id}`, data: { ...intent.data, references: null } });
+      const damaged = db.get(id)!;
+      const materials = db.list("work-checkpoint");
+      const generation = db.getGeneration();
+      fails(() => history.getCheckpoint(id), "CORRUPT_DATA");
+      fails(() => history.history(session.id), "CORRUPT_DATA");
+      fails(() => material(history, intent, "save"), "CORRUPT_DATA");
+      expect(db.get(id)).toEqual(damaged);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.get(session.id)).toEqual(current);
+      expect(db.list("work-checkpoint")).toEqual(materials);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
   test("материалы, авторство и снимки ссылок неизменяемы после нового участия и открытия БД", () => {
     fixture(({ db, history, connect }) => {
-      const now = new Date().toISOString();
-      const document: EntityRecord = {
-        id: crypto.randomUUID(),
-        key: "DOC-1",
-        kind: "document",
-        revision: 1,
-        createdAt: now,
-        updatedAt: now,
-        createdBy: "автор",
-        updatedBy: "автор",
-        data: { title: "Первоначальный контракт" },
-      };
-      db.insert(document);
+      const knowledge = new KnowledgeService(db);
+      const document = knowledge.create(
+        "document",
+        { name: "Первоначальный контракт", body: "Исходные предметные правила." },
+        "автор",
+      );
       const session = history.start(
         {
           title: "Проверить историю",
@@ -168,7 +415,17 @@ describe("HistoryService: реальная SQLite", () => {
       expect(intent.data.references).toEqual([
         { id: document.id, kind: "document", key: "DOC-1", title: "Первоначальный контракт" },
       ]);
-      db.update({ ...document, revision: 2, key: "DOC-2", data: { title: "Новая редакция" } }, 1);
+      const updatedDocument = knowledge.update(
+        "document",
+        document.id,
+        { name: "Новая редакция", body: "Уточнённые предметные правила." },
+        { actor: "автор", ifRevision: document.revision },
+      );
+      knowledge.rename("document", document.id, "DOC-2", {
+        actor: "автор",
+        ifRevision: updatedDocument.revision,
+      });
+      expect(history.getCheckpoint(intent.id)).toEqual(initial);
       const transferred = history.transition(
         session.key,
         "takeover",
@@ -185,12 +442,15 @@ describe("HistoryService: реальная SQLite", () => {
       expect(finished.data.runs[0]?.operator?.name).toBe("Анна");
       expect(finished.data.runs[1]?.operator).toBeNull();
       expect(progress.data.runId).toBe(transferred.data.currentRunId!);
-      expect(progress.data.references[0]?.title).toBe("Новая редакция");
+      expect(progress.data.references).toEqual([
+        { id: document.id, kind: "document", key: "DOC-2", title: "Новая редакция" },
+      ]);
       expect(progress.data.intentId).toBe(intent.id);
       expect(result.data.kind).toBe("result");
       db.close();
       const reopened = connect();
       expect(reopened.getCheckpoint(`work-checkpoint:${intent.id}`)).toEqual(initial);
+      expect(reopened.getCheckpoint(progress.id)).toEqual(progress);
       expect(reopened.get(`work-session:${session.id}`)).toEqual(finished);
       expect(reopened.history(session.key).map((entry) => entry.data.sequence)).toEqual([1, 2, 3]);
       expect(reopened.intents(session.id)).toEqual([]);

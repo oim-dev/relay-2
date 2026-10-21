@@ -1,24 +1,19 @@
 import { statSync } from "node:fs";
-import { RelayError, type EntityKind, type EntityRecord } from "@relay/contracts";
+import {
+  ENTITY_KINDS,
+  RelayError,
+  type EntityKind,
+  type EntityRecord,
+  type KnowledgeRecord,
+  type ProjectEntity,
+} from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "./entities";
 import { TASK_COLUMNS, TasksService } from "./tasks";
+import { decodeKnowledge } from "./knowledge-data";
+import { EntityReader } from "./entity-reader";
 
-const kinds: readonly EntityKind[] = [
-  "project",
-  "product",
-  "feature",
-  "scenario",
-  "application",
-  "implementation",
-  "board",
-  "task",
-  "document",
-  "work-plan",
-  "release",
-  "work-session",
-  "work-checkpoint",
-];
+const kinds: readonly EntityKind[] = ENTITY_KINDS;
 
 const subjectFields: Partial<Record<EntityKind, readonly string[]>> = {
   project: ["slug"],
@@ -62,8 +57,8 @@ function subjectMatches(entity: EntityRecord, query: string): boolean {
 }
 
 export interface ProjectOverview {
-  items: EntityRecord[];
-  project: EntityRecord;
+  items: ProjectEntity[];
+  project: KnowledgeRecord<"project">;
   generation: number;
   counts: Record<EntityKind, number>;
   tasks: { total: number; columns: Record<string, number>; blocked: number };
@@ -223,11 +218,11 @@ export class QueryService {
     this.tasks = new TasksService(db);
   }
 
-  get(ref: string): EntityRecord {
-    return this.db.snapshot(() => this.entities.get(ref));
+  get(ref: string): ProjectEntity {
+    return this.db.snapshot(() => new EntityReader(this.db).get(ref));
   }
 
-  search(input: Record<string, unknown>): EntityRecord[] {
+  search(input: Record<string, unknown>): ProjectEntity[] {
     if (!object(input) || Object.keys(input).some((key) => !["q", "kind"].includes(key))) {
       throw new RelayError("INVALID_ARGUMENT", "Поиск принимает только поля q и kind", 2);
     }
@@ -238,9 +233,10 @@ export class QueryService {
     const query = input.q;
     const selected = input.kind as EntityKind | undefined;
     return this.db.snapshot(() => {
+      const reader = new EntityReader(this.db);
       let exactId: string | undefined;
       try {
-        exactId = this.entities.get(query, selected).id;
+        exactId = this.entities.resolve(query, selected).id;
       } catch (error) {
         // Произвольный текст запроса не обязан быть адресом, но отказ хранилища скрывать нельзя.
         if (
@@ -252,19 +248,22 @@ export class QueryService {
       const lowered = query.toLowerCase();
       return this.entities
         .list(selected)
+        .map((item) => reader.decode(item))
         .filter((item) => item.id === exactId || subjectMatches(item, lowered));
     });
   }
 
   overview(): ProjectOverview {
     return this.db.snapshot(() => {
+      const reader = new EntityReader(this.db);
       const items = this.entities
         .list()
+        .map((item) => reader.decode(item))
         .sort((a, b) => a.key.localeCompare(b.key) || a.id.localeCompare(b.id));
       const tasks = items.filter((item) => item.kind === "task");
       return {
         items,
-        project: this.entities.get(this.db.projectId, "project"),
+        project: decodeKnowledge(this.entities.get(this.db.projectId, "project"), "project"),
         generation: this.db.getGeneration(),
         counts: Object.fromEntries(
           kinds.map((kind) => [kind, items.filter((item) => item.kind === kind).length]),
@@ -295,7 +294,7 @@ export class QueryService {
       databasePath: this.db.path,
       bytes: statSync(this.db.path).size,
       generation: this.db.getGeneration(),
-      records: this.entities.list().length,
+      records: this.db.count(),
     }));
   }
 
@@ -303,6 +302,15 @@ export class QueryService {
     return this.db.snapshot(() => {
       const items = this.entities.list();
       const issues = inspectRecords(items, this.db.projectId);
+      const reader = new EntityReader(this.db);
+      for (const item of items) {
+        try {
+          reader.decode(item);
+        } catch (error) {
+          if (!(error instanceof RelayError) || error.code !== "CORRUPT_DATA") throw error;
+          issues.push(`${item.key}: ${error.message}`);
+        }
+      }
       try {
         this.tasks.list({ readiness: "blocked" });
       } catch (error) {

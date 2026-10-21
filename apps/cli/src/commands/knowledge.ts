@@ -1,4 +1,11 @@
-import type { EntityKind } from "@relay/contracts";
+import {
+  APPLICATION_TYPES,
+  DOCUMENT_KINDS,
+  DOCUMENT_STATUSES,
+  DOCUMENT_RELATION_TYPES,
+  IMPLEMENTATION_STATUSES,
+  type EntityKind,
+} from "@relay/contracts";
 import type { Args } from "gunshi";
 import {
   choice,
@@ -14,7 +21,7 @@ import {
   textArgs,
 } from "../arguments";
 import { CliUsageError } from "../errors";
-import { type CommandRegistry, records, result } from "../registry";
+import { type CommandRegistry, result } from "../registry";
 
 const names: Partial<Record<EntityKind, string>> = {
   project: "Паспорт проекта",
@@ -40,28 +47,20 @@ const fields: Partial<Record<EntityKind, Args>> = {
     ...common,
     slug: string("Slug приложения"),
     prefix: string("Префикс доски"),
-    type: choice("Тип приложения", ["frontend", "backend", "internal"]),
+    type: choice("Тип приложения", [...APPLICATION_TYPES]),
   },
   implementation: {
     title: string("Заголовок"),
     application: string("Приложение"),
     target: string("Фича или сценарий"),
-    status: choice("Сохранённая отметка", ["none", "partial", "done"]),
+    status: choice("Сохранённая отметка", [...IMPLEMENTATION_STATUSES]),
     ...textArgs("description"),
   },
   document: {
     name: string("Название"),
     ...textArgs("summary", "body"),
-    "document-kind": choice("Вид документа", [
-      "specification",
-      "description",
-      "rules",
-      "instruction",
-      "proposal",
-      "decision",
-      "research",
-    ]),
-    "document-status": choice("Состояние документа", ["draft", "active", "archived"]),
+    "document-kind": choice("Вид документа", [...DOCUMENT_KINDS]),
+    "document-status": choice("Состояние документа", [...DOCUMENT_STATUSES]),
     "section-id": string("ID раздела"),
     pinned: flag("Закрепить документ; --pinned=false снимает закрепление"),
     targets: repeated("Цель документа"),
@@ -115,7 +114,12 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
               }
             : {}),
         },
-        run: (i) => i.entities(i.knowledge.list(kind, i.input)),
+        run: (i) => {
+          const sort = i.text("sort");
+          if (sort !== "key" && sort !== "title" && sort !== "updated")
+            throw new CliUsageError("Неизвестный порядок списка");
+          return i.page((window) => i.knowledge.listPage(kind, i.input, { ...window, sort }));
+        },
       });
     if (kind !== "project" && kind !== "board")
       registry.add(`${kind} create`, {
@@ -157,14 +161,8 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     description: "Разделы в заданном порядке",
     args: pageArgs,
     run: (i) => {
-      const project = i.knowledge.get("project");
-      return i.page(
-        records(project.data.documentSections === undefined ? [] : project.data.documentSections),
-        {
-          project: project.key,
-          revision: project.revision,
-        },
-      );
+      const { items, ...owner } = i.knowledge.documentSections();
+      return i.page(items, owner);
     },
   });
   for (const action of ["create", "update", "move", "remove"] as const) {
@@ -192,7 +190,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
       args: {
         ...refArgs,
         target: string("Цель связи", true),
-        relation: choice("Тип связи", ["documents", "references"], "documents"),
+        relation: choice("Тип связи", [...DOCUMENT_RELATION_TYPES], "documents"),
       },
       fields: remove ? {} : textArgs("description"),
       run: (i) =>
@@ -211,11 +209,8 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     description: "Прикрепления документа",
     args: { ...refArgs, ...pageArgs },
     run: (i) => {
-      const document = i.knowledge.get("document", i.text("ref"));
-      return i.page(records(document.data.relations), {
-        ref: document.key,
-        revision: document.revision,
-      });
+      const { items, ...owner } = i.knowledge.documentLinks(i.text("ref"));
+      return i.page(items, owner);
     },
   });
   registry.group("application participation", "Участие приложения в требованиях");

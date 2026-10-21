@@ -84,4 +84,23 @@ describe("Пагинация CLI", () => {
       "Повреждённый курсор",
     );
   });
+  test("ленивое чтение получает только окно и не вызывается для устаревшего курсора", () => {
+    const windows: { offset: number; limit: number }[] = [];
+    const read = (window: { offset: number; limit: number }) => {
+      windows.push(window);
+      return { items: [window.offset === 0 ? "a" : "b"], total: 2 };
+    };
+    const first = paginate(read, options);
+    const second = paginate(read, { ...options, cursor: first.page.nextCursor! });
+    expect(windows).toEqual([
+      { offset: 0, limit: 1 },
+      { offset: 1, limit: 1 },
+    ]);
+    expect(second.items).toEqual(["b"]);
+    expect(second.page.nextCursor).toBeNull();
+    expect(() =>
+      paginate(read, { ...options, cursor: first.page.nextCursor!, generation: 5 }),
+    ).toThrow("Данные изменились");
+    expect(windows).toHaveLength(2);
+  });
 });

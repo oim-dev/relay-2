@@ -80,8 +80,8 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
   for (const action of ["fork", "attach", "pause", "resume", "takeover", "complete", "cancel"])
     registry.add(`session ${action}`, {
       description: {
-        fork: "Создать дочернее поручение из намерения",
-        attach: "Принять дочернее поручение",
+        fork: "Создать дочернее поручение из намерения; --if-revision — ревизия родительской сессии",
+        attach: "Принять дочернее поручение; --if-revision — ревизия дочерней сессии",
         pause: "Приостановить участие",
         resume: "Продолжить участие",
         takeover: "Передать участие",
@@ -138,12 +138,14 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
   });
   for (const action of ["open", "save", "complete", "cancel"] as const)
     registry.add(`checkpoint ${action}`, {
-      description: {
-        open: "Открыть намерение в сессии",
-        save: "Сохранить материал намерения",
-        complete: "Завершить намерение",
-        cancel: "Отменить намерение",
-      }[action],
+      description: `${
+        {
+          open: "Открыть намерение в сессии",
+          save: "Сохранить материал намерения",
+          complete: "Завершить намерение",
+          cancel: "Отменить намерение",
+        }[action]
+      }. --if-revision — прочитанная ревизия сессии, а не checkpoint.`,
       mode: "update",
       args: refArgs,
       fields: inputArgs(

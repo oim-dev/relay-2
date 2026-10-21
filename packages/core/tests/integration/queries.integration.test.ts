@@ -129,13 +129,20 @@ describe("QueryService с настоящей SQLite", () => {
       blocked: 1,
       columns: { inbox: 1, ready: 1, done: 0 },
     });
-    expect(queries.status()).toMatchObject({
-      projectId: db.projectId,
-      databasePath: db.path,
-      generation: overview.generation,
-      records: 5,
-    });
-    expect(queries.status().bytes).toBeGreaterThan(0);
+    const fullRead = spyOn(db, "list");
+    try {
+      const status = queries.status();
+      expect(status).toMatchObject({
+        projectId: db.projectId,
+        databasePath: db.path,
+        generation: overview.generation,
+        records: 5,
+      });
+      expect(status.bytes).toBeGreaterThan(0);
+      expect(fullRead).not.toHaveBeenCalled();
+    } finally {
+      fullRead.mockRestore();
+    }
     expect(queries.check()).toEqual({
       projectId: db.projectId,
       generation: overview.generation,
@@ -167,6 +174,71 @@ describe("QueryService с настоящей SQLite", () => {
     expect(String(error.details?.issues)).toContain("missing-id");
     expect(String(error.details?.issues)).toContain("тип ссылки");
     expect(String(error.details?.issues)).toContain("TASK_CYCLE");
+  });
+
+  test("обычные запросы отвергают повреждённые данные, а doctor включает их в диагностику", () => {
+    const document = knowledge.create("document", { name: "Документ", body: "Содержание" }, actor);
+    // Намеренное повреждение вне предметного API: null не означает отсутствие связей.
+    const damaged = {
+      ...document,
+      revision: document.revision + 1,
+      data: { ...document.data, relations: null },
+    };
+    db.update(damaged, document.revision);
+    const generation = db.getGeneration();
+    failure(() => queries.get(document.id), "CORRUPT_DATA");
+    failure(() => queries.search({ q: "Документ" }), "CORRUPT_DATA");
+    failure(() => queries.overview(), "CORRUPT_DATA");
+    const error = failure(() => queries.check(), "INTEGRITY_ERROR");
+    expect(error.message).toContain(document.key);
+    expect(db.get(document.id)).toEqual(damaged);
+    expect(db.getGeneration()).toBe(generation);
+  });
+
+  test("doctor различает удалённый и неизвестный раздел, проверяя общий индекс один раз", () => {
+    const project = knowledge.changeSection(
+      "create",
+      { id: "guides", name: "Руководства" },
+      write(knowledge.get("project")),
+    );
+    const first = knowledge.create(
+      "document",
+      { name: "Первый", body: "Первое руководство", sectionId: "guides" },
+      actor,
+    );
+    const second = knowledge.create(
+      "document",
+      { name: "Второй", body: "Второе руководство", sectionId: "guides" },
+      actor,
+    );
+    knowledge.changeSection("remove", { id: "guides" }, write(project));
+    const before = db.list();
+    const generation = db.getGeneration();
+    const reads = spyOn(db, "get");
+    try {
+      expect(queries.check().valid).toBe(true);
+      expect(reads.mock.calls.filter(([ref]) => ref === db.projectId)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
+    expect(knowledge.get("document", first.id).data.sectionId).toBeNull();
+    expect(db.list()).toEqual(before);
+    expect(db.getGeneration()).toBe(generation);
+
+    // Повреждаем только ссылку второго документа, а не имитируем легальное удаление раздела.
+    const damaged = {
+      ...second,
+      revision: second.revision + 1,
+      data: { ...second.data, sectionId: "never-existed" },
+    };
+    db.update(damaged, second.revision);
+    const damagedGeneration = db.getGeneration();
+    failure(() => queries.get(second.id), "CORRUPT_DATA");
+    const error = failure(() => queries.check(), "INTEGRITY_ERROR");
+    expect(error.message).toContain(second.key);
+    expect(db.get(second.id)).toEqual(damaged);
+    expect(db.get(first.id)).toEqual(first);
+    expect(db.getGeneration()).toBe(damagedGeneration);
   });
 
   test("doctor не принимает дублированный паспорт продукта и проверяет записи всех областей", () => {

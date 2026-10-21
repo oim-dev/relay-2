@@ -1,49 +1,30 @@
 import { Database } from "bun:sqlite";
 import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { RelayError, type EntityKind, type EntityRecord } from "@relay/contracts";
+import {
+  RelayError,
+  validateEntityPageRequest,
+  type EntityIdentity,
+  type EntityKind,
+  type EntityRecord,
+  type EntityPage,
+  type EntityPageRequest,
+} from "@relay/contracts";
 import { APPLICATION_ID, SCHEMA, SCHEMA_VERSION } from "./schema";
+import {
+  countEntities,
+  entityWindow,
+  findAddressIdentities,
+  getEntity,
+  getEntityIdentity,
+  listEntities,
+  taskGraphRecords,
+} from "./entity-queries";
 
 export interface ProjectMetadata {
   id: string;
   name: string;
   slug: string;
-}
-
-interface EntityRow {
-  id: string;
-  kind: EntityKind;
-  key: string;
-  revision: number;
-  created_at: string;
-  updated_at: string;
-  created_by: string;
-  updated_by: string;
-  data: string;
-  comments: string | null;
-}
-
-// Проекция и содержание читаются одним SQL-запросом из одного снимка, без N+1 и копий в payload.
-const ENTITY_COLUMNS = `e.*, CASE WHEN e.kind = 'task' THEN (
-  SELECT json_group_array(json_object(
-    'id', id, 'title', title, 'body', body, 'createdAt', created_at, 'createdBy', created_by
-  ) ORDER BY sequence) FROM task_comments WHERE task_id = e.id
-) ELSE NULL END AS comments`;
-
-function record(row: EntityRow): EntityRecord {
-  const data = JSON.parse(row.data) as Record<string, unknown>;
-  if (row.kind === "task") data.comments = JSON.parse(row.comments!);
-  return {
-    id: row.id,
-    kind: row.kind,
-    key: row.key,
-    revision: row.revision,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    createdBy: row.created_by,
-    updatedBy: row.updated_by,
-    data,
-  };
 }
 
 function payload(entity: EntityRecord): string {
@@ -290,32 +271,50 @@ export class ProjectDatabase {
   }
 
   get(ref: string, kind?: EntityKind): EntityRecord | undefined {
-    return this.read(() => {
-      const row = this.connection
-        .query<EntityRow, [string]>(
-          `
-        SELECT ${ENTITY_COLUMNS} FROM entity_refs r JOIN entities e ON e.id = r.entity_id WHERE r.ref = ?
-      `,
-        )
-        .get(ref);
-      return row && (kind === undefined || row.kind === kind) ? record(row) : undefined;
-    });
+    return this.read(() => getEntity(this.connection, ref, kind));
+  }
+
+  /** Идентичность по ID/ключу/алиасу без чтения JSON и агрегации комментариев. */
+  getIdentity(ref: string, kind?: EntityKind): EntityIdentity | undefined {
+    return this.read(() => getEntityIdentity(this.connection, ref, kind));
+  }
+
+  /**
+   * Технический поиск точного строкового slug/prefix внутри вида, без выдачи содержания.
+   * Приоритет адресов, допустимые виды виртуальных ссылок и неоднозначность проверяет Core.
+   */
+  findAddressIdentities(ref: string, kind: EntityKind): EntityIdentity[] {
+    return this.read(() => findAddressIdentities(this.connection, ref, kind));
   }
 
   list(kind?: EntityKind): EntityRecord[] {
-    return this.read(() => {
-      const rows =
-        kind === undefined
-          ? this.connection
-              .query<EntityRow, []>(`SELECT ${ENTITY_COLUMNS} FROM entities e ORDER BY e.key, e.id`)
-              .all()
-          : this.connection
-              .query<EntityRow, [string]>(
-                `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE e.kind = ? ORDER BY e.key, e.id`,
-              )
-              .all(kind);
-      return rows.map(record);
-    });
+    return this.read(() => listEntities(this.connection, kind));
+  }
+
+  /** Число записей без чтения JSON-содержания и журнала комментариев. */
+  count(kind?: EntityKind): number {
+    return this.read(() => countEntities(this.connection, kind));
+  }
+
+  /**
+   * Читает только выбранное окно записей и полный счётчик в одном снимке.
+   * Содержание и комментарии остальных записей не загружаются. Сортировка
+   * updated убывающая; остальные — возрастающие, с постоянным ID для равных ключей.
+   */
+  listPage(kind: EntityKind, options: EntityPageRequest): EntityPage<EntityRecord> {
+    validateEntityPageRequest(options);
+    return this.snapshot(() => ({
+      total: this.count(kind),
+      items: entityWindow(this.connection, kind, options),
+    }));
+  }
+
+  /**
+   * Снимок обязательств всех задач для Core: без текста задачи и журнала комментариев.
+   * Отсутствующие/неверные обязательства сохраняются как есть для предметного декодера.
+   */
+  listTaskGraph(): EntityRecord[] {
+    return this.read(() => taskGraphRecords(this.connection));
   }
 
   insert(entity: EntityRecord): void {

@@ -1,17 +1,12 @@
-export type EntityKind =
-  | "project"
-  | "product"
-  | "feature"
-  | "scenario"
-  | "application"
-  | "implementation"
-  | "board"
-  | "task"
-  | "document"
-  | "work-plan"
-  | "release"
-  | "work-session"
-  | "work-checkpoint";
+import type { EntityKind } from "./identity";
+
+export { ENTITY_KINDS, isEntityKind, validateActor, type EntityKind } from "./identity";
+export * from "./knowledge";
+export * from "./tasks";
+export * from "./planning";
+export * from "./history";
+export * from "./pagination";
+export * from "./records";
 
 export interface EntityRecord {
   id: string;
@@ -24,6 +19,9 @@ export interface EntityRecord {
   updatedBy: string;
   data: Record<string, unknown>;
 }
+
+/** Идентичность разрешённой ссылки без содержания сущности и журнала комментариев. */
+export type EntityIdentity = Pick<EntityRecord, "id" | "kind" | "key">;
 
 export interface WriteOptions {
   actor: string;

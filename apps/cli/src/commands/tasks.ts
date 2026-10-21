@@ -1,3 +1,4 @@
+import { TASK_COLUMNS } from "@relay/contracts";
 import {
   choice,
   inputArgs,
@@ -14,7 +15,6 @@ import {
 import { CliUsageError } from "../errors";
 import { type CommandRegistry, result } from "../registry";
 
-const columns = ["inbox", "ready", "in-progress", "review", "done", "cancelled"];
 const content = {
   title: string("Название задачи"),
   ...textArgs("description"),
@@ -28,7 +28,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     args: pageArgs,
     fields: {
       board: string("Доска"),
-      column: choice("Колонка", columns),
+      column: choice("Колонка", [...TASK_COLUMNS]),
       parent: string("Родитель"),
       q: string("Поиск по содержанию"),
       "search-in": choice("Область поиска", ["title", "all"]),
@@ -36,7 +36,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
       completion: choice("Завершение", ["unfinished", "finished"]),
       readiness: choice("Готовность", ["blocked", "ready"]),
     },
-    run: (i) => i.entities(i.tasks.list(i.input)),
+    run: (i) => i.page((window) => i.tasks.listPage(i.input, { ...window, sort: "key" })),
   });
   registry.add("task get", {
     description: "Полная карточка задачи",
@@ -49,7 +49,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     fields: inputArgs({
       ...content,
       board: string("Доска"),
-      column: choice("Начальная колонка", columns),
+      column: choice("Начальная колонка", [...TASK_COLUMNS]),
       parent: string("Родитель"),
       dependencies: repeated("Зависимость"),
       related: repeated("Связанная задача"),
@@ -69,7 +69,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     mode: "update",
     args: refArgs,
     fields: inputArgs({
-      column: choice("Колонка", columns),
+      column: choice("Колонка", [...TASK_COLUMNS]),
       board: string("Новая доска"),
     }),
     run: (i) => result(i.tasks.move(i.text("ref"), i.input, i.write)),
@@ -82,7 +82,8 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   registry.add("task children", {
     description: "Прямые дочерние задачи",
     args: { ...refArgs, ...pageArgs },
-    run: (i) => i.entities(i.tasks.list({ parent: i.tasks.get(i.text("ref")).id })),
+    run: (i) =>
+      i.page((window) => i.tasks.listPage({ parent: i.text("ref") }, { ...window, sort: "key" })),
   });
   registry.group("task parent", "Родитель задачи");
   for (const clear of [false, true])
@@ -99,11 +100,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     args: { ...refArgs, ...pageArgs },
     run: (i) => {
       const task = i.tasks.get(i.text("ref"));
-      const dependencies = Array.isArray(task.data.dependencies) ? task.data.dependencies : [];
-      return i.page(
-        dependencies.map((ref) => i.tasks.get(String(ref))),
-        { ref: task.key, revision: task.revision },
-      );
+      return i.page(i.tasks.dependencies(task.id), { ref: task.key, revision: task.revision });
     },
   });
   for (const remove of [false, true])

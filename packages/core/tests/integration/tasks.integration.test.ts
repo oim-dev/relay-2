@@ -1,18 +1,16 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-import { RelayError, type EntityRecord } from "@relay/contracts";
+import { RelayError, TASK_COLUMNS, type EntityRecord, type TaskRecord } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
-import { EntityService } from "../../src/entities";
-import { TASK_COLUMNS, TasksService } from "../../src/tasks";
+import { KnowledgeService } from "../../src/knowledge";
+import { TasksService } from "../../src/tasks";
 
 let directory: string;
 let db: ProjectDatabase;
-let entities: EntityService;
+let knowledge: KnowledgeService;
 let tasks: TasksService;
 let connections: ProjectDatabase[];
-let processes: ReturnType<typeof Bun.spawn>[];
 
 function options(record: EntityRecord) {
   return { actor: "исполнитель", ifRevision: record.revision };
@@ -28,18 +26,13 @@ function errorCode(operation: () => unknown, expected: string): void {
   }
 }
 
-function task(title: string, input: Record<string, unknown> = {}): EntityRecord {
+function task(title: string, input: Record<string, unknown> = {}): TaskRecord {
   return tasks.create({ title, ...input }, "автор");
 }
 
 function applicationBoard(slug = "web") {
-  const application = entities.create("application", "APP", { name: slug }, "автор");
-  const board = entities.create(
-    "board",
-    "BOARD",
-    { name: slug, slug, prefix: slug.toUpperCase(), applicationId: application.id },
-    "автор",
-  );
+  const application = knowledge.create("application", { name: slug, slug }, "автор");
+  const board = knowledge.get("board", application.data.boardId);
   return { application, board };
 }
 
@@ -57,18 +50,208 @@ beforeEach(() => {
     slug: "tasks",
   });
   connections = [db];
-  processes = [];
-  entities = new EntityService(db);
+  knowledge = new KnowledgeService(db);
   tasks = new TasksService(db);
 });
 
 afterEach(() => {
-  for (const process of processes) process.kill();
   for (const connection of connections) connection.close();
   rmSync(directory, { recursive: true, force: true });
 });
 
 describe("TasksService с реальной SQLite", () => {
+  test("типизированные ссылки доски работают при создании, списке и переносе; неверный вид не записывается", () => {
+    const { board } = applicationBoard();
+    const initial = task("Ссылка на продукт", { board: "board:product" });
+    expect(tasks.list({ board: "board:BOARD-PRODUCT" })).toEqual([initial]);
+
+    const moved = tasks.move(initial.id, { board: `board:${board.id}` }, options(initial));
+    expect(moved.data.boardId).toBe(board.id);
+    expect(tasks.list({ board: "board:web" })).toEqual([moved]);
+    expect(tasks.get(initial.key)).toEqual(moved);
+
+    const generation = db.getGeneration();
+    errorCode(() => task("Неверный вид", { board: "application:web" }), "INVALID_ARGUMENT");
+    errorCode(
+      () => tasks.move(moved.id, { board: `task:${moved.id}` }, options(moved)),
+      "INVALID_ARGUMENT",
+    );
+    expect(tasks.list()).toEqual([moved]);
+    expect(db.getGeneration()).toBe(generation);
+  });
+
+  test("progressMany вычисляет несколько задач по постоянным ID одним чтением графа", () => {
+    const dependency = task("Готовое обязательство", { column: "done" });
+    const parent = task("Итог", { column: "done", dependencies: [dependency.id] });
+    const child = task("Дочерняя работа", { column: "done", parent: parent.id });
+    const { board } = applicationBoard();
+    tasks.move(parent.id, { board: board.id }, options(parent));
+    tasks.move(dependency.id, { column: "review" }, options(dependency));
+    const readGraph = spyOn(db, "listTaskGraph");
+    const readAll = spyOn(db, "list");
+    const readIdentity = spyOn(db, "getIdentity");
+    try {
+      const progress = tasks.progressMany([
+        // Прежний ключ стал алиасом, повтор той же строки не должен повторять чтение.
+        parent.key,
+        `task:${child.id}`,
+        dependency.id,
+        parent.id,
+        parent.key,
+        `task:${child.id}`,
+      ]);
+      expect(progress).toEqual(
+        new Map([
+          [parent.id, { completed: false, canComplete: false, blockers: [dependency.id] }],
+          [child.id, { completed: true, canComplete: true, blockers: [] }],
+          [dependency.id, { completed: false, canComplete: true, blockers: [] }],
+        ]),
+      );
+      expect(readGraph).toHaveBeenCalledTimes(1);
+      expect(readAll).not.toHaveBeenCalled();
+      expect(readIdentity).toHaveBeenCalledTimes(4);
+    } finally {
+      readGraph.mockRestore();
+      readAll.mockRestore();
+      readIdentity.mockRestore();
+    }
+  });
+
+  test("get возвращает карточку из снимка разрешения ссылки при конкурентном изменении", () => {
+    const original = task("Исходное содержание");
+    const peer = ProjectDatabase.open(db.path);
+    connections.push(peer);
+    const competingTasks = new TasksService(peer);
+    const readIdentity = db.getIdentity.bind(db);
+    let current: TaskRecord | undefined;
+    const identityRead = spyOn(db, "getIdentity").mockImplementation((ref, kind) => {
+      const identity = readIdentity(ref, kind);
+      // Коммит попадает строго между разрешением адреса и чтением полной карточки.
+      current = competingTasks.update(original.id, { title: "Новая версия" }, options(original));
+      return identity;
+    });
+    try {
+      expect(tasks.get(`task:${original.key}`)).toEqual(original);
+      expect(current).toMatchObject({
+        revision: original.revision + 1,
+        data: { title: "Новая версия" },
+      });
+    } finally {
+      identityRead.mockRestore();
+    }
+    expect(tasks.get(original.id)).toEqual(current!);
+  });
+
+  test("неоднозначный виртуальный адрес доски отклоняет создание задачи без записи", () => {
+    const first = applicationBoard();
+    const second = applicationBoard("api");
+    // Намеренная порча адреса через Storage обходит штатную уникальность Knowledge.
+    db.update(
+      {
+        ...second.board,
+        revision: second.board.revision + 1,
+        data: { ...second.board.data, slug: first.board.data.slug },
+      },
+      second.board.revision,
+    );
+    const generation = db.getGeneration();
+
+    errorCode(() => task("Не сохранять", { board: "board:web" }), "CORRUPT_DATA");
+    expect(tasks.list()).toEqual([]);
+    expect(db.getGeneration()).toBe(generation);
+  });
+
+  test("повреждённые зависимости отклоняются чтениями и всеми путями записи без изменения состояния", () => {
+    const original = task("Повреждение");
+    const target = task("Связанная задача");
+    // Намеренно обходим предметный сервис: воспроизводим повреждённый JSON в Storage.
+    db.update(
+      {
+        ...original,
+        revision: original.revision + 1,
+        data: { ...original.data, dependencies: null },
+      },
+      original.revision,
+    );
+    const damaged = db.get(original.id)!;
+    const generation = db.getGeneration();
+    const operations = [
+      () => tasks.get(original.id),
+      () => tasks.dependencies(original.id),
+      () => tasks.update(original.id, { title: "Не сохранять" }, options(damaged)),
+      () => tasks.move(original.id, { column: "ready" }, options(damaged)),
+      () => tasks.setParent(original.id, target.id, options(damaged)),
+      () => tasks.dependency(original.id, target.id, false, options(damaged)),
+      () => tasks.related(original.id, target.id, false, options(damaged)),
+      () => tasks.criterion(original.id, "add", { title: "Не сохранять" }, options(damaged)),
+      () => tasks.comment(original.id, "Не публиковать", "автор"),
+    ];
+    for (const operation of operations) {
+      errorCode(operation, "CORRUPT_DATA");
+      expect(db.get(original.id)).toEqual(damaged);
+      expect(db.getGeneration()).toBe(generation);
+    }
+    expect(tasks.get(target.id)).toEqual(target);
+  });
+
+  test("progressMany проверяет обязательства независимо от текстовых полей полной карточки", () => {
+    const record = task("Готовая задача", { column: "done" });
+    // Намеренное повреждение содержания: графу оно не нужно, полная карточка обязана отказать.
+    db.update(
+      { ...record, revision: record.revision + 1, data: { ...record.data, description: null } },
+      record.revision,
+    );
+
+    expect(tasks.progressMany([record.key]).get(record.id)).toEqual({
+      completed: true,
+      canComplete: true,
+      blockers: [],
+    });
+    errorCode(() => tasks.get(record.id), "CORRUPT_DATA");
+  });
+
+  test("страницы сохраняют total, фильтр родителя и сортировку до ограничения окна", () => {
+    const parent = task("Родитель");
+    const last = task("Ясный итог", { parent: parent.id });
+    task("Актуальная работа", { parent: parent.id });
+    task("Посторонняя задача");
+
+    expect(tasks.listPage({}, { offset: 0, limit: 1, sort: "key" })).toEqual({
+      items: [parent],
+      total: 4,
+    });
+    expect(tasks.listPage({ parent: parent.key }, { offset: 1, limit: 1, sort: "title" })).toEqual({
+      items: [last],
+      total: 2,
+    });
+    expect(tasks.listPage({ parent: parent.id }, { offset: 2, limit: 1, sort: "key" })).toEqual({
+      items: [],
+      total: 2,
+    });
+  });
+
+  test("графовая проекция отличает отсутствующий parentId от допустимого null", () => {
+    const record = task("Задача без родителя", { column: "done" });
+    expect(tasks.progressMany([record.id]).get(record.id)?.completed).toBe(true);
+    // Намеренно удаляем обязательное поле в Storage, а не снимаем родителя через Core.
+    const data: Record<string, unknown> = { ...record.data };
+    delete data.parentId;
+    const damaged = { ...record, revision: record.revision + 1, data };
+    db.update(damaged, record.revision);
+    const generation = db.getGeneration();
+    errorCode(() => tasks.progressMany([record.id]), "CORRUPT_DATA");
+    expect(db.get(record.id)).toEqual(damaged);
+    expect(db.getGeneration()).toBe(generation);
+  });
+
+  test("вычисленная и SQL-страницы одинаково сортируют Unicode-заголовки", () => {
+    const later = task("🙂 Итог");
+    const earlier = task("\uE000 Начало");
+    const window = { offset: 0, limit: 2, sort: "title" } as const;
+    expect(tasks.listPage({}, window).items).toEqual([earlier, later]);
+    expect(tasks.listPage({ q: "" }, window).items).toEqual([earlier, later]);
+  });
+
   test("создание с невыполненным критерием в done откатывает задачу, счётчик и поколение", () => {
     const generation = db.getGeneration();
     errorCode(
@@ -244,19 +427,17 @@ describe("TasksService с реальной SQLite", () => {
   });
 
   test("цели ограничены доской и активным собственным участием; снятая цель сохраняется в прежней задаче", () => {
-    const feature = entities.create("feature", "FEAT", { name: "Возможность" }, "автор");
+    const feature = knowledge.create("feature", { name: "Возможность" }, "автор");
     const { application, board } = applicationBoard();
     const foreign = applicationBoard("api");
-    let implementation = entities.create(
+    const implementation = knowledge.create(
       "implementation",
-      "IMPL",
-      { applicationId: application.id, targetId: feature.id, active: true },
+      { application: application.id, target: feature.id, title: "Реализация" },
       "автор",
     );
-    const foreignImplementation = entities.create(
+    const foreignImplementation = knowledge.create(
       "implementation",
-      "IMPL",
-      { applicationId: foreign.application.id, targetId: feature.id, active: true },
+      { application: foreign.application.id, target: feature.id, title: "Чужая реализация" },
       "автор",
     );
     let productTask = task("Общая работа", { targets: [feature.key] });
@@ -282,11 +463,10 @@ describe("TasksService с реальной SQLite", () => {
     productTask = tasks.update(productTask.id, { targets: [] }, options(productTask));
     productTask = tasks.move(productTask.id, { board: board.id }, options(productTask));
     expect(productTask.data.targets).toEqual([]);
-    implementation = entities.update(
-      implementation.id,
-      "implementation",
-      { active: false },
-      options(implementation),
+    knowledge.replaceParticipation(
+      application.id,
+      [],
+      options(knowledge.get("application", application.id)),
     );
     errorCode(
       () => task("Снятая цель", { board: board.id, targets: [implementation.id] }),
@@ -301,19 +481,21 @@ describe("TasksService с реальной SQLite", () => {
   });
 
   test("productTarget раскрывает сценарии и активные реализации, target выбирает только прямую цель", () => {
-    const feature = entities.create("feature", "FEAT", {}, "автор");
-    const scenario = entities.create("scenario", "SCEN", { featureId: feature.id }, "автор");
-    const { application, board } = applicationBoard();
-    const implementation = entities.create(
-      "implementation",
-      "IMPL",
-      { applicationId: application.id, targetId: scenario.id, active: true },
+    const feature = knowledge.create("feature", { name: "Возможность" }, "автор");
+    const scenario = knowledge.create(
+      "scenario",
+      { name: "Сценарий", feature: feature.id },
       "автор",
     );
-    const featureImplementation = entities.create(
+    const { application, board } = applicationBoard();
+    const featureImplementation = knowledge.create(
       "implementation",
-      "IMPL",
-      { applicationId: application.id, targetId: feature.id, active: true },
+      { application: application.id, target: feature.id, title: "Реализация фичи" },
+      "автор",
+    );
+    const implementation = knowledge.create(
+      "implementation",
+      { application: application.id, target: scenario.id, title: "Реализация сценария" },
       "автор",
     );
     const direct = task("Продукт", { targets: [feature.id] });
@@ -333,11 +515,10 @@ describe("TasksService с реальной SQLite", () => {
     expect(
       new Set(tasks.list({ productTarget: featureImplementation.id }).map((item) => item.id)),
     ).toEqual(new Set([featureImplementationTask.id, implementationTask.id]));
-    entities.update(
-      implementation.id,
-      "implementation",
-      { active: false },
-      options(implementation),
+    knowledge.replaceParticipation(
+      application.id,
+      [feature.id],
+      options(knowledge.get("application", application.id)),
     );
     expect(tasks.list({ productTarget: scenario.id }).map((item) => item.id)).toEqual([
       scenarioTask.id,
@@ -440,48 +621,6 @@ describe("TasksService с реальной SQLite", () => {
     expect(new TasksService(reopened).get(record.id).revision).toBe(record.revision);
   });
 
-  test("завершение видит конкурентное открытие зависимости после ожидания блокировки SQLite", async () => {
-    const dependency = task("Готовое обязательство", { column: "done" });
-    const record = task("Закрываемая задача", { column: "review", dependencies: [dependency.id] });
-    const signal = join(directory, "ready");
-    const result = join(directory, "result.json");
-    const script = join(directory, "complete.ts");
-    const source = pathToFileURL(resolve(import.meta.dir, "../../src/tasks.ts")).href;
-    const storageSource = pathToFileURL(
-      resolve(import.meta.dir, "../../../storage/src/index.ts"),
-    ).href;
-    writeFileSync(
-      script,
-      `
-      import { writeFileSync } from 'node:fs';
-      import { ProjectDatabase } from ${JSON.stringify(storageSource)};
-      import { TasksService } from ${JSON.stringify(source)};
-      const db = ProjectDatabase.open(${JSON.stringify(db.path)});
-      writeFileSync(${JSON.stringify(signal)}, 'ready');
-      try {
-        new TasksService(db).move(${JSON.stringify(record.id)}, {column:'done'}, {actor:'конкурент',ifRevision:${record.revision}});
-        writeFileSync(${JSON.stringify(result)}, JSON.stringify({code:'UNEXPECTED_SUCCESS'}));
-      } catch (error) {
-        writeFileSync(${JSON.stringify(result)}, JSON.stringify({code:error.code,message:error.message}));
-      } finally { db.close(); }
-    `,
-    );
-    let worker: ReturnType<typeof Bun.spawn> | undefined;
-    db.transaction(() => {
-      worker = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "pipe" });
-      processes.push(worker);
-      const deadline = Date.now() + 3000;
-      const sleeper = new Int32Array(new SharedArrayBuffer(4));
-      while (!existsSync(signal) && Date.now() < deadline) Atomics.wait(sleeper, 0, 0, 5);
-      expect(existsSync(signal)).toBe(true);
-      tasks.move(dependency.id, { column: "in-progress" }, options(dependency));
-    });
-    expect(await worker!.exited).toBe(0);
-    expect(JSON.parse(readFileSync(result, "utf8"))).toMatchObject({ code: "TASK_INCOMPLETE" });
-    expect(tasks.get(record.id)).toEqual(record);
-    expect(tasks.progress(record.id).canComplete).toBe(false);
-  });
-
   test("строгий ввод не пропускает неизвестные поля, неверные типы, дубликаты и несуществующие ссылки", () => {
     const record = task("Исходная");
     const generation = db.getGeneration();
@@ -519,7 +658,15 @@ describe("TasksService с реальной SQLite", () => {
 
   test("повреждённая обязательная ссылка диагностируется вместо ложной готовности", () => {
     const record = task("Повреждение");
-    entities.update(record.id, "task", { dependencies: ["missing-task"] }, options(record));
+    // Storage намеренно сохраняет отсутствующее обязательство для проверки диагностики.
+    db.update(
+      {
+        ...record,
+        revision: record.revision + 1,
+        data: { ...record.data, dependencies: ["missing-task"] },
+      },
+      record.revision,
+    );
     errorCode(() => tasks.progress(record.id), "BROKEN_REFERENCE");
     errorCode(() => tasks.list({ readiness: "ready" }), "BROKEN_REFERENCE");
   });

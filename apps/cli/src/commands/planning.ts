@@ -9,14 +9,7 @@ import {
   string,
   textArgs,
 } from "../arguments";
-import {
-  type CommandRegistry,
-  type Invocation,
-  findItem,
-  records,
-  references,
-  result,
-} from "../registry";
+import { type CommandRegistry, type Invocation, result } from "../registry";
 
 function planningInput(i: Invocation): Record<string, unknown> {
   const input = remapInput(i.input, { plans: "planIds", releaseVersion: "version" });
@@ -40,11 +33,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       args: pageArgs,
       fields: { q: string("Поиск по содержанию"), status: string("Состояние") },
       run: (i) =>
-        i.entities(
-          (i.input.q ? i.queries.search({ q: i.input.q, kind }) : i.planning.list(kind)).filter(
-            (entity) => !i.input.status || entity.data.status === i.input.status,
-          ),
-        ),
+        i.page((window) => i.planning.listPage(kind, i.input, { ...window, sort: "key" })),
     });
     registry.add(`${command} get`, {
       description: "Полное содержание и ревизия",
@@ -104,21 +93,14 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     description: "Этапы в заданном порядке",
     args: { ...refArgs, ...pageArgs },
     run: (i) => {
-      const plan = i.planning.get("work-plan", i.text("ref"));
-      return i.page(records(plan.data.stages), { plan: plan.key, revision: plan.revision });
+      const { items, ...owner } = i.planning.listStages(i.text("ref"));
+      return i.page(items, owner);
     },
   });
   registry.add("plan stage get", {
     description: "Полный этап и ревизия плана",
     args: { ...refArgs, stage: positional("ID этапа") },
-    run: (i) => {
-      const plan = i.planning.get("work-plan", i.text("ref"));
-      return result({
-        plan: plan.key,
-        revision: plan.revision,
-        stage: findItem(records(plan.data.stages), i.text("stage"), "Этап"),
-      });
-    },
+    run: (i) => result(i.planning.getStage(i.text("ref"), i.text("stage"))),
   });
   for (const action of ["create", "update", "move", "remove"])
     registry.add(`plan stage ${action}`, {
@@ -161,12 +143,8 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     description: "Задачи этапа",
     args: { ...refArgs, stage: positional("ID этапа"), ...pageArgs },
     run: (i) => {
-      const plan = i.planning.get("work-plan", i.text("ref"));
-      const stage = findItem(records(plan.data.stages), i.text("stage"), "Этап");
-      return i.page(
-        references(stage.taskIds).map((ref) => i.tasks.get(ref)),
-        { plan: plan.key, revision: plan.revision },
-      );
+      const { items, ...owner } = i.planning.stageTasks(i.text("ref"), i.text("stage"));
+      return i.page(items, owner);
     },
   });
   for (const remove of [false, true])
@@ -209,26 +187,16 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     description: "Этапы, содержащие задачу",
     args: { ...refArgs, ...pageArgs },
     run: (i) => {
-      const task = i.tasks.get(i.text("ref"));
-      return i.page(
-        i.planning.list("work-plan").flatMap((plan) =>
-          records(plan.data.stages)
-            .filter((stage) => references(stage.taskIds).includes(task.id))
-            .map((stage) => ({ plan: plan.key, revision: plan.revision, stage })),
-        ),
-        { task: task.key },
-      );
+      const { items, ...owner } = i.planning.memberships(i.text("ref"));
+      return i.page(items, owner);
     },
   });
   registry.add("release plans", {
     description: "Планы в составе релиза",
     args: { ...refArgs, ...pageArgs },
     run: (i) => {
-      const release = i.planning.get("release", i.text("ref"));
-      return i.page(
-        references(release.data.planIds).map((ref) => i.planning.get("work-plan", ref)),
-        { release: release.key, revision: release.revision },
-      );
+      const { items, ...owner } = i.planning.releasePlans(i.text("ref"));
+      return i.page(items, owner);
     },
   });
 }

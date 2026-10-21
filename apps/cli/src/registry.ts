@@ -18,35 +18,6 @@ import { paginate } from "./pagination";
 import type { CliRuntime } from "./runtime";
 
 export const result = (data: unknown): Result => ({ data });
-/** Повреждённое сохранённое поле не должно выглядеть как успешно прочитанный пустой список. */
-export function records(value: unknown): Record<string, unknown>[] {
-  if (
-    !Array.isArray(value) ||
-    value.some((item) => !item || typeof item !== "object" || Array.isArray(item))
-  ) {
-    throw new RelayError("INVALID_DATA", "Повреждён формат вложенного списка записей", 1);
-  }
-  return value as Record<string, unknown>[];
-}
-
-export function references(value: unknown): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
-    throw new RelayError("INVALID_DATA", "Повреждён формат сохранённых ссылок", 1);
-  }
-  return value as string[];
-}
-export function findItem(
-  items: Record<string, unknown>[],
-  id: string,
-  label: string,
-): Record<string, unknown> {
-  if (items.some((item) => typeof item.id !== "string" || !item.id)) {
-    throw new RelayError("INVALID_DATA", "У вложенной записи отсутствует ID", 1);
-  }
-  const item = items.find((item) => String(item.id) === id);
-  if (!item) throw new RelayError("NOT_FOUND", `${label} «${id}» не найден`, 3);
-  return item;
-}
 
 const shellQuote = (value: string): string =>
   /^[\w./:=+-]+$/.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
@@ -141,7 +112,8 @@ export class Invocation {
   }
 
   page<T>(
-    items: readonly T[],
+    items:
+      readonly T[] | ((window: { offset: number; limit: number }) => { items: T[]; total: number }),
     extra: Record<string, unknown> = {},
     source?: { context: string; generation: string | number },
   ): Result {

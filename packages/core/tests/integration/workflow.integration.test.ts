@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
+import {
+  RelayError,
+  type EntityRecord,
+  type TaskRecord,
+  type WorkPlanRecord,
+  type ReleaseRecord,
+  type WriteOptions,
+} from "@relay/contracts";
 import { KnowledgeService, PlanningService, TasksService } from "@relay/core";
 import { ProjectDatabase } from "@relay/storage";
 
@@ -20,12 +27,12 @@ interface Workflow {
   application: EntityRecord;
   fi: EntityRecord;
   si: EntityRecord;
-  preparation: EntityRecord;
-  implementation: EntityRecord;
-  acceptance: EntityRecord;
-  plan: EntityRecord;
+  preparation: TaskRecord;
+  implementation: TaskRecord;
+  acceptance: TaskRecord;
+  plan: WorkPlanRecord;
   stageId: string;
-  release: EntityRecord;
+  release: ReleaseRecord;
 }
 
 function services(db: ProjectDatabase): Fixture {

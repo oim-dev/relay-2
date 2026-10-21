@@ -1,43 +1,44 @@
 import {
   RelayError,
+  APPLICATION_TYPES,
+  DOCUMENT_KINDS,
+  DOCUMENT_RELATION_TYPES,
+  DOCUMENT_STATUSES,
+  DOCUMENT_TARGET_KINDS,
+  IMPLEMENTATION_STATUSES,
+  KNOWLEDGE_KINDS,
+  validateActor,
+  validateEntityPageRequest,
+  type DocumentLinks,
+  type DocumentRelation,
+  type DocumentSection,
+  type DocumentSections,
+  type EntityPage,
+  type EntityPageRequest,
+  type KnowledgeKind,
+  type KnowledgeRecord,
   type EntityKind,
   type EntityRecord,
   type WriteOptions,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "./entities";
+import { pageEntities } from "./entity-page";
+import { decodeKnowledge, isKnowledgeKind } from "./knowledge-data";
+import {
+  indexDocumentSections,
+  projectDocumentSection,
+  type DocumentSectionIndex,
+} from "./document-sections";
 
-const knowledgeKinds = [
-  "project",
-  "product",
-  "feature",
-  "scenario",
-  "application",
-  "implementation",
-  "document",
-  "board",
-] as const;
-type KnowledgeKind = (typeof knowledgeKinds)[number];
 type Fields = Record<string, unknown>;
-type Section = { id: string; name: string };
-type Relation = {
-  target: { kind: EntityKind; id: string };
-  type: "documents" | "references";
-  description: string;
-};
-const documentKinds = [
-  "specification",
-  "description",
-  "rules",
-  "instruction",
-  "proposal",
-  "decision",
-  "research",
-];
-const documentStatuses = ["draft", "active", "archived"];
-const relationKinds = [...knowledgeKinds, "task", "work-plan", "release"];
-const textFields = ["name", "summary", "description"];
-const writable: Record<KnowledgeKind, string[]> = {
+type Section = DocumentSection;
+type Relation = DocumentRelation;
+const documentKinds = DOCUMENT_KINDS;
+const documentStatuses = DOCUMENT_STATUSES;
+const relationKinds = DOCUMENT_TARGET_KINDS;
+const textFields = ["name", "summary", "description"] as const;
+const writable: Record<KnowledgeKind, readonly string[]> = {
   project: ["name", "slug"],
   product: textFields,
   feature: textFields,
@@ -103,13 +104,6 @@ function projectName(value: unknown): string {
   return result;
 }
 
-function author(value: unknown): string {
-  const result = text(value, "actor", true);
-  if (result !== result.trim() || /\p{Cc}/u.test(result))
-    invalid("actor: без краевых пробелов и управляющих символов");
-  return result;
-}
-
 function enumeration<T extends string>(value: unknown, values: readonly T[], label: string): T {
   if (typeof value !== "string" || !values.includes(value as T))
     invalid(`${label}: допустимы ${values.join(", ")}`);
@@ -147,12 +141,12 @@ function alias(input: Fields, first: string, second: string): unknown {
 }
 
 function kind(value: EntityKind): KnowledgeKind {
-  return enumeration(value, knowledgeKinds, "kind");
+  return enumeration(value, KNOWLEDGE_KINDS, "kind");
 }
 
 function options(value: WriteOptions, extra: string[] = []): void {
   fields(value, ["actor", "ifRevision", ...extra], "Параметры записи");
-  author(value.actor);
+  validateActor(value.actor);
   if (!Number.isSafeInteger(value.ifRevision) || value.ifRevision < 1)
     invalid("ifRevision: требуется положительная целая ревизия");
 }
@@ -176,6 +170,11 @@ function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function displayName(entity: KnowledgeRecord): string {
+  return entity.kind === "implementation" ? entity.data.title : (entity.data.name ?? "");
+}
+
+/** Знания и их связи: вход проверяется до записи, сохранённые данные декодируются до использования. */
 export class KnowledgeService {
   private readonly entities: EntityService;
 
@@ -183,14 +182,24 @@ export class KnowledgeService {
     this.entities = new EntityService(db);
   }
 
-  get(entityKind: EntityKind, ref?: string): EntityRecord {
+  /** Полная проверенная запись из одного снимка; удалённый раздел документа проецируется в null без записи. */
+  get<K extends EntityKind>(
+    entityKind: K,
+    ref?: string,
+  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+  get(entityKind: EntityKind, ref?: string): KnowledgeRecord {
     const selected = kind(entityKind);
     return this.db.snapshot(() =>
       this.projectDocument(this.resolve(ref ?? this.singletonRef(selected), selected)),
     );
   }
 
-  list(entityKind: EntityKind, filters: Fields = {}): EntityRecord[] {
+  /** Проверенный отфильтрованный набор одного снимка; повреждение данных не маскируется пустым результатом. */
+  list<K extends EntityKind>(
+    entityKind: K,
+    filters?: Fields,
+  ): KnowledgeRecord<Extract<K, KnowledgeKind>>[];
+  list(entityKind: EntityKind, filters: Fields = {}): KnowledgeRecord[] {
     const selected = kind(entityKind);
     return this.db.snapshot(() => {
       const extra: Partial<Record<KnowledgeKind, string[]>> = {
@@ -264,7 +273,7 @@ export class KnowledgeService {
         checks.push((entity) => entity.data[field] === value);
       }
       if (Object.hasOwn(filters, "type")) {
-        const value = enumeration(filters.type, ["frontend", "backend", "internal"], "type");
+        const value = enumeration(filters.type, APPLICATION_TYPES, "type");
         checks.push((entity) => entity.data.type === value);
       }
       if (Object.hasOwn(filters, "documentKind")) {
@@ -274,7 +283,7 @@ export class KnowledgeService {
       if (Object.hasOwn(filters, "status") || Object.hasOwn(filters, "documentStatus")) {
         const value = enumeration(
           alias(filters, "status", "documentStatus"),
-          selected === "document" ? documentStatuses : ["none", "partial", "done"],
+          selected === "document" ? documentStatuses : IMPLEMENTATION_STATUSES,
           "status",
         );
         checks.push(
@@ -294,34 +303,74 @@ export class KnowledgeService {
         checks.push((entity) => entity.data.sectionId === section);
       }
       const sort = Object.hasOwn(filters, "sort")
-        ? enumeration(filters.sort, ["key", "title", "updated"], "sort")
+        ? enumeration(filters.sort, ["key", "title", "updated"] as const, "sort")
         : "key";
-      const sectionIds =
-        selected === "document" ? new Set(this.sections().map((section) => section.id)) : undefined;
+      const sectionIndex = selected === "document" ? this.sectionIndex() : undefined;
       return this.entities
         .list(selected)
-        .map((entity) => this.projectDocument(entity, sectionIds))
+        .map((entity) => this.projectDocument(entity, sectionIndex))
         .filter((entity) => checks.every((check) => check(entity)))
         .sort((left, right) => {
           const order =
             sort === "updated"
               ? right.updatedAt.localeCompare(left.updatedAt)
-              : String(
-                  sort === "title" ? (left.data.name ?? left.data.title ?? "") : left.key,
-                ).localeCompare(
-                  String(
-                    sort === "title" ? (right.data.name ?? right.data.title ?? "") : right.key,
-                  ),
+              : (sort === "title" ? displayName(left) : left.key).localeCompare(
+                  sort === "title" ? displayName(right) : right.key,
                 );
           return order || left.id.localeCompare(right.id);
         });
     });
   }
 
-  create(entityKind: EntityKind, input: Fields, actor: string): EntityRecord {
+  /**
+   * Окно и count одного снимка. Без предметных фильтров Storage читает только выбранные
+   * записи; документы проецируются по разделам того же снимка. При q/target и остальных
+   * фильтрах пока используется полный list: стоимость зависит от всего набора и его тел,
+   * не от limit. Порядок задаётся request.sort; filters.sort, если передан, должен совпадать.
+   */
+  listPage<K extends EntityKind>(
+    entityKind: K,
+    filters: Fields,
+    request: EntityPageRequest,
+  ): EntityPage<KnowledgeRecord<Extract<K, KnowledgeKind>>>;
+  listPage(
+    entityKind: EntityKind,
+    filters: Fields,
+    request: EntityPageRequest,
+  ): EntityPage<KnowledgeRecord> {
+    const selected = kind(entityKind);
+    object(filters, "Фильтры");
+    validateEntityPageRequest(request);
+    if (Object.hasOwn(filters, "sort") && filters.sort !== request.sort)
+      invalid("sort фильтра не совпадает с порядком окна");
+    return this.db.snapshot(() => {
+      if (Object.keys(filters).some((field) => field !== "sort")) {
+        const items = this.list(selected, { ...filters, sort: request.sort });
+        return pageEntities(items, request);
+      }
+      const page = this.db.listPage(selected, request);
+      const sections = selected === "document" ? this.sectionIndex() : undefined;
+      return {
+        total: page.total,
+        items: page.items.map((entity) => this.projectDocument(entity, sections)),
+      };
+    });
+  }
+
+  /**
+   * Создаёт знания атомарно. Приложение создаётся вместе с доской; создание реализации
+   * обновляет состав и ревизию приложения под тем же замком. Пустой паспорт продукта
+   * заполняется один раз, повторное создание — ALREADY_EXISTS. Проект/доску отдельно создать нельзя.
+   */
+  create<K extends EntityKind>(
+    entityKind: K,
+    input: Fields,
+    actor: string,
+  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+  create(entityKind: EntityKind, input: Fields, actor: string): KnowledgeRecord {
     const selected = kind(entityKind);
     return this.db.transaction(() => {
-      author(actor);
+      validateActor(actor);
       if (selected === "project") invalid("Проект создаётся при инициализации базы");
       if (selected === "board") invalid("Доски создаются только вместе с проектом или приложением");
       const data = this.prepare(selected, input, true);
@@ -339,10 +388,13 @@ export class KnowledgeService {
             4,
           );
         }
-        return this.entities.update(current.id, "product", data, {
-          actor,
-          ifRevision: current.revision,
-        });
+        return decodeKnowledge(
+          this.entities.update(current.id, "product", data, {
+            actor,
+            ifRevision: current.revision,
+          }),
+          "product",
+        );
       }
       if (selected === "application") {
         this.checkBoardAddress(data.slug as string, data.prefix as string);
@@ -365,11 +417,14 @@ export class KnowledgeService {
           actor,
           `BOARD-${data.prefix as string}`,
         );
-        return this.entities.update(
-          application.id,
+        return decodeKnowledge(
+          this.entities.update(
+            application.id,
+            "application",
+            { boardId: board.id },
+            { actor, ifRevision: application.revision },
+          ),
           "application",
-          { boardId: board.id },
-          { actor, ifRevision: application.revision },
         );
       }
       if (selected === "implementation") {
@@ -400,12 +455,23 @@ export class KnowledgeService {
     });
   }
 
+  /**
+   * Изменяет только переданные поля. ifRevision относится к указанной записи и проверяется
+   * до no-op (REVISION_CONFLICT). Переименование приложения атомарно меняет имя его доски,
+   * используя собственную ревизию доски. Неизменные данные не меняют автора/ревизию/поколение.
+   */
+  update<K extends EntityKind>(
+    entityKind: K,
+    ref: string | undefined,
+    input: Fields,
+    write: WriteOptions,
+  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
   update(
     entityKind: EntityKind,
     ref: string | undefined,
     input: Fields,
     write: WriteOptions,
-  ): EntityRecord {
+  ): KnowledgeRecord {
     const selected = kind(entityKind);
     return this.db.transaction(() => {
       options(write);
@@ -415,7 +481,7 @@ export class KnowledgeService {
       const patch = this.prepare(selected, input, false, current);
       if (!Object.keys(patch).length) invalid("Укажите хотя бы одно изменяемое поле");
       const board =
-        selected === "application" && Object.hasOwn(patch, "name")
+        current.kind === "application" && Object.hasOwn(patch, "name")
           ? this.resolve(text(current.data.boardId, "boardId", true), "board")
           : undefined;
       if (board && board.data.applicationId !== current.id)
@@ -438,7 +504,14 @@ export class KnowledgeService {
     });
   }
 
-  rename(entityKind: EntityKind, ref: string, key: string, write: WriteOptions): EntityRecord {
+  /** CAS указанной записи, включая no-op; новый ключ сохраняет прежний алиас, чужой адрес даёт CONFLICT. */
+  rename<K extends EntityKind>(
+    entityKind: K,
+    ref: string,
+    key: string,
+    write: WriteOptions,
+  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+  rename(entityKind: EntityKind, ref: string, key: string, write: WriteOptions): KnowledgeRecord {
     const selected = kind(entityKind);
     return this.db.transaction(() => {
       options(write);
@@ -449,11 +522,32 @@ export class KnowledgeService {
     });
   }
 
+  /** Список разделов и ревизия проекта-владельца из одного снимка; отсутствие у seed означает пустой список. */
+  documentSections(): DocumentSections {
+    return this.db.snapshot(() => {
+      const project = this.resolve(this.singletonRef("project"), "project");
+      return { project: project.key, revision: project.revision, items: this.sections(project) };
+    });
+  }
+
+  /** Проверенные отношения и ревизия документа из одного снимка, без загрузки содержания целей. */
+  documentLinks(ref: string): DocumentLinks {
+    return this.db.snapshot(() => {
+      const document = this.resolve(ref, "document");
+      return { ref: document.key, revision: document.revision, items: document.data.relations };
+    });
+  }
+
+  /**
+   * ifRevision принадлежит проекту, не документу. Удаление резервирует ID раздела навсегда,
+   * но не переписывает документы: их эффективный раздел вычисляется при чтении. Проверка,
+   * резервирование и запись атомарны; CAS проверяется до no-op, повреждение вызывает CORRUPT_DATA.
+   */
   changeSection(
     action: "create" | "update" | "move" | "remove",
     input: Fields,
     write: WriteOptions,
-  ): EntityRecord {
+  ): KnowledgeRecord<"project"> {
     return this.db.transaction(() => {
       enumeration(action, ["create", "update", "move", "remove"], "action");
       options(write);
@@ -474,7 +568,7 @@ export class KnowledgeService {
       if (id.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(id))
         invalid("id раздела: до 64 латинских букв, цифр, дефисов и подчёркиваний");
       const sections = this.sections(project).map((section) => ({ ...section }));
-      const retired = [...((project.data.retiredDocumentSectionIds ?? []) as string[])];
+      const retired = [...(project.data.retiredDocumentSectionIds ?? [])];
       const index = sections.findIndex((section) => section.id === id);
       if (action === "create") {
         if (index !== -1 || retired.includes(id))
@@ -511,27 +605,35 @@ export class KnowledgeService {
       if (same(sections, this.sections(project))) return project;
       // Документы хранят прежний ID: эффективный раздел вычисляется при чтении,
       // поэтому удаление раздела не подменяет автора и ревизию документов.
-      return this.entities.update(
-        project.id,
+      return decodeKnowledge(
+        this.entities.update(
+          project.id,
+          "project",
+          { documentSections: sections, retiredDocumentSectionIds: retired },
+          write,
+        ),
         "project",
-        { documentSections: sections, retiredDocumentSectionIds: retired },
-        write,
       );
     });
   }
 
+  /**
+   * Меняет пару цель+тип под CAS документа. Разрешение цели, проверки и запись атомарны;
+   * повтор той же связи/удаление отсутствующей — no-op только при актуальной ревизии.
+   * Новая связь со снятой реализацией запрещена, прежнюю можно изменить или снять.
+   */
   linkDocument(
     ref: string,
     target: string,
     write: WriteOptions & { remove?: boolean; type?: string; description?: string },
-  ): EntityRecord {
+  ): KnowledgeRecord<"document"> {
     return this.db.transaction(() => {
       options(write, ["remove", "type", "description"]);
       const document = this.resolve(ref, "document");
       revision(document, write.ifRevision);
       const remove = Object.hasOwn(write, "remove") ? boolean(write.remove, "remove") : false;
       const relationType = Object.hasOwn(write, "type")
-        ? enumeration(write.type, ["documents", "references"] as const, "type")
+        ? enumeration(write.type, DOCUMENT_RELATION_TYPES, "type")
         : "documents";
       if (Object.hasOwn(write, "description")) text(write.description, "description");
       if (remove && Object.hasOwn(write, "description"))
@@ -562,17 +664,29 @@ export class KnowledgeService {
       if (next.length > 100) invalid("Допускается не более 100 отношений документа");
       if (same(next, relations)) return this.projectDocument(document);
       return this.projectDocument(
-        this.entities.update(
-          document.id,
+        decodeKnowledge(
+          this.entities.update(
+            document.id,
+            "document",
+            { relations: next },
+            { actor: write.actor, ifRevision: write.ifRevision },
+          ),
           "document",
-          { relations: next },
-          { actor: write.actor, ifRevision: write.ifRevision },
         ),
       );
     });
   }
 
-  replaceParticipation(application: string, targets: string[], write: WriteOptions): EntityRecord {
+  /**
+   * Полностью заменяет участие под CAS приложения (не отдельных реализаций), включая no-op.
+   * Проверки FI/SI и изменения реализаций/состава атомарны. Снятие сохраняет ID, ключ и тексты;
+   * повторное включение восстанавливает существующую реализацию. Любой отказ откатывает весь состав.
+   */
+  replaceParticipation(
+    application: string,
+    targets: string[],
+    write: WriteOptions,
+  ): KnowledgeRecord<"application"> {
     return this.db.transaction(() => {
       options(write);
       const app = this.resolve(application, "application");
@@ -644,29 +758,34 @@ export class KnowledgeService {
     return invalid(`Для ${selected} требуется ref`);
   }
 
+  private resolve<K extends KnowledgeKind>(ref: string, expectedKind: K): KnowledgeRecord<K>;
+  private resolve(ref: string, expectedKind?: EntityKind): EntityRecord;
   private resolve(ref: string, expectedKind?: EntityKind): EntityRecord {
-    return this.entities.get(text(ref, "ref", true), expectedKind);
+    const record = this.entities.get(text(ref, "ref", true), expectedKind);
+    return isKnowledgeKind(record.kind) ? decodeKnowledge(record, record.kind) : record;
   }
 
   private sections(project = this.resolve(this.singletonRef("project"), "project")): Section[] {
-    return (project.data.documentSections ?? []) as Section[];
+    return project.data.documentSections ?? [];
   }
 
-  private projectDocument(entity: EntityRecord, sectionIds?: ReadonlySet<string>): EntityRecord {
-    if (entity.kind !== "document") return entity;
-    const id = entity.data.sectionId;
-    const available = sectionIds ?? new Set(this.sections().map((section) => section.id));
-    return {
-      ...entity,
-      data: {
-        ...entity.data,
-        sectionId: typeof id === "string" && available.has(id) ? id : null,
-      },
-    };
+  private sectionIndex(): DocumentSectionIndex {
+    return indexDocumentSections(this.resolve(this.singletonRef("project"), "project"));
+  }
+
+  private projectDocument<K extends KnowledgeKind>(
+    entity: KnowledgeRecord<K>,
+    sections?: DocumentSectionIndex,
+  ): KnowledgeRecord<K>;
+  private projectDocument(entity: EntityRecord, sections?: DocumentSectionIndex): KnowledgeRecord;
+  private projectDocument(entity: EntityRecord, sections?: DocumentSectionIndex): KnowledgeRecord {
+    const checked = decodeKnowledge(entity, kind(entity.kind));
+    if (checked.kind !== "document") return checked;
+    return projectDocumentSection(checked, sections ?? this.sectionIndex());
   }
 
   private relations(document?: EntityRecord): Relation[] {
-    return (document?.data.relations ?? []) as Relation[];
+    return document === undefined ? [] : decodeKnowledge(document, "document").data.relations;
   }
 
   private prepare(
@@ -704,7 +823,7 @@ export class KnowledgeService {
       if (creating || Object.hasOwn(input, "type"))
         data.type = enumeration(
           Object.hasOwn(input, "type") ? input.type : "frontend",
-          ["frontend", "backend", "internal"],
+          APPLICATION_TYPES,
           "type",
         );
     }
@@ -717,7 +836,7 @@ export class KnowledgeService {
       if (Object.hasOwn(input, "status") || creating)
         data.status = enumeration(
           Object.hasOwn(input, "status") ? input.status : "none",
-          ["none", "partial", "done"],
+          IMPLEMENTATION_STATUSES,
           "status",
         );
       if (creating) {
@@ -781,7 +900,7 @@ export class KnowledgeService {
     return Array.from(input, (value) => {
       const item = fields(value, ["target", "type", "description"], "Отношение");
       const relationType = Object.hasOwn(item, "type")
-        ? enumeration(item.type, ["documents", "references"] as const, "type")
+        ? enumeration(item.type, DOCUMENT_RELATION_TYPES, "type")
         : "documents";
       let target: EntityRecord;
       if (typeof item.target === "string") target = this.resolve(item.target);
@@ -813,8 +932,8 @@ export class KnowledgeService {
     target: EntityRecord,
     documentId: string | undefined,
     existing: boolean,
-  ): void {
-    if (!relationKinds.includes(target.kind))
+  ): asserts target is EntityRecord & { kind: Relation["target"]["kind"] } {
+    if (!(relationKinds as readonly string[]).includes(target.kind))
       invalid("Этот вид сущности не поддерживает прикрепление документа");
     if (target.id === documentId) invalid("Документ не может ссылаться на себя");
     if (!existing && target.kind === "implementation" && target.data.active !== true)
@@ -825,18 +944,21 @@ export class KnowledgeService {
     if (
       this.entities
         .list("board")
+        .map((entity) => decodeKnowledge(entity, "board"))
         .some((entity) => entity.data.slug === boardSlug || entity.data.prefix === boardPrefix) ||
       this.entities
         .list("application")
+        .map((entity) => decodeKnowledge(entity, "application"))
         .some((entity) => entity.data.slug === boardSlug || entity.data.prefix === boardPrefix)
     ) {
       throw new RelayError("ALREADY_EXISTS", "Slug или префикс доски уже занят", 4);
     }
   }
 
-  private implementations(applicationId: string): EntityRecord[] {
+  private implementations(applicationId: string): KnowledgeRecord<"implementation">[] {
     return this.entities
       .list("implementation")
+      .map((entity) => decodeKnowledge(entity, "implementation"))
       .filter((entity) => entity.data.applicationId === applicationId);
   }
 
@@ -864,28 +986,38 @@ export class KnowledgeService {
     target: EntityRecord,
     data: Fields,
     actor: string,
-  ): EntityRecord {
-    return this.entities.create(
+  ): KnowledgeRecord<"implementation"> {
+    return decodeKnowledge(
+      this.entities.create(
+        "implementation",
+        `${app.data.prefix as string}-${target.kind === "feature" ? "FI" : "SI"}`,
+        {
+          ...data,
+          ...this.implementationTarget(target),
+          applicationId: app.id,
+          active: true,
+        },
+        actor,
+      ),
       "implementation",
-      `${app.data.prefix as string}-${target.kind === "feature" ? "FI" : "SI"}`,
-      {
-        ...data,
-        ...this.implementationTarget(target),
-        applicationId: app.id,
-        active: true,
-      },
-      actor,
     );
   }
 
-  private saveParticipation(app: EntityRecord, ids: string[], actor: string): EntityRecord {
+  private saveParticipation(
+    app: KnowledgeRecord<"application">,
+    ids: string[],
+    actor: string,
+  ): KnowledgeRecord<"application"> {
     const ordered = [...ids].sort();
     if (same(ordered, app.data.implementationIds)) return app;
-    return this.entities.update(
-      app.id,
+    return decodeKnowledge(
+      this.entities.update(
+        app.id,
+        "application",
+        { implementationIds: ordered },
+        { actor, ifRevision: app.revision },
+      ),
       "application",
-      { implementationIds: ordered },
-      { actor, ifRevision: app.revision },
     );
   }
 }

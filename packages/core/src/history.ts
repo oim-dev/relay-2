@@ -1,224 +1,95 @@
 import {
-  RelayError,
-  type EntityKind,
-  type EntityRecord,
+  validateActor,
+  type HistoryCheckpoint,
+  type HistoryCheckpointAction,
+  type HistoryContext,
+  type HistoryReference,
+  type HistoryRun,
+  type HistorySession,
+  type HistorySessionData,
   type WriteOptions,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
+import { EntityService } from "./entities";
+import { EntityReader } from "./entity-reader";
+import { decodeHistoryCheckpoint, decodeHistorySession } from "./history-data";
+import {
+  historyCheckpointInput,
+  historyFilters,
+  historyStartInput,
+  historyTransitionInput,
+  historyWriteOptions,
+  invalidHistoryInput,
+  type HistoryConnection,
+  type HistorySessionContent,
+  type HistoryTransition,
+} from "./history-input";
+import {
+  checkHistoryAcceptance,
+  checkHistoryChildrenClosure,
+  checkHistoryOwner,
+  checkHistoryRevision,
+  checkOpenHistoryIntent,
+  endHistoryRun,
+  historyConflict,
+  historySubtree,
+  unfinishedSession,
+} from "./history-rules";
 
-export type HistorySessionStatus = "pending" | "open" | "paused" | "completed" | "cancelled";
-export type HistoryCheckpointKind = "intent" | "progress" | "result" | "cancel";
+export type {
+  HistorySessionStatus,
+  HistoryCheckpointKind,
+  HistoryOperator,
+  HistoryRun,
+  HistorySessionData,
+  HistoryReference,
+  HistoryCheckpointData,
+  HistorySession,
+  HistoryCheckpoint,
+} from "@relay/contracts";
 
-export interface HistoryOperator {
-  name: string | null;
-  email: string | null;
-  source: "explicit" | "environment" | "git" | "inherited";
-}
-
-export interface HistoryRun {
-  id: string;
-  key: string;
-  actor: string;
-  state: "active" | "paused" | "transferred" | "completed" | "cancelled";
-  reason: string | null;
-  operator: HistoryOperator | null;
-  client: string | null;
-  sourceSessionId: string | null;
-  predecessorRunId: string | null;
-  startedAt: string;
-  endedAt: string | null;
-  endReason: string | null;
-}
-
-export interface HistorySessionData extends Record<string, unknown> {
-  title: string;
-  description: string | null;
-  status: HistorySessionStatus;
-  currentRunId: string | null;
-  runs: HistoryRun[];
-  parentSessionId: string | null;
-  originCheckpointId: string | null;
-  createdByRunId: string | null;
-  result: string | null;
-  closedAt: string | null;
-}
-
-export interface HistoryReference {
-  id: string;
-  kind: EntityKind;
-  key: string;
-  title: string;
-}
-
-export interface HistoryCheckpointData extends Record<string, unknown> {
-  kind: HistoryCheckpointKind;
-  sessionId: string;
-  runId: string;
-  actor: string;
-  intentId: string | null;
-  sequence: number;
-  sessionRevision: number;
-  title: string;
-  body: string;
-  summary: string | null;
-  done: string | null;
-  remaining: string | null;
-  nextStep: string | null;
-  checks: string | null;
-  references: HistoryReference[];
-  acceptedSessionIds: string[];
-}
-
-export type HistorySession = EntityRecord & { data: HistorySessionData };
-export type HistoryCheckpoint = EntityRecord & { data: HistoryCheckpointData };
-
-const statuses: HistorySessionStatus[] = ["pending", "open", "paused", "completed", "cancelled"];
-const connectionFields = ["client", "sourceSessionId", "reason", "operator"];
-const materialFields = [
-  "runId",
-  "title",
-  "body",
-  "summary",
-  "done",
-  "remaining",
-  "nextStep",
-  "checks",
-  "references",
-];
-
-function invalid(message: string): never {
-  throw new RelayError("INVALID_INPUT", message, 2);
-}
-
-function conflict(message: string, details?: Record<string, unknown>): never {
-  throw new RelayError("CONFLICT", message, 4, details);
-}
-
-function object(
-  value: unknown,
-  allowed: readonly string[],
-  label = "Ввод",
-): Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    invalid(`${label}: ожидается объект.`);
-  }
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
-    invalid(`${label}: ожидается обычный объект.`);
-  }
-  const result = value as Record<string, unknown>;
-  for (const key of Reflect.ownKeys(result)) {
-    if (typeof key !== "string" || !allowed.includes(key)) {
-      invalid(`${label}: неизвестное поле ${String(key)}.`);
-    }
-  }
-  return result;
-}
-
-function text(value: unknown, label: string, singleLine = false): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    invalid(`${label}: требуется непустой текст.`);
-  }
-  if (singleLine && /[\r\n]/u.test(value)) invalid(`${label}: требуется одна строка.`);
-  return value;
-}
-
-function optionalText(value: unknown, label: string, singleLine = false): string | null {
-  return value === undefined ? null : text(value, label, singleLine);
-}
-
-function stringArray(value: unknown, label: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value)) invalid(`${label}: ожидается массив постоянных ID или ссылок.`);
-  const result = Array.from(value, (item) => text(item, label, true));
-  if (new Set(result).size !== result.length) invalid(`${label}: повторяющиеся значения.`);
-  return result;
-}
-
-function operator(value: unknown): HistoryOperator | null {
-  if (value === undefined || value === null) return null;
-  const input = object(value, ["name", "email", "source"], "operator");
-  const source = input.source;
-  if (
-    source !== "explicit" &&
-    source !== "environment" &&
-    source !== "git" &&
-    source !== "inherited"
-  ) {
-    invalid("operator.source: неизвестный источник пользователя.");
-  }
-  return {
-    name: input.name === null ? null : optionalText(input.name, "operator.name", true),
-    email: input.email === null ? null : optionalText(input.email, "operator.email", true),
-    source,
-  };
-}
-
-function writeOptions(value: unknown): WriteOptions {
-  const input = object(value, ["actor", "ifRevision"], "Параметры записи");
-  const actor = text(input.actor, "actor", true);
-  if (
-    typeof input.ifRevision !== "number" ||
-    !Number.isSafeInteger(input.ifRevision) ||
-    input.ifRevision < 1
-  ) {
-    invalid("ifRevision: требуется положительная целая ревизия сессии.");
-  }
-  return { actor, ifRevision: input.ifRevision };
-}
-
-function unfinished(session: HistorySession): boolean {
-  return !["completed", "cancelled"].includes(session.data.status);
-}
-
-/** Предметная история хранит материалы и ответственность, а не действия внешних инструментов. */
+/** Оркестрация истории: декодированные чтения и атомарная запись материалов и ответственности. */
 export class HistoryService {
-  constructor(readonly db: ProjectDatabase) {}
+  private readonly entities: EntityService;
+
+  constructor(private readonly db: ProjectDatabase) {
+    this.entities = new EntityService(db);
+  }
 
   get(ref: string): HistorySession {
-    return this.lookup(ref, "work-session") as HistorySession;
+    return decodeHistorySession(this.entities.get(ref, "work-session"));
   }
 
   getCheckpoint(ref: string): HistoryCheckpoint {
-    return this.lookup(ref, "work-checkpoint") as HistoryCheckpoint;
+    return decodeHistoryCheckpoint(this.entities.get(ref, "work-checkpoint"));
   }
 
-  list(filters: Record<string, unknown> = {}): HistorySession[] {
+  list(filters: unknown = {}): HistorySession[] {
     return this.db.snapshot(() => {
-      const input = object(filters, ["status", "unfinished", "parent", "actor", "q"]);
-      if (input.status !== undefined && !statuses.includes(input.status as HistorySessionStatus)) {
-        invalid("status: неизвестное состояние сессии.");
-      }
-      if (input.unfinished !== undefined && typeof input.unfinished !== "boolean") {
-        invalid("unfinished: ожидается логическое значение.");
-      }
-      const parent =
-        input.parent === undefined || input.parent === null
-          ? input.parent
-          : this.get(text(input.parent, "parent", true)).id;
-      const actor = optionalText(input.actor, "actor", true);
-      const query = optionalText(input.q, "q")?.toLocaleLowerCase();
+      const input = historyFilters(filters);
+      const parent = typeof input.parent === "string" ? this.get(input.parent).id : input.parent;
       return this.sessions()
-        .filter((session) => {
-          return (
+        .filter(
+          (session) =>
             (input.status === undefined || session.data.status === input.status) &&
-            (input.unfinished === undefined || unfinished(session) === input.unfinished) &&
+            (input.unfinished === undefined || unfinishedSession(session) === input.unfinished) &&
             (parent === undefined || session.data.parentSessionId === parent) &&
-            (actor === null || session.data.runs.some((run) => run.actor === actor)) &&
-            (query === undefined ||
+            (input.actor === null || session.data.runs.some((run) => run.actor === input.actor)) &&
+            (input.query === null ||
               [session.key, session.data.title, session.data.description ?? ""]
                 .join("\n")
                 .toLocaleLowerCase()
-                .includes(query))
-          );
-        })
+                .includes(input.query)),
+        )
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
     });
   }
 
-  start(input: Record<string, unknown>, actor: string): HistorySession {
+  /** Создаёт корневую сессию и её первое активное участие одной записью. Автор сохраняется дословно. */
+  start(input: unknown, actor: string): HistorySession {
     return this.db.transaction(() => {
-      const values = object(input, ["title", "description", ...connectionFields]);
-      const author = text(actor, "actor", true);
+      const values = historyStartInput(input);
+      const author = validateActor(actor);
       const now = new Date().toISOString();
       const run = this.newRun(values, author, now, null);
       const session = this.newSession(values, author, now, {
@@ -231,104 +102,83 @@ export class HistoryService {
     });
   }
 
-  transition(
-    ref: string,
-    action: string,
-    input: Record<string, unknown>,
-    options: WriteOptions,
-  ): HistorySession {
+  /**
+   * Меняет состояние и участие с CAS по сессии. Для fork ref указывает на открытый intent,
+   * ifRevision принадлежит родительской сессии: создаётся pending-ребёнок и повышается ревизия родителя.
+   * Для attach ref/ifRevision принадлежат ребёнку; создаётся его run, а operator при отсутствии ввода
+   * наследуется из участия создателя в родителе (родитель не меняется).
+   * pause/complete и cancel открытой сессии требуют текущий runId и совпадение автора.
+   * takeover закрывает прежний run и создаёт новый; завершение требует закрытых намерений и детей.
+   * Повтор не является no-op. Конфликты состояния/владения, REVISION_CONFLICT и CORRUPT_DATA
+   * не оставляют частичных записей: все изменения и поколение откатываются вместе.
+   */
+  transition(ref: string, action: string, input: unknown, options: WriteOptions): HistorySession {
     return this.db.transaction(() => {
-      const write = writeOptions(options);
-      if (action === "fork") return this.fork(ref, input, write);
-      const allowed: Record<string, string[]> = {
-        pause: ["runId", "reason"],
-        resume: connectionFields,
-        takeover: connectionFields,
-        complete: ["runId", "result"],
-        cancel: ["runId", "result"],
-        attach: connectionFields,
-      };
-      if (typeof action !== "string" || !Object.hasOwn(allowed, action)) {
-        invalid("Неизвестное действие сессии.");
-      }
-      const values = object(input, allowed[action]!);
+      const write = historyWriteOptions(options);
+      const values = historyTransitionInput(action, input);
+      if (values.action === "fork") return this.fork(ref, values, write);
       const session = this.get(ref);
-      this.checkRevision(session, write.ifRevision);
-      if (!unfinished(session)) conflict("Завершённая или отменённая сессия неизменяема.");
+      checkHistoryRevision(session, write.ifRevision);
+      if (!unfinishedSession(session))
+        historyConflict("Завершённая или отменённая сессия неизменяема.");
       const now = new Date().toISOString();
-
-      if (action === "attach" || action === "resume" || action === "takeover") {
-        const expected = action === "attach" ? "pending" : action === "resume" ? "paused" : "open";
-        if (session.data.status !== expected) {
-          conflict(`Действие ${action} требует состояния ${expected}.`);
-        }
-        if (action === "takeover") {
-          const reason = text(values.reason, "reason");
-          this.endRun(session, "transferred", reason, now);
-        }
-        const previous = session.data.runs.at(-1)?.id ?? null;
-        const run = this.newRun(values, write.actor, now, previous);
-        if (action === "attach" && values.operator === undefined) {
-          const parent = this.get(session.data.parentSessionId!);
-          const creator = parent.data.runs.find(
-            (entry) => entry.id === session.data.createdByRunId,
-          );
-          if (!creator) conflict("Не найдено участие, создавшее дочернее поручение.");
-          run.operator = creator.operator ? { ...creator.operator, source: "inherited" } : null;
-        }
-        session.data.runs.push(run);
-        session.data.currentRunId = run.id;
-        session.data.status = "open";
-      } else if (action === "pause") {
-        this.checkOwner(session, values.runId, write.actor);
-        this.endRun(session, "paused", text(values.reason, "reason"), now);
+      if (
+        values.action === "attach" ||
+        values.action === "resume" ||
+        values.action === "takeover"
+      ) {
+        this.connect(session, values, write.actor, now);
+      } else if (values.action === "pause") {
+        checkHistoryOwner(session, values.runId, write.actor);
+        endHistoryRun(session, "paused", values.reason, now);
         session.data.status = "paused";
-      } else {
-        if (action === "complete" || session.data.status === "open") {
-          this.checkOwner(session, values.runId, write.actor);
-        } else if (values.runId !== undefined) {
-          invalid("У pending/paused-сессии нет текущего run; не передавайте runId.");
-        }
-        const result = text(values.result, "result");
-        this.checkSessionClosure(session);
-        const status = action === "complete" ? "completed" : "cancelled";
-        if (session.data.currentRunId !== null) this.endRun(session, status, result, now);
-        session.data.status = status;
-        session.data.result = result;
-        session.data.closedAt = now;
+      } else if (values.action === "complete" || values.action === "cancel") {
+        this.close(session, values, write.actor, now);
       }
       return this.saveSession(session, write, now);
     });
   }
 
+  /**
+   * Добавляет неизменяемый материал: open принимает ссылку сессии, остальные действия — исходного intent.
+   * ifRevision всегда принадлежит сессии, а не checkpoint. Требуются активный runId и его автор.
+   * Новый checkpoint (revision=1) и увеличение ревизии сессии записываются атомарно;
+   * sessionRevision результата содержит новую ревизию сессии. Исходный intent не изменяется.
+   * save может записать новый материал того же содержания, no-op отсутствует. Закрытый intent,
+   * чужой run, непринятые дети, неверная ревизия или повреждённая история вызывают отказ
+   * с полным откатом записей и поколения. references сохраняются снимками через общий resolver.
+   */
   checkpoint(
     ref: string,
-    action: "open" | "save" | "complete" | "cancel",
-    input: Record<string, unknown>,
+    action: HistoryCheckpointAction,
+    input: unknown,
     options: WriteOptions,
   ): HistoryCheckpoint {
     return this.db.transaction(() => {
-      if (!["open", "save", "complete", "cancel"].includes(action)) {
-        invalid("Неизвестное действие точки работы.");
-      }
-      const write = writeOptions(options);
-      const values = object(input, [
-        ...materialFields,
-        ...(action === "open" ? [] : ["acceptedSessionIds"]),
-      ]);
+      const write = historyWriteOptions(options);
+      const values = historyCheckpointInput(action, input);
       const intent = action === "open" ? null : this.getCheckpoint(ref);
       const session = intent === null ? this.get(ref) : this.get(intent.data.sessionId);
-      this.checkRevision(session, write.ifRevision);
-      const run = this.checkOwner(session, values.runId, write.actor);
-      if (intent !== null) this.checkOpenIntent(intent);
-      const accepted = stringArray(values.acceptedSessionIds, "acceptedSessionIds");
+      checkHistoryRevision(session, write.ifRevision);
+      const run = checkHistoryOwner(session, values.runId, write.actor);
+      const materials = this.checkpoints();
       if (intent !== null) {
-        this.checkAcceptance(session.id, intent.id, accepted);
+        checkOpenHistoryIntent(intent, materials);
+        checkHistoryAcceptance(
+          session.id,
+          intent.id,
+          this.acceptedSessions(values.acceptedSessionIds),
+        );
         if (action === "complete" || action === "cancel") {
-          this.checkChildrenClosure(session.id, intent.id, accepted);
+          checkHistoryChildrenClosure(
+            session.id,
+            intent.id,
+            values.acceptedSessionIds,
+            this.sessions(),
+            materials,
+          );
         }
       }
-      const materials = this.checkpoints().filter((entry) => entry.data.sessionId === session.id);
       const now = new Date().toISOString();
       const id = this.newId();
       const checkpoint: HistoryCheckpoint = {
@@ -341,6 +191,7 @@ export class HistoryService {
         createdBy: write.actor,
         updatedBy: write.actor,
         data: {
+          ...values,
           kind:
             action === "open"
               ? "intent"
@@ -353,17 +204,12 @@ export class HistoryService {
           runId: run.id,
           actor: run.actor,
           intentId: intent?.id ?? null,
-          sequence: materials.reduce((max, entry) => Math.max(max, entry.data.sequence), 0) + 1,
+          sequence:
+            materials
+              .filter((entry) => entry.data.sessionId === session.id)
+              .reduce((max, entry) => Math.max(max, entry.data.sequence), 0) + 1,
           sessionRevision: session.revision + 1,
-          title: text(values.title, "title", true),
-          body: text(values.body, "body"),
-          summary: optionalText(values.summary, "summary"),
-          done: optionalText(values.done, "done"),
-          remaining: optionalText(values.remaining, "remaining"),
-          nextStep: optionalText(values.nextStep, "nextStep"),
-          checks: optionalText(values.checks, "checks"),
           references: this.references(values.references),
-          acceptedSessionIds: accepted,
         },
       };
       this.db.insert(checkpoint);
@@ -387,15 +233,18 @@ export class HistoryService {
   }
 
   tree(ref: string): HistorySession[] {
-    return this.db.snapshot(() => this.subtree(this.get(ref)));
+    return this.db.snapshot(() => historySubtree(this.get(ref), this.sessions()));
   }
 
   intents(ref: string, includeChildren = false): HistoryCheckpoint[] {
     return this.db.snapshot(() => {
-      if (typeof includeChildren !== "boolean") invalid("includeChildren: ожидается boolean.");
+      if (typeof includeChildren !== "boolean")
+        invalidHistoryInput("includeChildren: ожидается boolean.");
       const session = this.get(ref);
       const sessionIds = new Set(
-        (includeChildren ? this.subtree(session) : [session]).map((entry) => entry.id),
+        (includeChildren ? historySubtree(session, this.sessions()) : [session]).map(
+          (entry) => entry.id,
+        ),
       );
       const history = this.history().filter((entry) => sessionIds.has(entry.data.sessionId));
       const closed = new Set(
@@ -407,12 +256,7 @@ export class HistoryService {
     });
   }
 
-  context(ref: string): {
-    session: HistorySession;
-    checkpoints: HistoryCheckpoint[];
-    intents: HistoryCheckpoint[];
-    children: HistorySession[];
-  } {
+  context(ref: string): HistoryContext {
     return this.db.snapshot(() => {
       const session = this.get(ref);
       return {
@@ -424,20 +268,12 @@ export class HistoryService {
     });
   }
 
-  private lookup(ref: string, kind: EntityKind): EntityRecord {
-    const reference = text(ref, "Ссылка", true);
-    const id = reference.startsWith(`${kind}:`) ? reference.slice(kind.length + 1) : reference;
-    const record = this.db.get(id, kind);
-    if (!record) throw new RelayError("NOT_FOUND", `Не найдена запись ${reference}.`, 3);
-    return record;
-  }
-
   private sessions(): HistorySession[] {
-    return this.db.list("work-session") as HistorySession[];
+    return this.db.list("work-session").map(decodeHistorySession);
   }
 
   private checkpoints(): HistoryCheckpoint[] {
-    return this.db.list("work-checkpoint") as HistoryCheckpoint[];
+    return this.db.list("work-checkpoint").map(decodeHistoryCheckpoint);
   }
 
   private newId(): string {
@@ -458,7 +294,7 @@ export class HistoryService {
   }
 
   private newRun(
-    input: Record<string, unknown>,
+    input: HistoryConnection,
     actor: string,
     now: string,
     predecessorRunId: string | null,
@@ -469,10 +305,10 @@ export class HistoryService {
       key: `RUN-${id}`,
       actor,
       state: "active",
-      reason: optionalText(input.reason, "reason"),
-      operator: operator(input.operator),
-      client: optionalText(input.client, "client", true),
-      sourceSessionId: optionalText(input.sourceSessionId, "sourceSessionId", true),
+      reason: input.reason,
+      operator: input.operator ?? null,
+      client: input.client,
+      sourceSessionId: input.sourceSessionId,
       predecessorRunId,
       startedAt: now,
       endedAt: null,
@@ -481,7 +317,7 @@ export class HistoryService {
   }
 
   private newSession(
-    input: Record<string, unknown>,
+    input: HistorySessionContent,
     actor: string,
     now: string,
     state: Partial<HistorySessionData>,
@@ -498,8 +334,8 @@ export class HistoryService {
       createdBy: actor,
       updatedBy: actor,
       data: {
-        title: text(input.title, "title", true),
-        description: optionalText(input.description, "description"),
+        title: input.title,
+        description: input.description,
         status: "pending",
         currentRunId: null,
         runs: [],
@@ -513,50 +349,6 @@ export class HistoryService {
     };
   }
 
-  private checkRevision(session: HistorySession, expected: number): void {
-    if (session.revision !== expected) {
-      throw new RelayError(
-        "REVISION_CONFLICT",
-        "Ревизия сессии изменилась. Перечитайте её состояние и историю.",
-        4,
-        {
-          sessionId: session.id,
-          expectedRevision: expected,
-          actualRevision: session.revision,
-        },
-      );
-    }
-  }
-
-  private checkOwner(session: HistorySession, runId: unknown, actor: string): HistoryRun {
-    const id = text(runId, "runId", true);
-    if (session.data.status !== "open" || session.data.currentRunId === null) {
-      conflict("Владельческая запись требует открытой сессии с текущим участием.");
-    }
-    if (session.data.currentRunId !== id) {
-      conflict("Этот run не владеет сессией. Требуется постоянный ID текущего участия.");
-    }
-    const run = session.data.runs.find((entry) => entry.id === id);
-    if (!run || run.state !== "active" || run.actor !== actor) {
-      conflict("Автор записи должен совпадать с агентом текущего активного участия.");
-    }
-    return run;
-  }
-
-  private endRun(
-    session: HistorySession,
-    state: Exclude<HistoryRun["state"], "active">,
-    reason: string,
-    now: string,
-  ): void {
-    const run = session.data.runs.find((entry) => entry.id === session.data.currentRunId);
-    if (!run || run.state !== "active") conflict("У сессии отсутствует активное участие.");
-    run.state = state;
-    run.endedAt = now;
-    run.endReason = reason;
-    session.data.currentRunId = null;
-  }
-
   private saveSession(session: HistorySession, options: WriteOptions, now: string): HistorySession {
     session.revision += 1;
     session.updatedAt = now;
@@ -565,25 +357,62 @@ export class HistoryService {
     return session;
   }
 
-  private checkOpenIntent(intent: HistoryCheckpoint): void {
-    if (intent.data.kind !== "intent") invalid("Ссылка должна указывать на исходный intent.");
-    const closed = this.checkpoints().some(
-      (entry) =>
-        entry.data.intentId === intent.id &&
-        (entry.data.kind === "result" || entry.data.kind === "cancel"),
-    );
-    if (closed) conflict("Намерение уже закрыто. Создайте новое намерение для дальнейшей работы.");
+  private connect(
+    session: HistorySession,
+    input: Extract<HistoryTransition, { action: "attach" | "resume" | "takeover" }>,
+    actor: string,
+    now: string,
+  ): void {
+    const expected =
+      input.action === "attach" ? "pending" : input.action === "resume" ? "paused" : "open";
+    if (session.data.status !== expected)
+      historyConflict(`Действие ${input.action} требует состояния ${expected}.`);
+    if (input.action === "takeover") endHistoryRun(session, "transferred", input.reason, now);
+    const run = this.newRun(input, actor, now, session.data.runs.at(-1)?.id ?? null);
+    if (input.action === "attach" && input.operator === undefined) {
+      const parent = this.get(session.data.parentSessionId!);
+      const creator = parent.data.runs.find((entry) => entry.id === session.data.createdByRunId);
+      if (!creator) historyConflict("Не найдено участие, создавшее дочернее поручение.");
+      run.operator = creator.operator ? { ...creator.operator, source: "inherited" } : null;
+    }
+    session.data.runs.push(run);
+    session.data.currentRunId = run.id;
+    session.data.status = "open";
   }
 
-  private fork(ref: string, input: Record<string, unknown>, options: WriteOptions): HistorySession {
-    const values = object(input, ["title", "description", "runId"]);
+  private close(
+    session: HistorySession,
+    input: Extract<HistoryTransition, { action: "complete" | "cancel" }>,
+    actor: string,
+    now: string,
+  ): void {
+    if (input.action === "complete" || session.data.status === "open") {
+      checkHistoryOwner(session, input.runId, actor);
+    } else if (input.runId !== null) {
+      invalidHistoryInput("У pending/paused-сессии нет текущего run; не передавайте runId.");
+    }
+    if (this.intents(session.id).length > 0)
+      historyConflict("Сначала закройте все намерения сессии.");
+    checkHistoryChildrenClosure(session.id, null, [], this.sessions(), this.checkpoints());
+    const status = input.action === "complete" ? "completed" : "cancelled";
+    if (session.data.currentRunId !== null) endHistoryRun(session, status, input.result, now);
+    session.data.status = status;
+    session.data.result = input.result;
+    session.data.closedAt = now;
+  }
+
+  private fork(
+    ref: string,
+    input: Extract<HistoryTransition, { action: "fork" }>,
+    options: WriteOptions,
+  ): HistorySession {
     const intent = this.getCheckpoint(ref);
     const parent = this.get(intent.data.sessionId);
-    this.checkRevision(parent, options.ifRevision);
-    const run = this.checkOwner(parent, values.runId, options.actor);
-    this.checkOpenIntent(intent);
+    checkHistoryRevision(parent, options.ifRevision);
+    const run = checkHistoryOwner(parent, input.runId, options.actor);
+    checkOpenHistoryIntent(intent, this.checkpoints());
     const now = new Date().toISOString();
-    const child = this.newSession(values, options.actor, now, {
+    const child = this.newSession(input, options.actor, now, {
       parentSessionId: parent.id,
       originCheckpointId: intent.id,
       createdByRunId: run.id,
@@ -593,91 +422,39 @@ export class HistoryService {
     return child;
   }
 
-  private references(value: unknown): HistoryReference[] {
+  private references(references: string[]): HistoryReference[] {
     const ids = new Set<string>();
-    return stringArray(value, "references").map((reference) => {
-      const separator = reference.indexOf(":");
-      const target = this.db.get(separator < 0 ? reference : reference.slice(separator + 1));
-      if (!target) throw new RelayError("NOT_FOUND", `Не найдена ссылка ${reference}.`, 3);
-      if (separator >= 0 && target.kind !== reference.slice(0, separator)) {
-        throw new RelayError("NOT_FOUND", `Не найдена ссылка ${reference}.`, 3);
-      }
-      if (ids.has(target.id)) invalid("references: одна запись указана несколько раз.");
+    const reader = new EntityReader(this.db);
+    return references.map((reference) => {
+      const target = reader.get(reference);
+      if (ids.has(target.id)) invalidHistoryInput("references: одна запись указана несколько раз.");
       ids.add(target.id);
-      const title = target.data.title ?? target.data.name ?? target.key;
-      return {
-        id: target.id,
-        kind: target.kind,
-        key: target.key,
-        title: typeof title === "string" ? title : target.key,
-      };
+      let title: string;
+      switch (target.kind) {
+        case "product":
+          title = target.data.name ?? target.key;
+          break;
+        case "project":
+        case "feature":
+        case "scenario":
+        case "application":
+        case "board":
+        case "document":
+          title = target.data.name;
+          break;
+        default:
+          title = target.data.title;
+      }
+      return { id: target.id, kind: target.kind, key: target.key, title };
     });
   }
 
-  private checkAcceptance(sessionId: string, intentId: string, accepted: string[]): void {
-    for (const id of accepted) {
+  private acceptedSessions(ids: string[]): HistorySession[] {
+    return ids.map((id) => {
       const child = this.get(id);
       if (child.id !== id)
-        invalid("acceptedSessionIds принимает постоянные ID, а не ключи или адреса.");
-      if (child.data.parentSessionId !== sessionId || child.data.originCheckpointId !== intentId) {
-        conflict("Можно принять только прямого ребёнка исходного намерения.");
-      }
-      if (child.data.status !== "completed") {
-        conflict("Принимается только результат завершённого, не отменённого ребёнка.");
-      }
-    }
-  }
-
-  private checkChildrenClosure(
-    sessionId: string,
-    intentId: string | null,
-    accepted: string[],
-  ): void {
-    const children = this.sessions().filter(
-      (entry) =>
-        entry.data.parentSessionId === sessionId &&
-        (intentId === null || entry.data.originCheckpointId === intentId),
-    );
-    const acceptedIds = new Set(accepted);
-    for (const entry of this.checkpoints()) {
-      if (entry.data.sessionId !== sessionId) continue;
-      if (intentId !== null && entry.data.intentId !== intentId) continue;
-      for (const id of entry.data.acceptedSessionIds) acceptedIds.add(id);
-    }
-    for (const child of children) {
-      if (unfinished(child))
-        conflict("Сначала закройте дочернюю работу.", { childSessionId: child.id });
-      if (child.data.status === "completed" && !acceptedIds.has(child.id)) {
-        conflict("Результат дочерней работы ещё не принят родителем.", {
-          childSessionId: child.id,
-        });
-      }
-    }
-  }
-
-  private checkSessionClosure(session: HistorySession): void {
-    if (this.intents(session.id).length > 0) conflict("Сначала закройте все намерения сессии.");
-    this.checkChildrenClosure(session.id, null, []);
-  }
-
-  private subtree(root: HistorySession): HistorySession[] {
-    const children = new Map<string, HistorySession[]>();
-    for (const session of this.sessions()) {
-      if (session.data.parentSessionId === null) continue;
-      const siblings = children.get(session.data.parentSessionId) ?? [];
-      siblings.push(session);
-      children.set(session.data.parentSessionId, siblings);
-    }
-    const result: HistorySession[] = [];
-    const visited = new Set<string>();
-    const queue = [root];
-    for (let position = 0; position < queue.length; position += 1) {
-      const session = queue[position]!;
-      if (visited.has(session.id)) conflict("Обнаружен цикл дочерних сессий.");
-      visited.add(session.id);
-      result.push(session);
-      queue.push(...(children.get(session.id) ?? []));
-    }
-    return result;
+        invalidHistoryInput("acceptedSessionIds принимает постоянные ID, а не ключи или адреса.");
+      return child;
+    });
   }
 }

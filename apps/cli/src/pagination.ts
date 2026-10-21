@@ -49,8 +49,14 @@ function decode(text: string): Cursor {
   }
 }
 
+/**
+ * Проверяет курсор до чтения окна. Функция-источник получает offset/limit, чтобы
+ * ограничить запрос к хранилищу; массив применяется для уже вычисленных составов.
+ * Вызывающий код удерживает общий снимок для generation, total и items.
+ */
 export function paginate<T>(
-  items: readonly T[],
+  source:
+    readonly T[] | ((window: { offset: number; limit: number }) => { items: T[]; total: number }),
   options: {
     context: string;
     query: unknown;
@@ -80,9 +86,12 @@ export function paginate<T>(
   }
   const offset = previous?.offset ?? 0;
   const limit = previous?.limit ?? options.limit;
-  const selected = items.slice(offset, offset + limit);
+  const selection =
+    typeof source === "function"
+      ? source({ offset, limit })
+      : { items: source.slice(offset, offset + limit), total: source.length };
   const nextCursor =
-    offset + limit < items.length
+    offset + limit < selection.total
       ? encode({
           version: 1,
           context: options.context,
@@ -93,10 +102,10 @@ export function paginate<T>(
         })
       : null;
   return {
-    items: selected,
+    items: selection.items,
     page: {
-      count: selected.length,
-      total: items.length,
+      count: selection.items.length,
+      total: selection.total,
       limit,
       nextCursor,
       nextCommand: nextCursor ? options.command(nextCursor, limit) : null,

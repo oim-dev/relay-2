@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../../src/entities";
+import * as publicCore from "../../src/index";
 
 const artifacts = resolve(
   import.meta.dir,
@@ -14,6 +15,10 @@ const artifacts = resolve(
 let directory: string;
 let db: ProjectDatabase;
 let entities: EntityService;
+
+test("публичный Core не экспортирует универсальную мутацию сущностей", () => {
+  expect(Object.hasOwn(publicCore, "EntityService")).toBe(false);
+});
 
 beforeEach(() => {
   mkdirSync(artifacts, { recursive: true });
@@ -300,7 +305,7 @@ describe("Общий механизм сущностей Core", () => {
   });
 
   test("проверяет автора, ключ и положительную целую ожидаемую ревизию", () => {
-    expectCode(() => entities.create("document", "DOC", {}, " "), "VALIDATION_ERROR");
+    expectCode(() => entities.create("document", "DOC", {}, " "), "INVALID_ARGUMENT");
     expectCode(
       () => entities.create("document", "DOC", {}, "author", "BAD KEY"),
       "VALIDATION_ERROR",

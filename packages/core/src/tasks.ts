@@ -1,268 +1,55 @@
 import { randomUUID } from "node:crypto";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
+import {
+  RelayError,
+  validateActor,
+  validateEntityPageRequest,
+  type EntityPage,
+  type EntityPageRequest,
+  type EntityRecord,
+  type TaskComment,
+  type TaskCriterion,
+  type TaskData,
+  type TaskProgress,
+  type TaskRecord,
+  type WriteOptions,
+} from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "./entities";
+import { pageEntities } from "./entity-page";
+import { taskGraphNode, taskRecord } from "./task-data";
+import { TaskGraph } from "./task-graph";
+import {
+  array,
+  choice,
+  column,
+  criterionContent,
+  invalid,
+  newCriterion,
+  object,
+  reference,
+  text,
+} from "./task-input";
+import { selectTaskRecords, type TaskSelection } from "./task-list";
 
-export const TASK_COLUMNS = [
-  "inbox",
-  "ready",
-  "in-progress",
-  "review",
-  "done",
-  "cancelled",
-] as const;
-
-export type TaskColumn = (typeof TASK_COLUMNS)[number];
-
-export interface TaskCriterion {
-  id: string;
-  title: string;
-  summary: string;
-  description: string;
-  completed: boolean;
-  completedAt: string | null;
-  completedBy: string | null;
-}
-
-export interface TaskComment extends Record<string, unknown> {
-  id: string;
-  title: string;
-  body: string;
-  createdAt: string;
-  createdBy: string;
-}
-
-export interface TaskProgress {
-  completed: boolean;
-  canComplete: boolean;
-  /** Постоянные ID невыполненных прямых детей и зависимостей, без повторов. */
-  blockers: string[];
-}
-
-interface TaskData extends Record<string, unknown> {
-  boardId: string;
-  title: string;
-  description: string;
-  column: TaskColumn;
-  parentId: string | null;
-  dependencies: string[];
-  related: string[];
-  targets: string[];
-  acceptanceCriteria: TaskCriterion[];
-}
-
-function invalid(message: string): never {
-  throw new RelayError("INVALID_ARGUMENT", message, 2);
-}
-
-function object(value: unknown, fields: readonly string[], label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    invalid(`${label}: ожидается объект`);
-  }
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
-    invalid(`${label}: ожидается обычный объект полей`);
-  }
-  const result = value as Record<string, unknown>;
-  for (const key of Object.keys(result)) {
-    if (!fields.includes(key)) invalid(`${label}: неизвестное поле ${key}`);
-    if (result[key] === undefined) invalid(`${label}: поле ${key} не может быть undefined`);
-    if (result[key] === null && key !== "parent")
-      invalid(`${label}: поле ${key} не может быть null`);
-  }
-  return result;
-}
-
-function text(
-  value: unknown,
-  name: string,
-  max: number,
-  singleLine = false,
-  required = false,
-): string {
-  if (typeof value !== "string" || value.length > max || value.includes("\0")) {
-    invalid(`${name}: ожидается строка длиной не более ${max} символов без NUL`);
-  }
-  if (singleLine && /[\r\n\u2028\u2029]/u.test(value)) invalid(`${name}: нужна одна строка`);
-  if (required && !value.trim()) invalid(`${name}: пустое значение недопустимо`);
-  return value;
-}
-
-function reference(value: unknown, name: string): string {
-  const result = text(value, name, 256, true, true);
-  if (result !== result.trim() || /\p{Cc}/u.test(result))
-    invalid(`${name}: пробелы по краям и управляющие символы недопустимы`);
-  return result;
-}
-
-function column(value: unknown): TaskColumn {
-  if (typeof value !== "string" || !(TASK_COLUMNS as readonly string[]).includes(value)) {
-    invalid(`Неизвестная колонка; допустимы ${TASK_COLUMNS.join(", ")}`);
-  }
-  return value as TaskColumn;
-}
-
-function choice(value: unknown, variants: readonly string[], name: string): string {
-  if (typeof value !== "string" || !variants.includes(value)) {
-    invalid(`${name}: допустимы ${variants.join(", ")}`);
-  }
-  return value;
-}
-
-function array(value: unknown, name: string, max: number): unknown[] {
-  if (!Array.isArray(value) || value.length > max) {
-    invalid(`${name}: ожидается массив длиной не более ${max}`);
-  }
-  return value;
-}
+export {
+  TASK_COLUMNS,
+  type TaskColumn,
+  type TaskComment,
+  type TaskCriterion,
+  type TaskProgress,
+} from "@relay/contracts";
 
 function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function criterionContent(
-  input: unknown,
-): Pick<TaskCriterion, "title" | "summary" | "description"> {
-  const value = object(input, ["title", "summary", "description"], "Критерий");
-  return {
-    title: text(value.title, "Заголовок критерия", 1024, true, true),
-    summary: text(value.summary ?? "", "Краткое описание критерия", 4096),
-    description: text(value.description ?? "", "Описание критерия", 256 * 1024),
-  };
-}
-
-function newCriterion(input: unknown): TaskCriterion {
-  return {
-    id: randomUUID(),
-    ...criterionContent(input),
-    completed: false,
-    completedAt: null,
-    completedBy: null,
-  };
-}
-
-function taskData(task: EntityRecord): TaskData {
-  const data = task.data;
-  const fail = (): never => {
-    throw new RelayError("CORRUPT_DATA", `Повреждена задача ${task.key}`, 1, { id: task.id });
-  };
-  if (
-    typeof data.boardId !== "string" ||
-    typeof data.title !== "string" ||
-    typeof data.description !== "string" ||
-    !(TASK_COLUMNS as readonly unknown[]).includes(data.column) ||
-    (data.parentId !== null && typeof data.parentId !== "string")
-  ) {
-    fail();
-  }
-  for (const key of ["dependencies", "related", "targets"] as const) {
-    const values = data[key];
-    if (!Array.isArray(values) || values.some((value) => typeof value !== "string")) fail();
-  }
-  if (!Array.isArray(data.acceptanceCriteria)) fail();
-  const criteria = data.acceptanceCriteria as unknown[];
-  const ids = new Set<string>();
-  for (const value of criteria) {
-    if (!value || typeof value !== "object") fail();
-    const item = value as Record<string, unknown>;
-    if (
-      typeof item.id !== "string" ||
-      ids.has(item.id) ||
-      typeof item.title !== "string" ||
-      typeof item.summary !== "string" ||
-      typeof item.description !== "string" ||
-      typeof item.completed !== "boolean" ||
-      (item.completed
-        ? typeof item.completedAt !== "string" || typeof item.completedBy !== "string"
-        : item.completedAt !== null || item.completedBy !== null)
-    ) {
-      fail();
-    }
-    ids.add(item.id as string);
-  }
-  return data as TaskData;
-}
-
-/** Один снимок графа: родители ожидают детей, задачи — свои обязательные зависимости. */
-class TaskGraph {
-  readonly records = new Map<string, EntityRecord>();
-  readonly data = new Map<string, TaskData>();
-  readonly results = new Map<string, TaskProgress>();
-
-  constructor(records: EntityRecord[]) {
-    for (const record of records) {
-      this.records.set(record.id, record);
-      this.data.set(record.id, taskData(record));
-    }
-    const obligations = new Map<string, Set<string>>();
-    const dependants = new Map<string, Set<string>>();
-    for (const id of this.records.keys()) {
-      obligations.set(id, new Set());
-      dependants.set(id, new Set());
-    }
-    const link = (source: string, target: string) => {
-      if (source === target) {
-        throw new RelayError("TASK_CYCLE", "Самоссылка задачи запрещена", 2, { id: source });
-      }
-      if (!this.records.has(source) || !this.records.has(target)) {
-        throw new RelayError(
-          "BROKEN_REFERENCE",
-          "В графе задач отсутствует обязательная задача",
-          1,
-          {
-            source,
-            target,
-          },
-        );
-      }
-      obligations.get(source)!.add(target);
-      dependants.get(target)!.add(source);
-    };
-    for (const [id, data] of this.data) {
-      for (const dependency of data.dependencies) link(id, dependency);
-      if (data.parentId) link(data.parentId, id);
-    }
-
-    // Обход от листьев не зависит от глубины декомпозиции и не переполняет стек.
-    const remaining = new Map([...obligations].map(([id, items]) => [id, items.size]));
-    const queue = [...remaining].filter(([, count]) => count === 0).map(([id]) => id);
-    for (let index = 0; index < queue.length; index++) {
-      const id = queue[index]!;
-      const data = this.data.get(id)!;
-      const blockers = [...obligations.get(id)!].filter(
-        (target) => !this.results.get(target)!.completed,
-      );
-      const canComplete =
-        blockers.length === 0 && data.acceptanceCriteria.every((item) => item.completed);
-      this.results.set(id, {
-        completed: data.column === "done" && canComplete,
-        canComplete,
-        blockers,
-      });
-      for (const dependant of dependants.get(id)!) {
-        const count = remaining.get(dependant)! - 1;
-        remaining.set(dependant, count);
-        if (count === 0) queue.push(dependant);
-      }
-    }
-    if (queue.length !== this.records.size) {
-      throw new RelayError(
-        "TASK_CYCLE",
-        "Обнаружен цикл родительства и обязательных зависимостей",
-        2,
-      );
-    }
-  }
-
-  progress(id: string): TaskProgress {
-    const result = this.results.get(id);
-    if (!result) throw new RelayError("NOT_FOUND", "Задача не найдена", 3, { id });
-    return { ...result, blockers: [...result.blockers] };
-  }
-}
-
-/** Локальные сценарии задач; проверки и запись используют одну транзакцию проекта. */
+/**
+ * Локальные сценарии задач: декодирование, проверки и запись атомарны в пределах проекта.
+ * Мутации содержания принимают ifRevision самой задачи и проверяют CAS до no-op.
+ * Комментарии имеют независимый append-only журнал и не изменяют эту ревизию.
+ */
 export class TasksService {
-  readonly db: ProjectDatabase;
+  private readonly db: ProjectDatabase;
   private readonly entities: EntityService;
 
   constructor(db: ProjectDatabase) {
@@ -270,11 +57,39 @@ export class TasksService {
     this.entities = new EntityService(db);
   }
 
-  get(ref: string): EntityRecord {
-    return this.entities.get(reference(ref, "Задача"), "task");
+  get(ref: string): TaskRecord {
+    return taskRecord(this.entities.get(reference(ref, "Задача"), "task"));
   }
 
-  list(filters: Record<string, unknown> = {}): EntityRecord[] {
+  list(filters: Record<string, unknown> = {}): TaskRecord[] {
+    return this.db.snapshot(() => {
+      const selection = this.prepareFilters(filters);
+      return selectTaskRecords(this.db.list("task").map(taskRecord), selection);
+    });
+  }
+
+  /**
+   * Страница и total относятся к одному снимку. Без фильтров SQL читает только окно;
+   * остальные карточки и их журналы не загружаются. Фильтрованный запрос пока читает
+   * весь набор: поиск использует содержание, readiness — общий граф обязательств.
+   * Для фильтрованной страницы limit ограничивает выдачу, но не стоимость чтения.
+   */
+  listPage(filters: Record<string, unknown>, request: EntityPageRequest): EntityPage<TaskRecord> {
+    validateEntityPageRequest(request);
+    return this.db.snapshot(() => {
+      const selection = this.prepareFilters(filters);
+      if (Object.keys(filters).length === 0) {
+        const page = this.db.listPage("task", request);
+        return { items: page.items.map(taskRecord), total: page.total };
+      }
+      return pageEntities(
+        selectTaskRecords(this.db.list("task").map(taskRecord), selection),
+        request,
+      );
+    });
+  }
+
+  private prepareFilters(filters: Record<string, unknown>): TaskSelection {
     object(
       filters,
       [
@@ -291,70 +106,51 @@ export class TasksService {
       ],
       "Фильтры задач",
     );
-    return this.db.snapshot(() => {
-      if (filters.parent !== undefined && filters.parentId !== undefined)
-        invalid("Передайте только parent или parentId");
-      if (filters.target !== undefined && filters.productTarget !== undefined)
-        invalid("Передайте только target или productTarget");
-      const boardId =
-        filters.board === undefined ? undefined : this.board(reference(filters.board, "Доска")).id;
-      const selectedColumn = filters.column === undefined ? undefined : column(filters.column);
-      const parent = filters.parent !== undefined ? filters.parent : filters.parentId;
-      const parentId =
-        parent === undefined
-          ? undefined
-          : parent === null
-            ? null
-            : this.get(reference(parent, "Родитель")).id;
-      const completion =
-        filters.completion === undefined
-          ? undefined
-          : choice(filters.completion, ["finished", "unfinished"], "Завершённость");
-      const searchIn =
-        filters.searchIn === undefined
-          ? "all"
-          : choice(filters.searchIn, ["title", "all"], "Область поиска");
-      const query =
-        filters.q === undefined ? "" : text(filters.q, "Поиск", 1024).toLocaleLowerCase();
-      const readiness =
-        filters.readiness === undefined
-          ? undefined
-          : choice(filters.readiness, ["ready", "blocked"], "Готовность");
-      const target = filters.target ?? filters.productTarget;
-      const targetIds =
-        target === undefined
-          ? undefined
-          : this.targetScope(reference(target, "Цель"), filters.productTarget !== undefined);
-      const records = this.db.list("task");
-      const graph = readiness === undefined ? undefined : new TaskGraph(records);
-      return records.filter((record) => {
-        const data = taskData(record);
-        if (boardId !== undefined && data.boardId !== boardId) return false;
-        if (selectedColumn !== undefined && data.column !== selectedColumn) return false;
-        if (parentId !== undefined && data.parentId !== parentId) return false;
-        const finished = data.column === "done" || data.column === "cancelled";
-        if (completion !== undefined && finished !== (completion === "finished")) return false;
-        if (targetIds && !data.targets.some((id) => targetIds.has(id))) return false;
-        if (
-          query &&
-          ![
-            record.id,
-            record.key,
-            data.title,
-            ...(searchIn === "all" ? [data.description] : []),
-          ].some((value) => value.toLocaleLowerCase().includes(query))
-        )
-          return false;
-        if (readiness) {
-          const blocked = graph!.progress(record.id).blockers.length > 0;
-          if (readiness === "blocked" ? !blocked : blocked || data.column !== "ready") return false;
-        }
-        return true;
-      });
-    });
+    if (filters.parent !== undefined && filters.parentId !== undefined)
+      invalid("Передайте только parent или parentId");
+    if (filters.target !== undefined && filters.productTarget !== undefined)
+      invalid("Передайте только target или productTarget");
+    const boardId =
+      filters.board === undefined ? undefined : this.board(reference(filters.board, "Доска")).id;
+    const selectedColumn = filters.column === undefined ? undefined : column(filters.column);
+    const parent = filters.parent !== undefined ? filters.parent : filters.parentId;
+    const parentId =
+      parent === undefined
+        ? undefined
+        : parent === null
+          ? null
+          : this.get(reference(parent, "Родитель")).id;
+    const completion =
+      filters.completion === undefined
+        ? undefined
+        : choice(filters.completion, ["finished", "unfinished"], "Завершённость");
+    const searchIn =
+      filters.searchIn === undefined
+        ? "all"
+        : choice(filters.searchIn, ["title", "all"], "Область поиска");
+    const query = filters.q === undefined ? "" : text(filters.q, "Поиск", 1024).toLocaleLowerCase();
+    const readiness =
+      filters.readiness === undefined
+        ? undefined
+        : choice(filters.readiness, ["ready", "blocked"], "Готовность");
+    const target = filters.target ?? filters.productTarget;
+    const targetIds =
+      target === undefined
+        ? undefined
+        : this.targetScope(reference(target, "Цель"), filters.productTarget !== undefined);
+    return {
+      boardId,
+      column: selectedColumn,
+      parentId,
+      completion,
+      searchIn,
+      query,
+      readiness,
+      targetIds,
+    };
   }
 
-  create(input: Record<string, unknown>, actor: string): EntityRecord {
+  create(input: Record<string, unknown>, actor: string): TaskRecord {
     object(
       input,
       [
@@ -370,7 +166,7 @@ export class TasksService {
       ],
       "Создание задачи",
     );
-    reference(actor, "Автор");
+    validateActor(actor);
     return this.db.transaction(() => {
       const board = this.board(reference(input.board ?? "BOARD-PRODUCT", "Доска"));
       const data: TaskData = {
@@ -388,8 +184,9 @@ export class TasksService {
         acceptanceCriteria: array(input.acceptanceCriteria ?? [], "Критерии", 100).map(
           newCriterion,
         ),
+        comments: [],
       };
-      const record = this.entities.create("task", this.prefix(board), data, actor);
+      const record = taskRecord(this.entities.create("task", this.prefix(board), data, actor));
       const graph = this.graph(record);
       this.ensureDone(record, graph);
       this.ensureParentAccepts(record, null, graph);
@@ -397,12 +194,12 @@ export class TasksService {
     });
   }
 
-  update(ref: string, input: Record<string, unknown>, options: WriteOptions): EntityRecord {
+  update(ref: string, input: Record<string, unknown>, options: WriteOptions): TaskRecord {
     object(input, ["title", "description", "targets"], "Обновление задачи");
     if (Object.keys(input).length === 0) invalid("Передайте хотя бы одно поле задачи");
     return this.db.transaction(() => {
       const record = this.writable(ref, options);
-      const data = { ...taskData(record) };
+      const data = { ...record.data };
       if (input.title !== undefined) data.title = text(input.title, "Заголовок задачи", 1024, true);
       if (input.description !== undefined)
         data.description = text(input.description, "Описание задачи", 256 * 1024);
@@ -412,12 +209,17 @@ export class TasksService {
     });
   }
 
-  move(ref: string, input: Record<string, unknown>, options: WriteOptions): EntityRecord {
+  /**
+   * Атомарно меняет доску/колонку; CAS принадлежит задаче. Перенос на другую доску
+   * выдаёт новый ключ и сохраняет прежний алиас. Done требует выполненных обязательств.
+   * Неизменный запрос сохраняет ревизию, но не обходит CAS и проверку графа.
+   */
+  move(ref: string, input: Record<string, unknown>, options: WriteOptions): TaskRecord {
     object(input, ["board", "column"], "Перенос задачи");
     if (Object.keys(input).length === 0) invalid("Передайте доску или колонку");
     return this.db.transaction(() => {
       const record = this.writable(ref, options);
-      const previous = taskData(record);
+      const previous = record.data;
       const board = this.board(
         input.board === undefined ? previous.boardId : reference(input.board, "Доска"),
       );
@@ -431,7 +233,7 @@ export class TasksService {
       this.ensureDone(candidate, this.graph(candidate));
       if (board.id === previous.boardId) return this.save(record, data, options);
       // Storage резервирует прежний ключ как алиас при атомарном изменении записи.
-      const moved: EntityRecord = {
+      const moved: TaskRecord = {
         ...record,
         data,
         key: this.db.nextKey(this.prefix(board)),
@@ -444,10 +246,10 @@ export class TasksService {
     });
   }
 
-  setParent(ref: string, parent: string | null, options: WriteOptions): EntityRecord {
+  setParent(ref: string, parent: string | null, options: WriteOptions): TaskRecord {
     return this.db.transaction(() => {
       const record = this.writable(ref, options);
-      const previous = taskData(record);
+      const previous = record.data;
       const parentId = parent === null ? null : this.get(reference(parent, "Родитель")).id;
       const data = { ...previous, parentId };
       const candidate = { ...record, data };
@@ -457,20 +259,24 @@ export class TasksService {
     });
   }
 
-  dependency(ref: string, target: string, remove: boolean, options: WriteOptions): EntityRecord {
+  dependency(ref: string, target: string, remove: boolean, options: WriteOptions): TaskRecord {
     return this.changeLink(ref, target, remove, "dependencies", options);
   }
 
-  related(ref: string, target: string, remove: boolean, options: WriteOptions): EntityRecord {
+  related(ref: string, target: string, remove: boolean, options: WriteOptions): TaskRecord {
     return this.changeLink(ref, target, remove, "related", options);
   }
 
+  /**
+   * Меняет критерий под CAS задачи. Изменение текста сбрасывает отметку выполнения;
+   * неизменный текст — no-op после CAS. В done изменения критериев запрещены.
+   */
   criterion(
     ref: string,
     action: "add" | "update" | "complete" | "reopen" | "remove",
     input: Record<string, unknown>,
     options: WriteOptions,
-  ): EntityRecord {
+  ): TaskRecord {
     choice(action, ["add", "update", "complete", "reopen", "remove"], "Операция с критерием");
     object(
       input,
@@ -483,7 +289,7 @@ export class TasksService {
     );
     return this.db.transaction(() => {
       const record = this.writable(ref, options);
-      const previous = taskData(record);
+      const previous = record.data;
       if (previous.column === "done") {
         throw new RelayError("TASK_DONE", "Сначала верните задачу из done в работу", 2);
       }
@@ -529,10 +335,16 @@ export class TasksService {
     });
   }
 
-  comment(ref: string, body: string, actor: string, title = ""): EntityRecord {
+  /**
+   * Атомарно дописывает неизменяемый комментарий в отдельный append-only журнал.
+   * CAS содержания не требуется: revision/updatedAt/updatedBy задачи не меняются,
+   * поколение проекта увеличивается. Поздняя запись содержания не стирает журнал.
+   * Каждый вызов публикует новый комментарий; повтор не является no-op.
+   */
+  comment(ref: string, body: string, actor: string, title = ""): TaskRecord {
     text(body, "Комментарий", 256 * 1024, false, true);
     text(title, "Заголовок комментария", 1024, true);
-    reference(actor, "Автор");
+    validateActor(actor);
     return this.db.transaction(() => {
       const record = this.get(ref);
       const comment: TaskComment = {
@@ -542,27 +354,12 @@ export class TasksService {
         createdAt: new Date().toISOString(),
         createdBy: actor,
       };
-      return this.db.appendTaskComment(record.id, comment);
+      return taskRecord(this.db.appendTaskComment(record.id, comment));
     });
   }
 
   comments(ref: string): TaskComment[] {
-    const record = this.get(ref);
-    const comments = record.data.comments ?? [];
-    if (!Array.isArray(comments))
-      throw new RelayError("CORRUPT_DATA", "Повреждены комментарии задачи", 1);
-    for (const value of comments) {
-      if (
-        !value ||
-        typeof value !== "object" ||
-        ["id", "title", "body", "createdAt", "createdBy"].some(
-          (field) => typeof value[field] !== "string",
-        )
-      ) {
-        throw new RelayError("CORRUPT_DATA", "Повреждён комментарий задачи", 1);
-      }
-    }
-    return comments as TaskComment[];
+    return this.get(ref).data.comments;
   }
 
   getComment(ref: string, id: string): TaskComment {
@@ -573,22 +370,39 @@ export class TasksService {
   }
 
   progress(ref: string): TaskProgress {
+    return this.progressMany([ref]).values().next().value!;
+  }
+
+  /**
+   * Вычисляет прогресс набора в одном согласованном снимке с одним общим графом.
+   * ID, ключи, алиасы и типизированные ссылки разрешаются в постоянные ID — ключи Map;
+   * одинаковые входные строки разрешаются один раз, алиасы одной задачи дают один результат.
+   * Разрешение ссылок не читает содержание и комментарии. Пустой набор не читает граф.
+   * Вложенный вызов наследует снимок/транзакцию вызывающего сценария; кеша между вызовами нет.
+   * Проверяются поля обязательств, полное содержание карточек для расчёта не требуется.
+   * Цикл, повреждённое поле графа или отсутствующее обязательство отвергают весь расчёт.
+   */
+  progressMany(refs: readonly string[]): Map<string, TaskProgress> {
     return this.db.snapshot(() => {
-      const record = this.get(ref);
-      return this.graph().progress(record.id);
+      const ids = new Set(
+        [...new Set(refs)].map((ref) => this.entities.resolve(reference(ref, "Задача"), "task").id),
+      );
+      if (ids.size === 0) return new Map();
+      const graph = this.graph();
+      return new Map([...ids].map((id) => [id, graph.progress(id)]));
     });
   }
 
-  children(ref: string): EntityRecord[] {
+  children(ref: string): TaskRecord[] {
     return this.list({ parent: ref });
   }
 
-  dependencies(ref: string): EntityRecord[] {
-    return this.db.snapshot(() => taskData(this.get(ref)).dependencies.map((id) => this.get(id)));
+  dependencies(ref: string): TaskRecord[] {
+    return this.db.snapshot(() => this.get(ref).data.dependencies.map((id) => this.get(id)));
   }
 
   criteria(ref: string): TaskCriterion[] {
-    return taskData(this.get(ref)).acceptanceCriteria;
+    return this.get(ref).data.acceptanceCriteria;
   }
 
   getCriterion(ref: string, id: string): TaskCriterion {
@@ -598,9 +412,9 @@ export class TasksService {
     return criterion;
   }
 
-  private writable(ref: string, options: WriteOptions): EntityRecord {
+  private writable(ref: string, options: WriteOptions): TaskRecord {
     object(options, ["actor", "ifRevision"], "Параметры записи");
-    reference(options.actor, "Автор");
+    validateActor(options.actor);
     if (!Number.isSafeInteger(options.ifRevision) || options.ifRevision < 1)
       invalid("Нужна положительная целая ifRevision");
     const record = this.get(ref);
@@ -619,20 +433,13 @@ export class TasksService {
     return record;
   }
 
-  private save(record: EntityRecord, data: TaskData, options: WriteOptions): EntityRecord {
+  private save(record: TaskRecord, data: TaskData, options: WriteOptions): TaskRecord {
     if (same(record.data, data)) return record;
-    return this.entities.update(record.id, "task", data, options);
+    return taskRecord(this.entities.update(record.id, "task", data, options));
   }
 
   private board(ref: string): EntityRecord {
-    const direct = this.db.get(ref, "board");
-    if (direct) return direct;
-    const matches = this.db
-      .list("board")
-      .filter((board) => board.data.slug === ref || board.data.prefix === ref);
-    if (matches.length > 1) invalid(`Неоднозначная ссылка на доску: ${ref}`);
-    if (matches[0]) return matches[0];
-    throw new RelayError("NOT_FOUND", `Доска не найдена: ${ref}`, 3);
+    return this.entities.get(ref, "board");
   }
 
   private prefix(board: EntityRecord): string {
@@ -720,15 +527,18 @@ export class TasksService {
     return ids;
   }
 
-  private graph(candidate?: EntityRecord): TaskGraph {
-    const records = this.db.list("task");
+  private graph(candidate?: TaskRecord): TaskGraph {
+    const records = this.db.listTaskGraph();
     return new TaskGraph(
-      candidate ? [...records.filter((item) => item.id !== candidate.id), candidate] : records,
+      (candidate
+        ? [...records.filter((item) => item.id !== candidate.id), candidate]
+        : records
+      ).map(taskGraphNode),
     );
   }
 
-  private ensureDone(record: EntityRecord, graph: TaskGraph): void {
-    if (taskData(record).column === "done" && !graph.progress(record.id).canComplete) {
+  private ensureDone(record: TaskRecord, graph: TaskGraph): void {
+    if (record.data.column === "done" && !graph.progress(record.id).canComplete) {
       throw new RelayError(
         "TASK_INCOMPLETE",
         "Завершение требует выполнения критериев, детей и зависимостей",
@@ -742,15 +552,15 @@ export class TasksService {
   }
 
   private ensureParentAccepts(
-    record: EntityRecord,
+    record: TaskRecord,
     previousParent: string | null,
     graph: TaskGraph,
   ): void {
-    const parentId = taskData(record).parentId;
+    const parentId = record.data.parentId;
     if (
       parentId &&
       parentId !== previousParent &&
-      graph.data.get(parentId)!.column === "done" &&
+      graph.column(parentId) === "done" &&
       !graph.progress(record.id).completed
     ) {
       throw new RelayError(
@@ -767,13 +577,13 @@ export class TasksService {
     remove: boolean,
     field: "dependencies" | "related",
     options: WriteOptions,
-  ): EntityRecord {
+  ): TaskRecord {
     if (typeof remove !== "boolean") invalid("remove должен быть логическим значением");
     return this.db.transaction(() => {
       const record = this.writable(ref, options);
       const targetRecord = this.get(reference(target, "Связанная задача"));
       if (record.id === targetRecord.id) invalid("Самоссылка задачи запрещена");
-      const previous = taskData(record);
+      const previous = record.data;
       const values = previous[field];
       const next = remove
         ? values.filter((id) => id !== targetRecord.id)
