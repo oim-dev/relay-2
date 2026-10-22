@@ -124,13 +124,14 @@ describe("Локальные регистрации workspace", () => {
     expect(code).toBe("PROJECT_REQUIRED");
   });
 
-  test("имя регистрации выбирает соответствующий проект workspace", () => {
+  test("регистрация и выбор проекта без databasePath используют относительный home вызова", () => {
     const { cwd, home } = fixture;
     initializeWorkspace({ cwd, home });
     const project = initializeProject({ cwd: join(cwd, "alpha"), home });
-    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
+    const options = { cwd, home: relative(cwd, home) };
+    registerProject(options, "alpha", dirname(project.configPath));
 
-    const selected = resolveProject({ cwd, home, project: "alpha" });
+    const selected = resolveProject({ ...options, project: "alpha" });
 
     expect(selected).toEqual(project);
   });

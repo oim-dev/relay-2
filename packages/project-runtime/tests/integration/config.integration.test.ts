@@ -25,10 +25,37 @@ const invalidConfigs = [
     name: "будущая версия",
     contents: JSON.stringify({ version: 2, projectId: "id", databasePath: "/missing" }),
   },
-  { name: "неполный проект", contents: JSON.stringify({ version: 1, projectId: "id" }) },
+  {
+    name: "проект без ID",
+    contents: JSON.stringify({ version: 1, databasePath: "/missing" }),
+  },
   {
     name: "пустой путь",
     contents: JSON.stringify({ version: 1, projectId: "id", databasePath: "" }),
+  },
+  {
+    name: "null вместо явного пути",
+    contents: JSON.stringify({ version: 1, projectId: "id", databasePath: null }),
+  },
+  {
+    name: "нестроковый путь",
+    contents: JSON.stringify({ version: 1, projectId: "id", databasePath: 42 }),
+  },
+  {
+    name: "ID текущего каталога без явного пути",
+    contents: JSON.stringify({ version: 1, projectId: "." }),
+  },
+  {
+    name: "ID родительского каталога без явного пути",
+    contents: JSON.stringify({ version: 1, projectId: ".." }),
+  },
+  {
+    name: "выход из каталога проектов через ID",
+    contents: JSON.stringify({ version: 1, projectId: "../outside" }),
+  },
+  {
+    name: "обратный разделитель пути в ID",
+    contents: JSON.stringify({ version: 1, projectId: "nested\\project" }),
   },
   {
     name: "нестроковый ID",
@@ -184,7 +211,7 @@ describe("Диагностика локальной конфигурации", (
     const alias = join(root, "workspace-link.json");
     symlinkSync(workspace.configPath, alias);
 
-    const selected = resolveProject({ cwd: root, config: alias, project: "alpha" });
+    const selected = resolveProject({ cwd: root, home, config: alias, project: "alpha" });
 
     expect(selected).toEqual(project);
     expect(listProjects({ cwd: root, config: alias })).toEqual([
@@ -201,7 +228,7 @@ describe("Диагностика локальной конфигурации", (
       version: 1,
       projects: [{ name: "selected", path: dirname(first.configPath) }],
     });
-    expect(resolveProject({ cwd, project: "selected" })).toEqual(first);
+    expect(resolveProject({ cwd, home, project: "selected" })).toEqual(first);
 
     writeConfig(first.configPath, {
       version: 1,
@@ -209,7 +236,7 @@ describe("Диагностика локальной конфигурации", (
       databasePath: second.databasePath,
     });
 
-    expect(resolveProject({ cwd, project: "selected" })).toEqual({
+    expect(resolveProject({ cwd, home, project: "selected" })).toEqual({
       ...second,
       configPath: first.configPath,
     });

@@ -78,7 +78,9 @@ function readRegistrations(
 
 /**
  * Читает один целый JSON и проверяет локальный формат без открытия базы проекта.
- * Относительные ссылки разрешаются от физического каталога файла, включая symlink.
+ * Явные относительные пути разрешаются от физического каталога файла, включая symlink.
+ * Отсутствующий databasePath сохраняется: стандартное размещение вычисляет выбор проекта.
+ * Без явного пути projectId должен быть одним именем каталога, отличным от `.` и `..`.
  * Отсутствие файла даёт CONFIG_NOT_FOUND, неверная схема или тип компонента пути — INVALID_CONFIG.
  */
 export function readConfig(path: string): ProjectConfig | WorkspaceConfig {
@@ -99,13 +101,24 @@ export function readConfig(path: string): ProjectConfig | WorkspaceConfig {
 
   const data = parseConfig(text, path);
   if ("projectId" in data || "databasePath" in data) {
-    if (!validText(data.projectId) || !validText(data.databasePath) || "projects" in data) {
+    const databasePath = data.databasePath;
+    if (
+      !validText(data.projectId) ||
+      (databasePath !== undefined && !validText(databasePath)) ||
+      "projects" in data
+    ) {
+      throw invalidConfig(path);
+    }
+    if (
+      databasePath === undefined &&
+      (data.projectId === "." || data.projectId === ".." || /[/\\]/u.test(data.projectId))
+    ) {
       throw invalidConfig(path);
     }
     return {
       version: 1,
       projectId: data.projectId,
-      databasePath: resolve(directory, data.databasePath),
+      ...(databasePath === undefined ? {} : { databasePath: resolve(directory, databasePath) }),
     };
   }
 

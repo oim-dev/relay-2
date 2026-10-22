@@ -19,7 +19,7 @@ Core работает с открытой базой выбранного про
 Локальные сценарии выполняются в Bun с базой из [Storage](../storage/README.md).
 
 Пример сохраняет документ в уже инициализированном проекте. Замените путь к базе
-на значение `databasePath` из конфигурации проекта, доступной через `relay config get`:
+на вычисленное значение `meta.databasePath` из результата `relay config get --format json`:
 
 ```ts
 import { KnowledgeService } from "@relay/core";

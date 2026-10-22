@@ -35,6 +35,14 @@
 защищают разрешение относительных каталогов через symlink workspace и чтение актуальных
 ID и пути базы из конфига выбранного проекта.
 
+Для конфига без `databasePath` [Runtime](../../packages/project-runtime/tests/integration/runtime.integration.test.ts)
+проверяет стандартное размещение через `home`, относительный корень, перенос home,
+отказ без создания отсутствующей базы и приоритет явного пути. Новый init сохраняет
+только `version` и `projectId`. [Workspace](../../packages/project-runtime/tests/integration/workspace.integration.test.ts)
+проверяет передачу относительного home при регистрации и выборе такого проекта;
+[конфигурация](../../packages/project-runtime/tests/integration/config.integration.test.ts)
+отвергает неверный явный путь и ID, который не может служить отдельным именем каталога.
+
 ## Предметные сценарии Core
 
 | Гарантия                                                                                                                                               | Где проверяется                                                                                                                                                                  |
@@ -104,6 +112,10 @@ ID и пути базы из конфига выбранного проекта.
 [Пагинация workspace](../../apps/cli/tests/integration/pagination.integration.test.ts)
 проверяет выполнение собственного `nextCommand` при исходном относительном config:
 следующая страница сохраняет размер и возвращает оставшуюся регистрацию.
+
+[Контекст проекта CLI](../../apps/cli/tests/integration/project-context.integration.test.ts)
+проверяет выбор базы без `databasePath` через `RELAY_HOME` и резервный `HOME/.relay`,
+а `config get` возвращает исходные поля и вычисленное расположение в метаданных.
 
 ## Поставляемый бинарник и пользовательские маршруты
 

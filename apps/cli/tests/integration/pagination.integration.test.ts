@@ -71,7 +71,11 @@ describe("Пагинация списков CLI", () => {
       const firstProject = cli.createProject();
       const secondProject = cli.createProject(join(cli.root, "other"));
       const cwd = join(cli.root, "workspace");
-      const options = { cwd, config: "registry.json" };
+      const options = {
+        cwd,
+        home: stringValue(cli.runtime.env.RELAY_HOME),
+        config: "registry.json",
+      };
       const workspace = initializeWorkspace(options);
       registerProject(options, "alpha", dirname(firstProject.configPath));
       registerProject(options, "beta", dirname(secondProject.configPath));

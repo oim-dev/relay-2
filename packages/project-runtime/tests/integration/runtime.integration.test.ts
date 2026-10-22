@@ -28,7 +28,7 @@ describe("Инициализация и выбор локального прое
     await fixture.dispose();
   });
 
-  test("init публикует конфиг со ссылкой на внешнюю базу и сохраняет метаданные проекта", () => {
+  test("init публикует конфиг без databasePath и выбирает созданную базу через home", () => {
     const { cwd, home } = fixture;
 
     const project = initializeProject({ cwd, home, name: "Первый проект", slug: "first" });
@@ -38,8 +38,8 @@ describe("Инициализация и выбор локального прое
     expect(JSON.parse(readFileSync(project.configPath, "utf8"))).toEqual({
       version: 1,
       projectId: project.projectId,
-      databasePath: project.databasePath,
     });
+    expect(resolveProject({ cwd, home })).toEqual(project);
     expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
     withProjectDatabase(project, (database) => {
       expect(database.get("PROJECT")?.data).toEqual({ name: "Первый проект", slug: "first" });
@@ -218,13 +218,15 @@ describe("Инициализация и выбор локального прое
     expect(resolveProject({ cwd: nested, home })).toEqual(project);
   });
 
-  test("init публикует проект по явному относительному пути конфига", () => {
+  test("относительный home определяется cwd при отдельном расположении конфига", () => {
     const { cwd, home } = fixture;
 
-    const project = initializeProject({ cwd, home, config: "settings/local.json" });
+    const options = { cwd, home: relative(cwd, home), config: "settings/local.json" };
+    const project = initializeProject(options);
 
     expect(project.configPath).toBe(join(cwd, "settings", "local.json"));
-    expect(resolveProject({ cwd, home, config: "settings/local.json" })).toEqual(project);
+    expect(project.databasePath).toBe(join(home, "projects", project.projectId, "project.sqlite"));
+    expect(resolveProject(options)).toEqual(project);
   });
 
   test("повтор init с явным config сохраняет первоначальный проект", () => {
@@ -306,6 +308,74 @@ describe("Инициализация и выбор локального прое
     expect(existsSync(moved)).toBe(true);
   });
 
+  test("после переноса home конфиг без пути выбирает прежний проект в новом расположении", () => {
+    const { cwd, home, root } = fixture;
+    const project = initializeProject({ cwd, home, name: "Перенесённый" });
+    const original = readFileSync(project.configPath, "utf8");
+    const relocated = join(root, "relocated");
+    renameSync(home, relocated);
+
+    const selected = resolveProject({ cwd, home: relocated });
+
+    expect(selected).toEqual({
+      ...project,
+      databasePath: join(relocated, "projects", project.projectId, "project.sqlite"),
+    });
+    expect(readFileSync(project.configPath, "utf8")).toBe(original);
+    withProjectDatabase(selected, (database) => {
+      expect(database.get("PROJECT")?.data.name).toBe("Перенесённый");
+    });
+  });
+
+  test("смена home на пустой каталог не создаёт базу и сохраняет исходный проект", () => {
+    const { cwd, home, root } = fixture;
+    const project = initializeProject({ cwd, home });
+    const original = readFileSync(project.configPath, "utf8");
+    const emptyHome = join(root, "empty-home");
+
+    const code = runtimeErrorCode(() => resolveProject({ cwd, home: emptyHome }));
+
+    expect(code).toBe("DATABASE_NOT_FOUND");
+    expect(existsSync(emptyHome)).toBe(false);
+    expect(readFileSync(project.configPath, "utf8")).toBe(original);
+    expect(resolveProject({ cwd, home })).toEqual(project);
+  });
+
+  test("явный абсолютный путь базы имеет приоритет над home", () => {
+    const { cwd, home, root } = fixture;
+    const project = initializeProject({ cwd, home });
+    writeConfig(project.configPath, {
+      version: 1,
+      projectId: project.projectId,
+      databasePath: project.databasePath,
+    });
+    const otherHome = join(root, "other-home");
+
+    const selected = resolveProject({ cwd, home: otherHome });
+
+    expect(selected).toEqual(project);
+    expect(existsSync(otherHome)).toBe(false);
+  });
+
+  test("отсутствующая явно указанная база не подменяется существующей базой из home", () => {
+    const { cwd, home, root } = fixture;
+    const project = initializeProject({ cwd, home });
+    const missing = join(root, "missing.sqlite");
+    writeConfig(project.configPath, {
+      version: 1,
+      projectId: project.projectId,
+      databasePath: missing,
+    });
+
+    const code = runtimeErrorCode(() => resolveProject({ cwd, home }));
+
+    expect(code).toBe("DATABASE_NOT_FOUND");
+    expect(existsSync(missing)).toBe(false);
+    withProjectDatabase(project, (database) => {
+      expect(database.projectId).toBe(project.projectId);
+    });
+  });
+
   test("относительный путь базы определяется физическим каталогом конфига через symlink", () => {
     const { cwd, home, root } = fixture;
     const project = initializeProject({ cwd, home });
@@ -316,9 +386,11 @@ describe("Инициализация и выбор локального прое
     });
     const link = join(root, "project.json");
     symlinkSync(project.configPath, link);
+    const otherHome = join(root, "other-home");
 
-    const selected = resolveProject({ cwd: root, home, config: link });
+    const selected = resolveProject({ cwd: root, home: otherHome, config: link });
 
     expect(selected).toEqual({ ...project, configPath: link });
+    expect(existsSync(otherHome)).toBe(false);
   });
 });

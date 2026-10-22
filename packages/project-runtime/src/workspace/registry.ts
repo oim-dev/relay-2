@@ -50,13 +50,14 @@ function workspacePath(options: RuntimeOptions): string {
 
 /**
  * Читает обязательный relay.config.json в регистрируемом каталоге и проверяет его базу.
+ * Без явного пути базы использует home регистрирующего вызова, разрешённый от его cwd.
  * Возвращает физический путь каталога. Workspace вместо проекта отклоняется без записи.
  */
-function registrationDirectory(cwd: string, path: string): string {
+function registrationDirectory(options: RuntimeOptions, path: string): string {
   if (!validText(path)) {
     throw new RelayError("INVALID_ARGUMENT", workspaceMessages.emptyProjectPath, 2);
   }
-  const directory = resolve(cwd, path);
+  const directory = resolve(options.cwd, path);
   const configPath = join(directory, projectConfigName);
   const config = readConfig(configPath);
   if ("projects" in config) {
@@ -66,7 +67,7 @@ function registrationDirectory(cwd: string, path: string): string {
       2,
     );
   }
-  readProjectLocation(configPath, config);
+  readProjectLocation(configPath, config, options);
   return realpathSync(directory);
 }
 
@@ -100,7 +101,7 @@ export function registerProject(options: RuntimeOptions, name: string, path: str
   withFileErrors(() => {
     validateRegistrationName(name);
     const workspace = workspacePath(options);
-    const directory = registrationDirectory(options.cwd, path);
+    const directory = registrationDirectory(options, path);
 
     withWorkspaceLock(workspace, () => {
       const current = readWorkspace(workspace);

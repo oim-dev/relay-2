@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KnowledgeService } from "@relay/core";
-import { initializeWorkspace, registerProject } from "@relay/project-runtime";
+import { initializeProject, initializeWorkspace, registerProject } from "@relay/project-runtime";
 import { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { entityValue, objectValue, stringValue } from "./helpers/responses";
@@ -44,6 +44,20 @@ describe("Локальный проект CLI", () => {
         slug: "new-project",
       });
       expect((await cli.entity(["project", "get"])).id).toBe(project.projectId);
+      const config = await cli.success(["config", "get"]);
+      expect(config.data).toEqual({ version: 1, projectId: project.projectId });
+      expect(config.meta).toMatchObject(project);
+    });
+  });
+
+  test("без RELAY_HOME конфиг без пути выбирает базу из HOME/.relay", async () => {
+    await withCliFixture(async (cli) => {
+      const home = join(cli.root, "user");
+      const project = initializeProject({ cwd: cli.runtime.cwd, home: join(home, ".relay") });
+
+      const selected = await cli.entity(["project", "get"], { env: { HOME: home } });
+
+      expect(selected.id).toBe(project.projectId);
     });
   });
 
@@ -167,8 +181,9 @@ describe("Выбор и регистрация проектов workspace", () =
       const cwd = join(cli.root, "workspace");
       mkdirSync(cwd);
       initializeWorkspace({ cwd });
-      registerProject({ cwd }, "one", dirname(first.configPath));
-      registerProject({ cwd }, "two", dirname(second.configPath));
+      const options = { cwd, home: stringValue(cli.runtime.env.RELAY_HOME) };
+      registerProject(options, "one", dirname(first.configPath));
+      registerProject(options, "two", dirname(second.configPath));
 
       const error = await cli.error(["project", "get"], 2, { cwd });
 
@@ -187,8 +202,9 @@ describe("Выбор и регистрация проектов workspace", () =
         const cwd = join(cli.root, "workspace");
         mkdirSync(cwd);
         initializeWorkspace({ cwd });
-        registerProject({ cwd }, "one", dirname(projects.one.configPath));
-        registerProject({ cwd }, "two", dirname(projects.two.configPath));
+        const options = { cwd, home: stringValue(cli.runtime.env.RELAY_HOME) };
+        registerProject(options, "one", dirname(projects.one.configPath));
+        registerProject(options, "two", dirname(projects.two.configPath));
 
         const selected = await cli.entity(argv, { cwd });
 
@@ -236,7 +252,11 @@ describe("Выбор и регистрация проектов workspace", () =
       const cwd = join(cli.root, "workspace");
       mkdirSync(cwd);
       initializeWorkspace({ cwd });
-      registerProject({ cwd }, "one", dirname(project.configPath));
+      registerProject(
+        { cwd, home: stringValue(cli.runtime.env.RELAY_HOME) },
+        "one",
+        dirname(project.configPath),
+      );
 
       await cli.success(["workspace", "project", "remove", "one"], { cwd });
 
