@@ -7,6 +7,6 @@ export interface CliRuntime {
   readonly cwd: string;
   /* Снимок или переданное окружение; отсутствующая переменная имеет значение undefined. */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /* Готовый текст либо ленивый читатель стандартного ввода одного вызова. */
-  readonly stdin: string | (() => string | Promise<string>);
+  /* Готовый текст либо ленивый читатель; maxBytes ограничивает поток до накопления полного ввода. */
+  readonly stdin: string | ((maxBytes?: number) => string | Promise<string>);
 }

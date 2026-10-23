@@ -313,12 +313,14 @@ describe("Справка CLI", () => {
 
   test.each(helpRoutes.filter((route) => route.group))(
     "$name без подкоманды совпадает с --help и сохраняет полный путь",
-    async ({ argv }) => {
+    async ({ argv, hasSubcommands }) => {
       const help = await invoke([...argv, "--help"]);
       const empty = await invoke(argv);
 
       expect(empty).toEqual(help);
-      expect(help.stdout).toContain(`ИСПОЛЬЗОВАНИЕ:\n  relay ${argv.join(" ")} [КОМАНДЫ]`);
+      expect(help.stdout).toContain(
+        `ИСПОЛЬЗОВАНИЕ:\n  relay ${argv.join(" ")}${hasSubcommands ? " [КОМАНДЫ]" : ""}`,
+      );
     },
   );
 
@@ -377,11 +379,13 @@ describe("Справка CLI", () => {
     }
   });
 
-  test("несуществующий каталог алиасов inspect keys отклоняется вместо показа справки", async () => {
-    const result = await invoke(["inspect", "keys", "--help"]);
+  test("удалённая группа отклоняется вместо показа справки", async () => {
+    const result = await invoke(["inspect", "get", "--help"]);
 
     expect(result.exitCode).toBe(2);
     expect(result.stdout).toBe("");
     expect(result.stderr).toContain("INVALID_ARGUMENT");
+    expect(helpRoutes.map((route) => route.name)).not.toContain("inspect");
+    expect((await invoke(["--help"])).stdout).not.toContain("inspect");
   });
 });

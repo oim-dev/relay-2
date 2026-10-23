@@ -19,3 +19,8 @@ export type * from "./history/history.types";
 export { validateEntityPageRequest } from "./pagination/pagination";
 export type * from "./pagination/pagination.types";
 export type * from "./project-entity.types";
+export { ENTITY_READ_SIZE } from "./queries/entity-read.constants";
+export { validateEntityReadRequest } from "./queries/entity-read";
+export type * from "./queries/entity-read.types";
+export type * from "./batch/batch.types";
+export { BATCH_LIMITS, BATCH_NESTED_RESULT_KINDS } from "./batch/batch.constants";

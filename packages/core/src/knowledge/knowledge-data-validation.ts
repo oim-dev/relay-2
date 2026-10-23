@@ -1,6 +1,7 @@
 import { isEntitySlug, RelayError, validateActor, type EntityRecord } from "@relay/contracts";
 import { KNOWLEDGE_LIMITS } from "./knowledge-constants";
 import { knowledgeMessages } from "./knowledge.messages";
+import { isKnowledgeTitle } from "./knowledge-title";
 import type { KnowledgeInput } from "./knowledge.types";
 
 /**
@@ -54,11 +55,10 @@ export class KnowledgeDataValidation {
    * Проверяет непустой однострочный заголовок.
    */
   title(value: unknown, field: string): string {
-    const result = this.text(value, field, true);
-    if (/[\r\n\u2028\u2029]/u.test(result)) {
+    if (!isKnowledgeTitle(value)) {
       this.fail(field);
     }
-    return result;
+    return value;
   }
 
   /**

@@ -34,11 +34,17 @@ export async function invokeBinary(
   argv: readonly string[],
   options: BinaryOptions = {},
 ): Promise<BinaryResult> {
-  await mkdir(artifacts, { recursive: true });
-  const directory = await mkdtemp(join(artifacts, "cli-process-"));
+  const root = options.artifactGroup ? join(artifacts, options.artifactGroup) : artifacts;
+  await mkdir(root, { recursive: true });
+  const directory = await mkdtemp(join(root, "cli-process-"));
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
+    options.prepare?.(directory);
+    const emptyStdin = options.openStdin ? "pipe" : "ignore";
+    const input =
+      typeof options.stdin === "string" ? new TextEncoder().encode(options.stdin) : options.stdin;
+    const stdin = input ?? emptyStdin;
     const running = Bun.spawn([...(options.command ?? [binary]), ...argv], {
       cwd: directory,
       env: {
@@ -46,7 +52,7 @@ export async function invokeBinary(
         RELAY_HOME: directory,
         PATH: `${dirname(binary)}:${process.env.PATH ?? ""}`,
       },
-      stdin: options.openStdin ? "pipe" : "ignore",
+      stdin,
       stdout: "pipe",
       stderr: "pipe",
       detached: true,

@@ -26,7 +26,12 @@ export function commandRoutes(
     const argv = [...path, name];
     const children =
       command.subCommands instanceof Map ? command.subCommands : new Map<string, Command>();
-    routes.push({ name: argv.join(" "), argv, group: children.size > 0 });
+    routes.push({
+      name: argv.join(" "),
+      argv,
+      group: !command.args,
+      hasSubcommands: children.size > 0,
+    });
     routes.push(...commandRoutes(children, argv));
   }
   return routes;

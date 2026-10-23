@@ -1,8 +1,8 @@
 import { cli } from "gunshi";
 import { describeCliFailure, isBrokenPipe } from "../errors/errors";
-import type { ValidationFailure } from "../errors/errors.types";
+import type { CliFailure, ValidationFailure } from "../errors/errors.types";
 import { errorMessages } from "../locales/errors";
-import { terminalText } from "../output/output";
+import { terminalText } from "../output/terminal";
 import { createProgram } from "./program";
 import type { CliOutput } from "./run.types";
 import { processRuntime } from "../execution/runtime";
@@ -16,7 +16,7 @@ export type { CliOutput } from "./run.types";
 /**
  * Выполняет один изолированный запуск CLI без изменения cwd, env, console и exitCode процесса.
  * Gunshi возвращает текст, а переданные потоки получают результат либо единую диагностику.
- * Синхронный EPIPE stdout означает успешное прекращение чтения; остальные ошибки сохраняют отказ.
+ * Синхронный EPIPE stdout не меняет предметный исход; остальные ошибки записи сохраняют отказ.
  * Поздние события ошибок процессного stdout обрабатывает исполняемый main, а не этот API.
  */
 export async function runCli(
@@ -41,7 +41,7 @@ export async function runProgram(
   let format = "text";
   let helpPath: readonly string[] = [];
   try {
-    const { command, options } = create();
+    const { command, options, outcome } = create();
     const result = await cli([...argv], command, {
       ...options,
       /**
@@ -67,35 +67,49 @@ export async function runProgram(
       try {
         output.stdout(result.endsWith("\n") ? result : `${result}\n`);
       } catch (error) {
-        if (isBrokenPipe(error)) {
-          return 0;
+        if (!isBrokenPipe(error)) {
+          throw error;
         }
-        throw error;
       }
     }
-    return 0;
+    if (outcome.failure) {
+      writeFailure(outcome.failure, output, format, helpPath);
+    }
+    return outcome.failure?.exitCode ?? 0;
   } catch (error) {
     const failure = describeCliFailure(error, inputFailure);
-    const helpCommand = ["relay", ...helpPath, "--help"].join(" ");
-    if (format === "json") {
-      const { code, message, details } = failure;
-      output.stderr(
-        `${JSON.stringify({
-          ok: false,
-          error: {
-            code,
-            message,
-            ...(details ? { details } : {}),
-            ...(failure.invalidInput ? { helpCommand } : {}),
-          },
-        })}\n`,
-      );
-    } else {
-      output.stderr(errorMessages.failure(failure.code, terminalText(failure.message)));
-      if (failure.invalidInput) {
-        output.stderr(errorMessages.help(helpCommand));
-      }
-    }
+    writeFailure(failure, output, format, helpPath);
     return failure.exitCode;
+  }
+}
+
+/**
+ * Публикует одну диагностику в stderr; частичный результат уже передан в stdout отдельно.
+ */
+function writeFailure(
+  failure: CliFailure,
+  output: CliOutput,
+  format: string,
+  helpPath: readonly string[],
+): void {
+  const helpCommand = ["relay", ...helpPath, "--help"].join(" ");
+  if (format === "json") {
+    const { code, message, details } = failure;
+    output.stderr(
+      `${JSON.stringify({
+        ok: false,
+        error: {
+          code,
+          message,
+          ...(details ? { details } : {}),
+          ...(failure.invalidInput ? { helpCommand } : {}),
+        },
+      })}\n`,
+    );
+  } else {
+    output.stderr(errorMessages.failure(failure.code, terminalText(failure.message)));
+    if (failure.invalidInput) {
+      output.stderr(errorMessages.help(helpCommand));
+    }
   }
 }

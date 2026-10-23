@@ -102,6 +102,14 @@ export async function invokeRecord(
   stdin?: string,
 ): Promise<RecordResult> {
   const value = await invokeSuccess(env, cwd, argv, stdin);
+  return readRecordResult(value);
+}
+
+/**
+ * Декодирует общие поля карточки из одиночного или составного ответа бинарника.
+ * Предметные ожидания остаются независимыми утверждениями пользовательского маршрута.
+ */
+export function readRecordResult(value: unknown): RecordResult {
   if (
     !isObject(value) ||
     typeof value.id !== "string" ||

@@ -1,8 +1,9 @@
-import { stripVTControlCharacters } from "node:util";
 import type { Result, TextPresentation } from "./output.types";
 import { isPage, renderFullValue } from "./values";
 import { renderPage } from "./pages";
 import { renderConfiguration, renderOverview } from "./project";
+import { renderEntityRead } from "./reads";
+import { terminalText } from "./terminal";
 
 /**
  * Оборачивает данные предметного сценария без изменения формы и без вывода в потоки.
@@ -12,19 +13,7 @@ export function result(data: unknown): Result {
 }
 
 /**
- * Удаляет терминальные управляющие и bidi-последовательности из текста для человека.
- * Переводы строк, табуляция, Markdown и обычный Unicode сохраняются; JSON через это не проходит.
- */
-export function terminalText(value: string): string {
-  return stripVTControlCharacters(value)
-    .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu, "")
-    .replace(/\p{Cc}/gu, (character) =>
-      character === "\n" || character === "\t" ? character : "",
-    );
-}
-
-/**
- * Создаёт успешный JSON-ответ либо безопасное для терминала текстовое представление.
+ * Создаёт единый JSON-ответ, включая частичный отказ, либо безопасное текстовое представление.
  * Макет выбирается регистрацией отдельно от результата; JSON сохраняет исходные данные.
  * Функция не пишет в stdout и не добавляет финальный LF.
  */
@@ -34,7 +23,16 @@ export function renderResult(
   presentation?: TextPresentation,
 ): string {
   if (format === "json") {
-    return JSON.stringify({ ok: true, ...result });
+    const { failure, ...payload } = result;
+    const error = failure && {
+      code: failure.code,
+      message: failure.message,
+      ...(failure.details ? { details: failure.details } : {}),
+    };
+    return JSON.stringify({ ok: !failure, ...payload, ...(error ? { error } : {}) });
+  }
+  if (presentation === "entity-read") {
+    return terminalText(renderEntityRead(result.data));
   }
   if (presentation === "configuration") {
     return terminalText(renderConfiguration(result));

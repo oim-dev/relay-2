@@ -23,6 +23,14 @@ export interface CommandHelp {
 }
 
 /**
+ * Особенности представления справочных узлов без собственного предметного действия.
+ */
+export interface HelpRendererOptions {
+  /* false скрывает техническую строку [имя] самого узла среди его подкоманд. */
+  readonly entryRow?: boolean;
+}
+
+/**
  * Автономный renderer справки одного запуска Gunshi, не читающий проект или stdin.
  */
 export type HelpRenderer = (context: Readonly<CommandContext>) => Promise<string>;

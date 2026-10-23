@@ -20,6 +20,7 @@ import {
   invalid,
   object,
   text,
+  planningTitle,
   reference,
   references,
   scope,
@@ -64,11 +65,7 @@ function stage(value: unknown): PlanStage {
   ]);
   return {
     id: reference(fields.id, "stage.id"),
-    title: text(fields.title, "stage.title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    }),
+    title: planningTitle(fields.title, "stage.title"),
     summary: text(fields.summary, "stage.summary", { maxLength: planningLimits.summaryLength }),
     outcome: text(fields.outcome, "stage.outcome"),
     completionConditions: text(fields.completionConditions, "stage.completionConditions"),
@@ -103,11 +100,7 @@ function workPlanData(value: unknown): WorkPlanData {
   }
   return {
     projectId: reference(fields.projectId, "projectId"),
-    title: text(fields.title, "title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    }),
+    title: planningTitle(fields.title),
     summary: text(fields.summary, "summary", { maxLength: planningLimits.summaryLength }),
     goal: text(fields.goal, "goal"),
     rationale: text(fields.rationale, "rationale"),
@@ -136,11 +129,7 @@ function releaseData(value: unknown): ReleaseData {
   ]);
   return {
     projectId: reference(fields.projectId, "projectId"),
-    title: text(fields.title, "title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    }),
+    title: planningTitle(fields.title),
     version: text(fields.version, "version", {
       maxLength: planningLimits.versionLength,
       required: true,

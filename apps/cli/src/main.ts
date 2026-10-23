@@ -1,14 +1,15 @@
 import { format } from "node:util";
 import { runProcessCli } from "./app/process-run";
 import { isBrokenPipe } from "./errors/errors";
-import { terminalText } from "./output/output";
+import { terminalText } from "./output/terminal";
 import { errorMessages } from "./locales/errors";
 
 let streamExitCode: number | undefined;
+let commandExitCode = 0;
 
 /**
  * Обрабатывает поздние ошибки процессного stdout, включая события после возврата обработчика CLI.
- * EPIPE сохраняет успешное завершение; иной отказ потока задаёт код 1 и пишет диагностику в stderr.
+ * EPIPE сохраняет предметный код команды; иной отказ потока задаёт код 1 и пишет диагностику в stderr.
  * Первый отказ определяет результат; повторные события не дублируют диагностику.
  * Обработчик остаётся установленным до выхода процесса, чтобы не потерять отложенное событие write.
  */
@@ -17,7 +18,7 @@ function onStdoutError(error: Error): void {
     return;
   }
   streamExitCode = isBrokenPipe(error) ? 0 : 1;
-  process.exitCode = streamExitCode;
+  process.exitCode = streamExitCode === 0 ? commandExitCode : streamExitCode;
   if (streamExitCode !== 0) {
     process.stderr.write(errorMessages.failure("OUTPUT_ERROR", terminalText(error.message)));
   }
@@ -43,7 +44,7 @@ process.stdout.on("error", onStdoutError);
 console.log = writeConsoleLine;
 const exitCode = await runProcessCli(process.argv.slice(2), {
   /**
-   * Передаёт успешный результат процессному stdout; поздние отказы ловит onStdoutError.
+   * Передаёт результат процессному stdout; поздние отказы ловит onStdoutError.
    */
   stdout: (text: string): void => {
     process.stdout.write(text);
@@ -55,4 +56,5 @@ const exitCode = await runProcessCli(process.argv.slice(2), {
     process.stderr.write(text);
   },
 });
-process.exitCode = streamExitCode ?? exitCode;
+commandExitCode = exitCode;
+process.exitCode = streamExitCode === 1 ? 1 : commandExitCode;

@@ -9,7 +9,15 @@ import {
   type EntityRecord,
   type EntityPageRequest,
 } from "@relay/contracts";
-import type { EntityCountRow, EntityRevision, EntityRow } from "./entity-queries.types";
+import type {
+  EntityCountRow,
+  EntityIdentityWithRevision,
+  EntityReferenceIdentity,
+  EntityRevision,
+  EntityRow,
+  EntitySummaryProjection,
+  EntitySummaryRow,
+} from "./entity-queries.types";
 import { entityMessages } from "./entity.messages";
 
 // Полная карточка и журнал читаются одним запросом, без N+1 и копий комментариев в payload.
@@ -18,6 +26,12 @@ const ENTITY_COLUMNS = `e.*, CASE WHEN e.kind = 'task' THEN (
     'id', id, 'title', title, 'body', body, 'createdAt', created_at, 'createdBy', created_by
   ) ORDER BY sequence) FROM task_comments WHERE task_id = e.id
 ) ELSE NULL END AS comments`;
+
+// Имя поля сравнивается буквально, а значение — только как строка верхнего уровня JSON.
+const ENTITY_STRING_FIELD_MATCH = `e.kind = ? AND EXISTS (
+  SELECT 1 FROM json_each(e.data) field
+  WHERE field.key = ? AND field.type = 'text' AND field.value = ?
+)`;
 
 /**
  * Проверяет корневой JSON-объект, оставляя вложенные значения предметному декодеру Core.
@@ -84,6 +98,70 @@ export function getEntityIdentity(
     )
     .get(ref);
   return identity && (kind === undefined || identity.kind === kind) ? identity : undefined;
+}
+
+/**
+ * Разрешает пакет обычных ID, ключей и алиасов через entity_refs одним SQL-запросом.
+ * Каждый вход получает идентичность либо явный null; порядок и повторы сохраняются.
+ * Типизированный и виртуальный синтаксис принадлежит Core; пустой пакет не обращается к SQL.
+ */
+export function resolveEntityReferences(
+  connection: Database,
+  refs: readonly string[],
+): (EntityIdentity | null)[] {
+  if (refs.length === 0) {
+    return [];
+  }
+  const rows = connection
+    .query<EntityReferenceIdentity, [string]>(
+      `SELECT r.ref, e.id, e.kind, e.key
+       FROM json_each(?) requested
+       JOIN entity_refs r ON r.ref = requested.value JOIN entities e ON e.id = r.entity_id`,
+    )
+    .all(JSON.stringify([...new Set(refs)]));
+  const identities = new Map(rows.map(({ ref, id, kind, key }) => [ref, { id, kind, key }]));
+  return refs.map((ref) => identities.get(ref) ?? null);
+}
+
+/**
+ * Читает только идентичность, ревизию, название и состояние выбранных постоянных ID.
+ * SQL не возвращает тела, вложенные составы и журналы. Типы JSON-полей сохраняются для Core.
+ * Пропуски явно возвращаются как null; порядок и повторы входа сохраняются без повторной загрузки.
+ */
+export function getEntitySummaries(
+  connection: Database,
+  ids: readonly string[],
+): (EntitySummaryProjection | null)[] {
+  if (ids.length === 0) {
+    return [];
+  }
+  const rows = connection
+    .query<EntitySummaryRow, [string]>(
+      `SELECT e.id, e.kind, e.key, e.revision,
+         CASE WHEN e.kind IN ('project', 'product', 'feature', 'scenario', 'application', 'board', 'document')
+           THEN e.data -> '$.name' ELSE e.data -> '$.title' END AS title,
+         CASE e.kind WHEN 'task' THEN e.data -> '$.column'
+           WHEN 'document' THEN e.data -> '$.documentStatus'
+           WHEN 'implementation' THEN e.data -> '$.status'
+           WHEN 'work-plan' THEN e.data -> '$.status'
+           WHEN 'release' THEN e.data -> '$.status'
+           WHEN 'work-session' THEN e.data -> '$.status' END AS state,
+         CASE WHEN e.kind = 'implementation' THEN e.data -> '$.active' END AS active
+       FROM json_each(?) requested JOIN entities e ON e.id = requested.value`,
+    )
+    .all(JSON.stringify([...new Set(ids)]));
+  const summaries = new Map(
+    rows.map((row) => [
+      row.id,
+      {
+        ...row,
+        title: row.title === null ? undefined : JSON.parse(row.title),
+        state: row.state === null ? undefined : JSON.parse(row.state),
+        active: row.active === null ? undefined : JSON.parse(row.active),
+      },
+    ]),
+  );
+  return ids.map((id) => summaries.get(id) ?? null);
 }
 
 /**
@@ -193,13 +271,30 @@ export function listEntitiesByField(
 ): EntityRecord[] {
   return connection
     .query<EntityRow, [string, string, string]>(
-      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE e.kind = ? AND EXISTS (
-         SELECT 1 FROM json_each(e.data) field
-         WHERE field.key = ? AND field.type = 'text' AND field.value = ?
-       ) ORDER BY e.key, e.id`,
+      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE ${ENTITY_STRING_FIELD_MATCH}
+       ORDER BY e.key, e.id`,
     )
     .all(kind, field, value)
     .map(decodeEntityRow);
+}
+
+/**
+ * Читает ID, вид, ключ и ревизию совпавших записей одним SQL-запросом без содержания и журналов.
+ * Строковый фильтр и порядок по ключу/ID совпадают с listEntitiesByField; поле не является JSON-путём.
+ * Согласованность нескольких выборок удерживает вызывающий snapshot либо транзакция.
+ */
+export function listEntityIdentitiesByField(
+  connection: Database,
+  kind: EntityKind,
+  field: string,
+  value: string,
+): EntityIdentityWithRevision[] {
+  return connection
+    .query<EntityIdentityWithRevision, [string, string, string]>(
+      `SELECT e.id, e.kind, e.key, e.revision FROM entities e WHERE ${ENTITY_STRING_FIELD_MATCH}
+       ORDER BY e.key, e.id`,
+    )
+    .all(kind, field, value);
 }
 
 /**

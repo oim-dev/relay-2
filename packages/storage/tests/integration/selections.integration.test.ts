@@ -225,3 +225,47 @@ describe("Пакетные чтения постоянных ID", () => {
     expectRelayError(() => db.listByField("document", "ownerId", "owner"), "DATABASE_CLOSED");
   });
 });
+
+describe("Узкие идентичности состава с ревизиями", () => {
+  test("строковый фильтр возвращает только четыре SQL-столбца без содержания и журнала", () => {
+    const field = 'owner.id"[0]';
+    const value = "owner' OR 1=1 --";
+    const later: EntityRecord = {
+      ...createDocument("TASK-Z"),
+      kind: "task",
+      data: { [field]: value, description: "НЕ-ЗАГРУЖАТЬ-ОПИСАНИЕ" },
+    };
+    const initial: EntityRecord = {
+      ...createDocument("TASK-OLD"),
+      kind: "task",
+      data: { [field]: value, description: "НЕ-ЗАГРУЖАТЬ-ДРУГОЕ-ОПИСАНИЕ" },
+    };
+    db.insert(later);
+    db.insert(initial);
+    db.insert({ ...createDocument("DOC-1"), data: { [field]: value } });
+    const renamed = db.rename(initial.id, "TASK-A", initial.revision, "editor");
+    db.appendTaskComment(initial.id, createComment("НЕ-ЗАГРУЖАТЬ-ЖУРНАЛ"));
+    const queries = spyOn(Database.prototype, "query");
+    const parse = spyOn(JSON, "parse");
+    try {
+      const result = db.listIdentitiesByField("task", field, value);
+
+      expect(result).toEqual([
+        { id: initial.id, kind: "task", key: "TASK-A", revision: renamed.revision },
+        { id: later.id, kind: "task", key: "TASK-Z", revision: later.revision },
+      ]);
+      expect(queries).toHaveBeenCalledTimes(1);
+      expect(parse).not.toHaveBeenCalled();
+      // Граница SQLite → TypeScript проверяется по настоящему prepared statement,
+      // чтобы отбрасывание уже прочитанных текстов не прошло как узкая проекция.
+      const columns = queries.mock.results
+        .filter((result) => result.type === "return")
+        .flatMap((result) => result.value.columnNames);
+      expect(columns.toSorted()).toEqual(["id", "key", "kind", "revision"]);
+    } finally {
+      parse.mockRestore();
+      queries.mockRestore();
+    }
+    expect(db.listIdentitiesByField("task", field, "missing")).toEqual([]);
+  });
+});

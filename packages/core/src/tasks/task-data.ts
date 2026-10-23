@@ -16,7 +16,7 @@ import type { StoredTask } from "./task-data.types";
 import type { TaskGraphNode } from "./task-graph.types";
 import type { TaskCriterionContent } from "./task-input.types";
 import { taskMessages } from "./task-messages";
-import { taskTextViolation } from "./task-text";
+import { isTaskTitle, taskTextViolation } from "./task-text";
 
 /**
  * Сообщает о повреждении сохранённой задачи, включая постоянный ID в детали ошибки.
@@ -184,13 +184,16 @@ export function taskRecord(task: Readonly<EntityRecord | TaskRecord>): TaskRecor
     corrupt(task);
   }
   const data = object(task.data, task);
+  if (!isTaskTitle(data.title)) {
+    corrupt(task);
+  }
   return {
     ...task,
     kind: "task",
     data: {
       ...data,
       boardId: text(data.boardId, task),
-      title: text(data.title, task),
+      title: data.title,
       description: text(data.description, task),
       column: column(data.column, task),
       parentId: data.parentId === null ? null : text(data.parentId, task),

@@ -69,7 +69,7 @@ describe("Проект из полного снимка общих запрос�
   });
 
   test.each(sectionStates)(
-    "обзор сохраняет содержание и ссылки $name раздела без повторного чтения проекта",
+    "обзор сохраняет содержание и проекцию $name раздела без повторного чтения проекта",
     ({ retired }) => {
       withEntityDatabase((db) => {
         const knowledge = new KnowledgeService(db);
@@ -106,7 +106,10 @@ describe("Проект из полного снимка общих запрос�
         const overview = expectFullSnapshotRead(db, () => queries.overview());
 
         expect(overview.project).toEqual(project);
-        expect(overview.items.filter((item) => item.kind === "document")).toEqual([first, second]);
+        expect(overview.items.filter((item) => item.kind === "document")).toEqual([
+          { ...first, data: { ...first.data, sectionId: retired ? null : "guides" } },
+          { ...second, data: { ...second.data, sectionId: retired ? null : "guides" } },
+        ]);
         expect(overview.items.map((item) => item.key)).toEqual([
           "BOARD-PRODUCT",
           "DOC-1",

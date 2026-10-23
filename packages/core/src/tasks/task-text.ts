@@ -1,4 +1,16 @@
 import type { TaskTextOptions, TaskTextViolation } from "./task-text.types";
+import { TASK_TITLE_TEXT_RULES } from "./task-constants";
+
+/**
+ * Проверяет заголовок задачи общим правилом ввода и хранения, сохраняя пустоту и пробелы.
+ * Нестроковые значения, превышение длины, NUL и разделители строк считаются повреждением поля.
+ */
+export function isTaskTitle(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    taskTextViolation(value, TASK_TITLE_TEXT_RULES.maximum, TASK_TITLE_TEXT_RULES) === undefined
+  );
+}
 
 /**
  * Проверяет текст по общим правилам ввода и хранения без нормализации или создания ошибки.

@@ -9,6 +9,7 @@ import {
 } from "@relay/contracts";
 import { KNOWLEDGE_LIMITS } from "./knowledge-constants";
 import { knowledgeMessages } from "./knowledge.messages";
+import { isKnowledgeTitle } from "./knowledge-title";
 import type { KnowledgeInput } from "./knowledge.types";
 
 /**
@@ -68,7 +69,7 @@ export function knowledgeText(value: unknown, label: string, nonempty = false): 
  */
 export function knowledgeName(value: unknown, label = "name"): string {
   const result = knowledgeText(value, label, true);
-  if (/[\r\n\u2028\u2029]/u.test(result)) {
+  if (!isKnowledgeTitle(result)) {
     invalidKnowledge(knowledgeMessages.name(label));
   }
   return result;

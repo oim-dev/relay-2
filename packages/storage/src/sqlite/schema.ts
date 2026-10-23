@@ -1,11 +1,14 @@
 import { sqliteMessages } from "./sqlite.messages";
+import { BATCH_RECEIPT_SCHEMA } from "./batch-schema";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const APPLICATION_ID = 0x524c5932;
 
 // ID, текущие ключи и алиасы делят одно пространство ссылок: старый адрес нельзя выдать другой записи.
 // Поколение изменяется вместе с сущностью, поэтому откат возвращает также версию снимка для пагинации.
-export const SCHEMA = `
+export const SCHEMA =
+  BATCH_RECEIPT_SCHEMA +
+  `
   CREATE TABLE entities (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id) > 0),
     kind TEXT NOT NULL CHECK(kind IN (

@@ -1,4 +1,5 @@
 import type { CliRuntime } from "./runtime.types";
+import { readBoundedText } from "../input/bounded-text";
 
 /**
  * Подключает окружение текущего процесса, не читая stdin до явного запроса команды.
@@ -9,8 +10,9 @@ export function processRuntime(): CliRuntime {
     cwd: process.cwd(),
     env: process.env,
     /**
-     * Читает весь стандартный ввод только при выборе источника «-».
+     * Читает stdin только при выборе «-»; ограниченные команды прекращают поток при превышении.
      */
-    stdin: (): Promise<string> => Bun.stdin.text(),
+    stdin: (maxBytes): Promise<string> =>
+      maxBytes === undefined ? Bun.stdin.text() : readBoundedText(Bun.stdin.stream(), maxBytes),
   };
 }

@@ -9,4 +9,6 @@ export type { ApplicationParticipation } from "./knowledge/knowledge.types";
 export { PlanningService } from "./planning/planning";
 export { QueryService } from "./queries/queries";
 export { TasksService } from "./tasks/tasks";
+export { BatchService } from "./batch/batch";
+export { BATCH_OPERATIONS } from "./batch/batch-catalog";
 export type { TaskReadOwner, TaskCollection, TaskCriterionRead } from "./tasks/task-read.types";

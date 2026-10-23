@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { renderResult, terminalText } from "./output";
+import { renderResult } from "./output";
+import { terminalText } from "./terminal";
 import type { Page } from "../pagination/pagination.types";
 
 const unsafeText =

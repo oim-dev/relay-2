@@ -1,13 +1,15 @@
 import { QueryService } from "@relay/core";
-import { choice, pageArgs, refArgs, string } from "../../input/arguments";
+import { validateEntityReadRequest } from "@relay/contracts";
+import { choice, flag, pageArgs, positional, string } from "../../input/arguments";
+import { CliUsageError } from "../../errors/errors";
 import { queryCommandMessages as messages } from "../../locales/commands/queries";
 import { result } from "../../output/output";
 import type { Result } from "../../output/output.types";
 import type { CommandRegistry } from "../../execution/registry";
 
 /**
- * Добавляет поиск, инспекцию и диагностику проекта в реестр без чтения базы.
- * Согласованный снимок каждого вызова принадлежит инфраструктуре команд.
+ * Добавляет адресное чтение, поиск и диагностику проекта в реестр без чтения базы.
+ * get управляет снимком в Core; прочие чтения используют снимок инфраструктуры команд.
  */
 export function registerQueryCommands(registry: CommandRegistry): void {
   registry.add("search", {
@@ -22,17 +24,40 @@ export function registerQueryCommands(registry: CommandRegistry): void {
      */
     run: (i): Result => i.entities(() => i.queries.search(i.input)),
   });
-  registry.group("inspect", messages.inspect);
-  for (const command of ["get", "resolve"]) {
-    registry.add(`inspect ${command}`, {
-      ...messages.inspectGet,
-      args: refArgs,
-      /**
-       * Возвращает полную запись, найденную Core по пользовательской ссылке.
-       */
-      run: (i): Result => result(i.queries.get(i.text("ref"))),
-    });
-  }
+  registry.add("get", {
+    ...messages.get,
+    args: {
+      refs: { ...positional(messages.references, false), multiple: true },
+      summary: flag(messages.summary),
+    },
+    presentation: "entity-read",
+    execution: "service",
+    /**
+     * Объединяет адреса до и после -- и проверяет общий размер до открытия БД.
+     * Core удерживает общий снимок и различает ошибки отдельных адресов.
+     */
+    run: (i): Result => {
+      const positionals = i.values.refs ?? [];
+      if (
+        !Array.isArray(positionals) ||
+        !positionals.every((ref): ref is string => typeof ref === "string")
+      ) {
+        throw new CliUsageError(messages.references);
+      }
+      const refs = [...positionals, ...i.context.rest];
+      validateEntityReadRequest(refs);
+      const data = i.queries.getMany(refs, {
+        summary: i.values.summary === true,
+      });
+      const firstFailure = data.items.find((item) => !item.ok);
+      return {
+        data,
+        ...(firstFailure && !firstFailure.ok
+          ? { failure: { ...firstFailure.error, invalidInput: false } }
+          : {}),
+      };
+    },
+  });
   registry.add("overview", {
     ...messages.overview,
     args: pageArgs,

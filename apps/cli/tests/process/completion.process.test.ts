@@ -4,6 +4,60 @@ import { invokeBinary } from "./cli-process";
 
 const queries = [
   {
+    name: "разделы справки batch",
+    words: ["batch", "help", ""],
+    included: ["plan", "product", "task", "session"],
+    excluded: ["result", "overview", "get"],
+  },
+  {
+    name: "действия и подгруппы планирования в справке",
+    words: ["batch", "help", "plan", ""],
+    included: ["create", "update", "stage"],
+    excluded: ["list", "get", "release"],
+  },
+  {
+    name: "следующий уровень справки этапов",
+    words: ["batch", "help", "plan", "stage", ""],
+    included: ["create", "update", "move", "remove", "task"],
+    excluded: ["list", "get", "release"],
+  },
+  {
+    name: "справочный лист принимает только общие флаги",
+    words: ["batch", "help", "plan", "stage", "create", "--"],
+    included: ["--help", "--format"],
+    excluded: ["--title", "--input", "--if-revision"],
+  },
+  {
+    name: "новые корневые команды без удалённой группы",
+    words: [""],
+    included: ["get", "batch"],
+    excluded: ["inspect"],
+  },
+  {
+    name: "краткое групповое чтение",
+    words: ["get", "DOC-1", "TASK-1", "--"],
+    included: ["--summary", "--format"],
+    excluded: ["--full"],
+  },
+  {
+    name: "собственное выполнение batch с единственным источником",
+    words: ["batch", "--"],
+    included: ["--input", "--operation-key", "--check", "--return"],
+    excluded: ["--input-file"],
+  },
+  {
+    name: "представление квитанции не читает stdin",
+    words: ["batch", "--input", "-", "--return", "f"],
+    included: ["full"],
+    excluded: ["summary"],
+  },
+  {
+    name: "восстановление квитанции",
+    words: ["batch", "result", "saved", "--return", ""],
+    included: ["full"],
+    excluded: ["--input"],
+  },
+  {
     name: "вложенные команды workspace",
     words: ["workspace", "project", ""],
     included: ["add", "list", "remove"],

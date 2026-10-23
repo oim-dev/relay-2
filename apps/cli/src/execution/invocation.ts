@@ -6,9 +6,14 @@ import {
   QueryService,
   TasksService,
 } from "@relay/core";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
-import { resolveProject, type ProjectLocation, type RuntimeOptions } from "@relay/project-runtime";
-import { ProjectDatabase } from "@relay/storage";
+import type { EntityRecord, WriteOptions } from "@relay/contracts";
+import {
+  openProject,
+  type OpenedProject,
+  type ProjectLocation,
+  type RuntimeOptions,
+} from "@relay/project-runtime";
+import type { ProjectDatabase } from "@relay/storage";
 import type { CommandContext } from "gunshi";
 import type { ArgumentValues, InputFields } from "../input/arguments.types";
 import { CliUsageError } from "../errors/errors";
@@ -20,13 +25,11 @@ import type { CliRuntime } from "./runtime.types";
 
 /**
  * Контекст одного обработчика: значения ввода, выбор проекта и ленивое владение соединением БД.
- * Реестр закрывает вызов в finally и удерживает общую транзакцию либо снимок вокруг сценария.
+ * Реестр закрывает вызов в finally; транзакцией либо снимком владеет реестр или явно выбранный сервис.
  */
 export class Invocation {
-  /* Соединение, принадлежащее этому вызову; отсутствует до первого обращения к db. */
-  private database?: ProjectDatabase;
-  /* Выбранный проект, закреплённый первым обращением к location. */
-  private projectLocation?: ProjectLocation;
+  /* Проверенный проект с рабочим соединением; отсутствует до первого обращения к db или location. */
+  private openedProject?: OpenedProject;
   /* Неизменяемые значения Gunshi; предметные поля находятся отдельно в input. */
   readonly values: ArgumentValues;
   /* Контекст разбора команды; экземпляр не разделяется между вызовами runCli. */
@@ -92,32 +95,26 @@ export class Invocation {
   }
 
   /**
-   * Один раз разрешает конфигурацию проекта; справка не обращается к этому свойству.
+   * Один раз выбирает и открывает проект через Runtime, принимая владение рабочим соединением.
+   * db и location разделяют этот результат независимо от порядка первого обращения.
    */
-  get location(): ProjectLocation {
-    return (this.projectLocation ??= resolveProject(this.options));
+  private get project(): OpenedProject {
+    return (this.openedProject ??= openProject(this.options));
   }
 
   /**
-   * Лениво открывает единственное соединение и сверяет ID с выбранной конфигурацией.
-   * При подмене базы закрывает новое соединение до отказа; успешным соединением владеет вызов.
+   * Возвращает расположение, проверенное тем же открытием, которым пользуется db.
+   * Справка и локальные конфигурационные команды не обращаются к этому свойству.
+   */
+  get location(): ProjectLocation {
+    return this.project.location;
+  }
+
+  /**
+   * Возвращает единственное соединение вызова; его совместимость и ID уже проверены Runtime.
    */
   get db(): ProjectDatabase {
-    if (this.database) {
-      return this.database;
-    }
-    const location = this.location;
-    const database = ProjectDatabase.open(location.databasePath);
-    if (database.projectId !== location.projectId) {
-      database.close();
-      throw new RelayError("PROJECT_ID_MISMATCH", registryMessages.projectReplaced, 4, {
-        databasePath: location.databasePath,
-        expected: location.projectId,
-        actual: database.projectId,
-      });
-    }
-    this.database = database;
-    return database;
+    return this.project.database;
   }
 
   /**
@@ -156,11 +153,11 @@ export class Invocation {
   }
 
   /**
-   * Закрывает принадлежащее вызову соединение; без обращения к db операция не имеет эффектов.
+   * Закрывает принадлежащее вызову соединение; без обращения к db/location не имеет эффектов.
    * После закрытия вызов не предназначен для повторного выполнения сценариев.
    */
   close(): void {
-    this.database?.close();
+    this.openedProject?.database.close();
   }
 
   /**

@@ -3,6 +3,9 @@ import { version } from "../../package.json";
 import { invokeBinary } from "./cli-process";
 
 const nestedHelp = [
+  { name: "групповое чтение", command: ["get"] },
+  { name: "пакет с открытым stdin", command: ["batch", "--input", "-"] },
+  { name: "восстановление пакета", command: ["batch", "result"] },
   { name: "создание документа", command: ["document", "create"] },
   { name: "добавление критерия", command: ["task", "criterion", "add"] },
   { name: "регистрация проекта", command: ["workspace", "project", "add"] },
@@ -35,7 +38,7 @@ describe("Поставляемый бинарник CLI", () => {
   test.each(nestedHelp)(
     "$name: вложенная справка доступна без проекта и обязательных аргументов",
     async ({ command }) => {
-      const result = await invokeBinary([...command, "--help"]);
+      const result = await invokeBinary([...command, "--help"], { openStdin: true });
 
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");

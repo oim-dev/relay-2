@@ -22,13 +22,14 @@ export class RuntimeFixture {
 
   /**
    * Создаёт изолированный рабочий каталог без изменения cwd и окружения процесса тестов.
+   * artifactGroup выбирает подкаталог внутри дневных артефактов для согласованного набора проверок.
    */
-  constructor() {
+  constructor(artifactGroup = "style-refactor") {
     const artifacts = resolve(
       import.meta.dir,
       "../../../../../.artifacts",
       new Date().toISOString().slice(0, 10),
-      "style-refactor",
+      artifactGroup,
     );
     mkdirSync(artifacts, { recursive: true });
     this.root = mkdtempSync(join(artifacts, "runtime-test-"));

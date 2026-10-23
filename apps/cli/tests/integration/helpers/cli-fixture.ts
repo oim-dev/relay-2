@@ -26,12 +26,14 @@ class CliFixture {
 
   /**
    * Создаёт пустые изолированные каталоги; при отказе подготовки удаляет их самостоятельно.
+   * artifactGroup выбирает подкаталог внутри дневных артефактов, не меняя окружение процесса.
    */
-  constructor() {
+  constructor(artifactGroup?: string) {
     const artifacts = resolve(
       import.meta.dir,
       "../../../../../.artifacts",
       new Date().toISOString().slice(0, 10),
+      ...(artifactGroup ? [artifactGroup] : []),
     );
     mkdirSync(artifacts, { recursive: true });
     this.root = mkdtempSync(join(artifacts, "cli-integration-"));
@@ -168,9 +170,13 @@ class CliFixture {
 /**
  * Выделяет окружение одному тесту и удаляет его в finally, включая отказ проверок.
  * Callback обязан дождаться своих CLI-вызовов и закрыть самостоятельно открытые ресурсы.
+ * artifactGroup позволяет собрать fixtures согласованной проверки под одним дневным каталогом.
  */
-export async function withCliFixture<T>(run: (cli: CliFixture) => Promise<T>): Promise<T> {
-  const cli = new CliFixture();
+export async function withCliFixture<T>(
+  run: (cli: CliFixture) => Promise<T>,
+  artifactGroup?: string,
+): Promise<T> {
+  const cli = new CliFixture(artifactGroup);
   try {
     return await run(cli);
   } finally {

@@ -3,7 +3,6 @@
  */
 export const registryMessages = {
   actorRequired: "Для записи укажите --actor или RELAY_ACTOR",
-  projectReplaced: "База выбранного проекта была заменена между выбором и открытием",
   emptyCommandPath: "Путь регистрируемой команды пуст",
 
   /**

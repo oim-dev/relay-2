@@ -20,6 +20,7 @@ import type {
   HistoryTransition,
 } from "./history-input.types";
 import { historyInputMessages } from "./history-messages";
+import { HISTORY_TITLE_RULES, historyTextViolation } from "./history-text";
 
 export type {
   HistoryConnection,
@@ -64,13 +65,17 @@ function object(
  * Проверяет непустой текст и ограничения строк, сохраняя пробелы и переводы строк дословно.
  */
 function text(value: unknown, label: string, options: HistoryTextOptions = {}): string {
-  if (typeof value !== "string" || value.trim() === "") {
+  if (typeof value !== "string") {
     invalidHistoryInput(historyInputMessages.textRequired(label));
   }
-  if (options.singleLine && /[\r\n]/u.test(value)) {
-    invalidHistoryInput(historyInputMessages.singleLineRequired(label));
+  switch (historyTextViolation(value, options)) {
+    case "required":
+      return invalidHistoryInput(historyInputMessages.textRequired(label));
+    case "singleLine":
+      return invalidHistoryInput(historyInputMessages.singleLineRequired(label));
+    case undefined:
+      return value;
   }
-  return value;
 }
 
 /**
@@ -164,7 +169,7 @@ function connection(input: Readonly<Record<string, unknown>>): HistoryConnection
  */
 function sessionContent(input: Readonly<Record<string, unknown>>): HistorySessionContent {
   return {
-    title: text(input.title, "title", { singleLine: true }),
+    title: text(input.title, "title", HISTORY_TITLE_RULES),
     description: optionalText(input.description, "description"),
   };
 }
@@ -241,7 +246,7 @@ export function historyCheckpointInput(
   ]);
   return {
     runId: text(input.runId, "runId", { singleLine: true }),
-    title: text(input.title, "title", { singleLine: true }),
+    title: text(input.title, "title", HISTORY_TITLE_RULES),
     body: text(input.body, "body"),
     summary: optionalText(input.summary, "summary"),
     done: optionalText(input.done, "done"),

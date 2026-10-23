@@ -30,7 +30,7 @@ describe("Локальные регистрации workspace", () => {
   let fixture: RuntimeFixture;
 
   beforeEach(() => {
-    fixture = new RuntimeFixture();
+    fixture = new RuntimeFixture("get-batch/cli-open-project");
   });
 
   afterEach(async () => {

@@ -1,5 +1,5 @@
 import type { CliOptions, Command, CommandContext } from "gunshi";
-import type { RegistryCommand } from "../execution/registry.types";
+import type { CommandOutcome, RegistryCommand } from "../execution/registry.types";
 
 /**
  * Конфигурация Gunshi с обязательными частями, на которые опирается встраиваемый runCli.
@@ -22,4 +22,6 @@ export interface CliProgram {
   readonly command: Command;
   /* Настройки, глобальные параметры и плагины только текущего запуска. */
   readonly options: CliProgramOptions;
+  /* Исход предметного действия; позволяет сохранить частичный stdout с ненулевым exit code. */
+  readonly outcome: CommandOutcome;
 }

@@ -72,7 +72,7 @@ describe("Файловая база проекта", () => {
     expect(reopened.getGeneration()).toBe(generation);
     fixture.withRaw((raw) => {
       expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
       expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
       expect(raw.query("SELECT data FROM entities WHERE kind = 'project'").get()).toEqual({
         data: JSON.stringify({ name: projectMetadata.name, slug: projectMetadata.slug }),

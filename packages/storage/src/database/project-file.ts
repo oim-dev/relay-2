@@ -1,11 +1,12 @@
 /**
- * Жизненный цикл файла и технической схемы БД. Транзакцией и записью начальных
- * сущностей владеет ProjectDatabase; этот модуль не выполняет самостоятельный commit.
+ * Жизненный цикл файла и технической схемы БД. Транзакцией создания и начальных
+ * сущностей владеет ProjectDatabase; техническая миграция существующей БД имеет свою транзакцию.
  */
 import { Database } from "bun:sqlite";
 import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { RelayError, type EntityRecord } from "@relay/contracts";
 import { APPLICATION_ID, SCHEMA, SCHEMA_VERSION } from "../sqlite/schema";
+import { BATCH_RECEIPT_SCHEMA } from "../sqlite/batch-schema";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
 import { SQLITE_BUSY_TIMEOUT_MS } from "../sqlite/sqlite.constants";
 import { projectDatabaseMessages } from "./project-database.messages";
@@ -87,6 +88,7 @@ export function configureProjectWal(connection: Database): void {
 /**
  * Проверяет заголовок и корневую сущность существующей базы без её переинициализации.
  * Возвращает постоянный ID проекта; чужая или несовместимая база отклоняется до включения WAL.
+ * Совместимая v1 автоматически получает журнал v2 в собственной атомарной технической миграции.
  */
 export function readProjectId(connection: Database, path: string): string {
   const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
@@ -94,18 +96,7 @@ export function readProjectId(connection: Database, path: string): string {
   if (application?.application_id !== APPLICATION_ID) {
     throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.foreignDatabase, 1, { path });
   }
-  if (version?.user_version !== SCHEMA_VERSION) {
-    throw new RelayError(
-      "SCHEMA_VERSION_UNSUPPORTED",
-      projectDatabaseMessages.unsupportedSchema,
-      1,
-      {
-        path,
-        expectedVersion: SCHEMA_VERSION,
-        actualVersion: version?.user_version,
-      },
-    );
-  }
+  requireSupportedSchema(version?.user_version, path);
   const state = connection
     .query<ProjectStateRow, []>(
       `SELECT project_id FROM project_state s JOIN entities e ON e.id = s.project_id
@@ -115,7 +106,48 @@ export function readProjectId(connection: Database, path: string): string {
   if (!state) {
     throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.projectMissing, 1, { path });
   }
+  if (version?.user_version === 1) {
+    migrateProjectSchema(connection, path);
+  }
   return state.project_id;
+}
+
+/**
+ * Отклоняет неизвестную техническую версию до записи и после ожидания замка миграции.
+ */
+function requireSupportedSchema(version: number | undefined, path: string): void {
+  if (version !== 1 && version !== SCHEMA_VERSION) {
+    throw new RelayError(
+      "SCHEMA_VERSION_UNSUPPORTED",
+      projectDatabaseMessages.unsupportedSchema,
+      1,
+      {
+        path,
+        expectedVersion: SCHEMA_VERSION,
+        actualVersion: version,
+      },
+    );
+  }
+}
+
+/**
+ * Под замком записи повторяет проверку версии и добавляет журнал v2 без изменения данных v1.
+ * Конкурентный open может уже завершить миграцию; DDL и user_version откатываются вместе.
+ */
+function migrateProjectSchema(connection: Database, path: string): void {
+  connection.exec("BEGIN IMMEDIATE");
+  try {
+    const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
+    requireSupportedSchema(version?.user_version, path);
+    if (version?.user_version === 1) {
+      connection.exec(BATCH_RECEIPT_SCHEMA);
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    }
+    connection.exec("COMMIT");
+  } catch (error) {
+    connection.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 /**

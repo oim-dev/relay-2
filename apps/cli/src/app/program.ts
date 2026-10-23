@@ -10,6 +10,7 @@ import { registerTaskCommands } from "../commands/tasks/register";
 import { registerPlanningCommands } from "../commands/planning/register";
 import { registerHistoryCommands } from "../commands/history/register";
 import { registerQueryCommands } from "../commands/queries/register";
+import { registerBatchCommands } from "../commands/batch/register";
 import { checkPositionals, CommandRegistry } from "../execution/registry";
 import { createHelpRenderer } from "../output/help";
 import { processRuntime } from "../execution/runtime";
@@ -29,6 +30,7 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
     registerPlanningCommands,
     registerHistoryCommands,
     registerQueryCommands,
+    registerBatchCommands,
   ]) {
     register(registry);
   }
@@ -67,5 +69,5 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
     onBeforeCommand: checkPositionals,
   } satisfies CliProgramOptions;
 
-  return { command, options };
+  return { command, options, outcome: registry.outcome };
 }

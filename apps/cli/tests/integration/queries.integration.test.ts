@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { HistoryService, KnowledgeService, TasksService } from "@relay/core";
 import type { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
-import { arrayValue, entityValue, objectValue, stringValue } from "./helpers/responses";
+import {
+  arrayValue,
+  entityValue,
+  objectValue,
+  readEntitiesValue,
+  stringValue,
+} from "./helpers/responses";
 
 const validDoctorContexts = [
   { name: "знания", seed: seedKnowledgeLinks },
@@ -76,20 +82,21 @@ function seedCompletedHistory(db: ProjectDatabase): void {
 }
 
 describe("Поиск и обзор через CLI", () => {
-  test("inspect resolve разрешает типизированный постоянный ID задачи", async () => {
+  test("get разрешает типизированный постоянный ID задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const task = cli.withDatabase(project, (db) =>
         new TasksService(db).create({ title: "Задача" }, "agent"),
       );
 
-      const resolved = await cli.entity(["inspect", "resolve", `task:${task.id}`]);
+      const resolved = readEntitiesValue((await cli.success(["get", `task:${task.id}`])).data);
 
-      expect(resolved.id).toBe(task.id);
-    });
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0]?.id).toBe(task.id);
+    }, "get-batch");
   });
 
-  test("inspect get разрешает типизированный прежний ключ фичи", async () => {
+  test("get разрешает типизированный прежний ключ фичи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const feature = cli.withDatabase(project, (db) => {
@@ -102,11 +109,14 @@ describe("Поиск и обзор через CLI", () => {
         return feature;
       });
 
-      const resolved = await cli.entity(["inspect", "get", `feature:${feature.key}`]);
+      const resolved = readEntitiesValue(
+        (await cli.success(["get", `feature:${feature.key}`])).data,
+      );
 
-      expect(resolved.id).toBe(feature.id);
-      expect(resolved.key).toBe("FEATURE-RENAMED");
-    });
+      expect(resolved).toHaveLength(1);
+      expect(resolved[0]?.id).toBe(feature.id);
+      expect(resolved[0]?.key).toBe("FEATURE-RENAMED");
+    }, "get-batch");
   });
 
   test("поиск по прежнему ключу находит переименованную фичу", async () => {

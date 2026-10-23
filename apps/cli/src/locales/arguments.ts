@@ -8,10 +8,15 @@ export const argumentMessages = {
   reference: "Ключ, алиас или постоянный ID",
   inputFile: "JSON-файл полей; «-» читает stdin",
   invalidInputJson: "В --input ожидается корректный JSON",
+  invalidUtf8: "Источник ввода содержит недопустимую последовательность байтов UTF-8",
   inputObjectRequired: "В --input ожидается JSON-объект",
   inputParserRequired: "Для --input не зарегистрирован разбор JSON-полей",
   sharedStdin: "stdin может использовать только одно поле",
   mixedInput: "--input/--input-file нельзя смешивать с отдельными полями",
+  /**
+   * Объясняет ограничение размера до накопления полного UTF-8 потока.
+   */
+  inputTooLarge: (maxBytes: number): string => `Ввод превышает ${maxBytes / (1024 * 1024)} МиБ`,
 
   /**
    * Помечает безусловно обязательный параметр, проверяемый парсером.

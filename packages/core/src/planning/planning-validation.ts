@@ -65,6 +65,19 @@ export function text(value: unknown, field: string, rules: PlanningTextRules = {
 }
 
 /**
+ * Проверяет заголовок плана, релиза или этапа по единому правилу ввода и хранения.
+ * Непустая однострочная строка ограничена titleLength, NUL запрещён; пробелы не нормализуются.
+ * Ошибка имеет код VALIDATION_ERROR; граница чтения преобразует её в CORRUPT_DATA.
+ */
+export function planningTitle(value: unknown, field = "title"): string {
+  return text(value, field, {
+    maxLength: planningLimits.titleLength,
+    required: true,
+    singleLine: true,
+  });
+}
+
+/**
  * Проверяет непустую однострочную ссылку; разрешение ключа или алиаса принадлежит EntityService.
  */
 export function reference(value: unknown, field: string): string {

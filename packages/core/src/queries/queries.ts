@@ -1,8 +1,15 @@
 import { statSync } from "node:fs";
-import { ENTITY_KINDS, type ProjectEntity } from "@relay/contracts";
+import {
+  ENTITY_KINDS,
+  validateEntityReadRequest,
+  type EntityReadOptions,
+  type EntityReadResult,
+  type ProjectEntity,
+} from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityReader } from "../projections/entity-reader";
 import { checkProjectIntegrity } from "./queries-doctor";
+import { readEntitySelection } from "./queries-get";
 import { readProjectOverview } from "./queries-overview";
 import { parseEntitySearch, searchProjectEntities } from "./queries-search";
 import type { ProjectCheck, ProjectOverview, ProjectStatus } from "./queries.types";
@@ -32,6 +39,17 @@ export class QueryService {
    */
   get(ref: string): ProjectEntity {
     return this.db.snapshot(() => new EntityReader(this.db).get(ref));
+  }
+
+  /**
+   * Читает от 1 до 200 адресов в общем снимке с поколением, сохраняя порядок и повторы.
+   * По умолчанию возвращает полные предметные записи; summary выбирает только краткие SQL-поля.
+   * Адресные ошибки остаются элементами результата, инфраструктурные прерывают вызов.
+   * Полный проект не загружается; для документов один раз читается паспорт с каталогом разделов.
+   */
+  getMany(refs: readonly string[], options: EntityReadOptions = {}): EntityReadResult {
+    validateEntityReadRequest(refs, options);
+    return this.db.snapshot(() => readEntitySelection(this.db, refs, options));
   }
 
   /**

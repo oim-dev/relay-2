@@ -7,20 +7,21 @@ import { Invocation } from "./invocation";
 import { registryMessages } from "../locales/registry";
 import { renderResult } from "../output/output";
 import { createHelpRenderer } from "../output/help";
-import type { CommandHelp } from "../output/help.types";
+import type { CommandHelp, HelpRenderer } from "../output/help.types";
 import type { Result } from "../output/output.types";
-import type { Action, RegistryCommand } from "./registry.types";
+import type { Action, CommandOutcome, RegistryCommand } from "./registry.types";
 import type { CliRuntime } from "./runtime.types";
 
 /**
  * Выполняет синхронный сценарий в общей транзакции записи либо согласованном снимке чтения.
- * Локальные действия сами владеют ресурсами; проверка автора предшествует открытию БД.
+ * Локальные действия сами владеют ресурсами; service оставляет транзакцию сервису Core.
+ * Проверка автора предшествует открытию БД в любом режиме записи.
  */
 function runAction(action: Action<Invocation>, invocation: Invocation): Result {
   if (action.mode) {
     void invocation.actor;
   }
-  if (action.local) {
+  if (action.local || action.execution === "service") {
     return action.run(invocation);
   }
   if (action.mode) {
@@ -37,6 +38,8 @@ function runAction(action: Action<Invocation>, invocation: Invocation): Result {
 export class CommandRegistry {
   /* Корневые узлы в порядке регистрации; дерево принадлежит только текущему запуску. */
   readonly commands = new Map<string, RegistryCommand>();
+  /* Исход текущего действия для границы потоков; метаданные не попадают в предметный JSON. */
+  readonly outcome: CommandOutcome = {};
   /* Явное окружение, используемое всеми обработчиками данного дерева. */
   private readonly runtime: CliRuntime;
 
@@ -54,6 +57,23 @@ export class CommandRegistry {
     const node = this.node(path);
     const render = createHelpRenderer(help);
     node.description = help.description;
+    node.rendering = { usage: render };
+    node.run = render;
+  }
+
+  /**
+   * Регистрирует справочный узел без вычисления подробностей до его bare-вызова либо --help.
+   * Фабрика принадлежит команде; общий реестр не читает проект и не запускает её предметный сценарий.
+   * Один renderer обслуживает обе формы, поэтому лист без подкоманд тоже остаётся справкой.
+   */
+  groupLazy(path: string, description: string, factory: () => CommandHelp): void {
+    const node = this.node(path);
+    /**
+     * Формирует только выбранную справку; результат и фабрика не кешируются между вызовами.
+     */
+    const render: HelpRenderer = (context) =>
+      createHelpRenderer(factory(), { entryRow: false })(context);
+    node.description = description;
     node.rendering = { usage: render };
     node.run = render;
   }
@@ -82,14 +102,18 @@ export class CommandRegistry {
          * Читает ввод, выполняет сценарий и форматирует ответ, гарантируя освобождение БД при отказе.
          */
         run: async (context: Readonly<CommandContext>): Promise<string> => {
-          const input = await readInput(context.values, action.fields ?? {}, this.runtime);
+          const input = action.readInput
+            ? await action.readInput(context.values, this.runtime)
+            : await readInput(context.values, action.fields ?? {}, this.runtime);
           const invocation = new Invocation(context, this.runtime, input);
           try {
-            return renderResult(
-              runAction(action, invocation),
-              invocation.text("format") || "text",
-              action.presentation,
-            );
+            const result = runAction(action, invocation);
+            if (result.failure) {
+              this.outcome.failure = result.failure;
+            } else {
+              delete this.outcome.failure;
+            }
+            return renderResult(result, invocation.text("format") || "text", action.presentation);
           } finally {
             invocation.close();
           }
@@ -128,7 +152,11 @@ export function checkPositionals(ctx: Readonly<CommandContext>): void {
   if (ctx.validationError) {
     return;
   }
-  const count = Object.values(ctx.args).filter((schema) => schema.type === "positional").length;
+  const positionals = Object.values(ctx.args).filter((schema) => schema.type === "positional");
+  if (positionals.some((schema) => schema.multiple)) {
+    return;
+  }
+  const count = positionals.length;
   const extra = ctx.positionals[ctx.commandPath.length + count] ?? ctx.rest[0];
   if (extra !== undefined) {
     throw new CliUsageError(

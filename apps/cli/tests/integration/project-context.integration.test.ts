@@ -9,6 +9,8 @@ import { withCliFixture } from "./helpers/cli-fixture";
 import { entityValue, objectValue, stringValue } from "./helpers/responses";
 
 const concurrentReads = [
+  { name: "полное адресное чтение", argv: ["get", "PROJECT"] },
+  { name: "краткое адресное чтение", argv: ["get", "PROJECT", "--summary"] },
   { name: "обзор", argv: ["overview"] },
   { name: "список задач", argv: ["task", "list"] },
   { name: "поиск", argv: ["search", "--q", "Проверка"] },
@@ -137,7 +139,7 @@ describe("Локальный проект CLI", () => {
           }
           writer.close();
         }
-      });
+      }, "get-batch/cli-open-project");
     },
   );
 
@@ -183,10 +185,11 @@ describe("Локальный проект CLI", () => {
         foreign.close();
       }
       const open = ProjectDatabase.open;
+      const close = spyOn(ProjectDatabase.prototype, "close");
       let opens = 0;
       // Перехватывается только путь этой fixture, после выбора проекта и до открытия сценария.
       const interception = spyOn(ProjectDatabase, "open").mockImplementation((path) => {
-        if (path === project.databasePath && ++opens === 2) {
+        if (path === project.databasePath && ++opens === 1) {
           copyFileSync(foreignPath, path);
         }
         return open(path);
@@ -199,8 +202,11 @@ describe("Локальный проект CLI", () => {
 
         expect(error.code).toBe("PROJECT_ID_MISMATCH");
         expect(error.details).toMatchObject({ expected: project.projectId, actual: foreignId });
+        expect(opens).toBe(1);
+        expect(close).toHaveBeenCalledTimes(1);
       } finally {
         interception.mockRestore();
+        close.mockRestore();
       }
       expect(cli.withDatabase(project, (db) => db.get("PROJECT")?.data.name)).toBe("Чужой");
       const stored = cli.withDatabase(project, (db) => ({
@@ -212,7 +218,7 @@ describe("Локальный проект CLI", () => {
         generation: db.getGeneration(),
       }));
       expect(stored).toEqual(original);
-    });
+    }, "get-batch/cli-open-project");
   });
 });
 

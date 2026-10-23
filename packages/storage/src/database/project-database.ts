@@ -9,6 +9,8 @@ import {
   type EntityPage,
   type EntityPageRequest,
 } from "@relay/contracts";
+import { insertBatchReceipt, readBatchReceipt } from "../batch/batch-receipts";
+import type { StoredBatchReceipt } from "../batch/batch-receipt.types";
 import {
   countEntities,
   entityWindow,
@@ -18,11 +20,18 @@ import {
   getEntityIdentities,
   getEntityIdentity,
   getEntityRevision,
+  getEntitySummaries,
   hasEntityArrayItemByField,
   listEntities,
   listEntitiesByField,
+  listEntityIdentitiesByField,
+  resolveEntityReferences,
   taskGraphRecords,
 } from "../entities/entity-queries";
+import type {
+  EntityIdentityWithRevision,
+  EntitySummaryProjection,
+} from "../entities/entity-queries.types";
 import {
   appendComment,
   decodeTaskComment,
@@ -104,6 +113,7 @@ export class ProjectDatabase {
 
   /**
    * Открывает существующую совместимую базу, проверяя приложение, версию и корневую сущность.
+   * Техническая схема v1 атомарно обновляется до v2 с сохранением предметных данных и поколения.
    * Не создаёт отсутствующий файл; при отказе освобождает временно открытое соединение.
    */
   static open(path: string): ProjectDatabase {
@@ -255,6 +265,24 @@ export class ProjectDatabase {
   }
 
   /**
+   * Разрешает обычные ID, ключи и алиасы одним запросом без содержания и журналов.
+   * Каждому входу соответствует идентичность либо null; порядок и повторы сохраняются.
+   * Типизированные и виртуальные адреса разрешает Core; общий снимок удерживает вызывающий.
+   */
+  resolveMany(refs: readonly string[]): (EntityIdentity | null)[] {
+    return this.withOpenConnection(() => resolveEntityReferences(this.connection, refs));
+  }
+
+  /**
+   * Читает краткие сырые проекции постоянных ID без полных текстов, составов и журналов.
+   * null явно обозначает отсутствующий ID; порядок и повторы входа сохраняются.
+   * Предметные поля проверяет Core, согласованность с адресацией удерживает внешний snapshot.
+   */
+  getManySummaries(ids: readonly string[]): (EntitySummaryProjection | null)[] {
+    return this.withOpenConnection(() => getEntitySummaries(this.connection, ids));
+  }
+
+  /**
    * Ищет точные строковые slug/prefix внутри вида, без выдачи содержания, в порядке ID.
    * Приоритет адресов, допустимые виды виртуальных ссылок и неоднозначность проверяет Core.
    */
@@ -277,6 +305,21 @@ export class ProjectDatabase {
    */
   listByField(kind: EntityKind, field: string, value: string): EntityRecord[] {
     return this.withOpenConnection(() => listEntitiesByField(this.connection, kind, field, value));
+  }
+
+  /**
+   * Читает только ID, вид, ключ и ревизию записей с точным строковым полем верхнего уровня JSON.
+   * Имя поля буквальное, порядок — по ключу и ID; отсутствие совпадений возвращает пустой массив.
+   * JSON-содержание и журналы не передаются из SQLite. Общий снимок нескольких чтений задаёт вызывающий.
+   */
+  listIdentitiesByField(
+    kind: EntityKind,
+    field: string,
+    value: string,
+  ): EntityIdentityWithRevision[] {
+    return this.withOpenConnection(() =>
+      listEntityIdentitiesByField(this.connection, kind, field, value),
+    );
   }
 
   /**
@@ -439,5 +482,20 @@ export class ProjectDatabase {
       }
       return state.generation;
     });
+  }
+
+  /**
+   * Возвращает первоначальную квитанцию либо undefined; текущие сущности не читаются.
+   */
+  getBatchReceipt(operationKey: string): StoredBatchReceipt | undefined {
+    return this.withOpenConnection(() => readBatchReceipt(this.connection, operationKey));
+  }
+
+  /**
+   * Атомарно добавляет неизменяемую квитанцию; внешняя транзакция объединяет её с предметными записями.
+   * Повтор ключа даёт CONFLICT; поколение данных не меняется.
+   */
+  insertBatchReceipt(receipt: StoredBatchReceipt): void {
+    this.transaction(() => insertBatchReceipt(this.connection, receipt));
   }
 }

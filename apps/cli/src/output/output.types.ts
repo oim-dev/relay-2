@@ -1,11 +1,17 @@
 import type { EntityKind } from "@relay/contracts";
 import type { Page } from "../pagination/pagination.types";
+import type { CliFailure } from "../errors/errors.types";
 
 /**
  * Явный текстовый макет команды; хранится в регистрации и не входит в JSON-ответ.
  */
 export type TextPresentation =
-  "configuration" | "task-comments" | "session-tree" | "overview" | "workspace-projects";
+  | "configuration"
+  | "task-comments"
+  | "session-tree"
+  | "overview"
+  | "workspace-projects"
+  | "entity-read";
 
 /**
  * Дополнительные сведения результата; page присутствует только у списочного ответа.
@@ -23,6 +29,8 @@ export interface Result {
   readonly data: unknown;
   /* Дополнительные сведения, не подменяющие предметные данные. */
   readonly meta?: ResultMetadata;
+  /* Первая ошибка частичного ответа; управляет ok, диагностикой и exit code отдельно от data. */
+  readonly failure?: CliFailure;
 }
 
 /**

@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { KnowledgeService } from "@relay/core";
 import { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
-import { entityValue } from "./helpers/responses";
+import { entityValue, readEntitiesValue } from "./helpers/responses";
 
 const singletonKinds = [
   { name: "паспорт проекта", kind: "project" },
@@ -37,8 +37,10 @@ describe("Однократное чтение знаний в адаптере C
           read.mockRestore();
         }
         expect((await cli.entity([kind, "get"])).key).toBe("PASSPORT-RENAMED");
-        expect((await cli.entity(["inspect", "get", initial.key])).id).toBe(initial.id);
-      });
+        const resolved = readEntitiesValue((await cli.success(["get", initial.key])).data);
+        expect(resolved).toHaveLength(1);
+        expect(resolved[0]?.id).toBe(initial.id);
+      }, "get-batch");
     },
   );
 

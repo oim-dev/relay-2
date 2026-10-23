@@ -26,7 +26,7 @@ describe("Инициализация и выбор локального прое
   let fixture: RuntimeFixture;
 
   beforeEach(() => {
-    fixture = new RuntimeFixture();
+    fixture = new RuntimeFixture("get-batch/cli-open-project");
   });
 
   afterEach(async () => {

@@ -16,6 +16,7 @@ import {
   TASK_CRITERION_TEXT_RULES,
   TASK_FILTER_VALUES,
   TASK_LIMITS,
+  TASK_TITLE_TEXT_RULES,
 } from "./task-constants";
 import type {
   CreateTaskInput,
@@ -201,7 +202,12 @@ export function parseCreateTask(input: unknown): CreateTaskInput {
   );
   return {
     board: reference(value.board ?? "BOARD-PRODUCT", taskLabels.board),
-    title: text(value.title ?? "", taskLabels.title, TASK_LIMITS.title, { singleLine: true }),
+    title: text(
+      value.title ?? "",
+      taskLabels.title,
+      TASK_TITLE_TEXT_RULES.maximum,
+      TASK_TITLE_TEXT_RULES,
+    ),
     description: text(value.description ?? "", taskLabels.description, TASK_LIMITS.description),
     column: column(value.column ?? "inbox"),
     parent:
@@ -231,7 +237,7 @@ export function parseUpdateTask(input: unknown): UpdateTaskInput {
     title:
       value.title === undefined
         ? undefined
-        : text(value.title, taskLabels.title, TASK_LIMITS.title, { singleLine: true }),
+        : text(value.title, taskLabels.title, TASK_TITLE_TEXT_RULES.maximum, TASK_TITLE_TEXT_RULES),
     description:
       value.description === undefined
         ? undefined

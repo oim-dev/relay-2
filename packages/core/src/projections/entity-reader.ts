@@ -9,7 +9,7 @@ import { EntityService } from "../entities/entities";
 import { entityMessages } from "../entities/entity.messages";
 import {
   indexDocumentSections,
-  validateDocumentSection,
+  projectDocumentSection,
   type DocumentSectionIndex,
 } from "../knowledge/document-sections";
 import { decodeHistoryCheckpoint, decodeHistorySession } from "../history/history-data";
@@ -76,7 +76,7 @@ export class EntityReader {
    * Декодирует сохранённую запись по виду, не исправляя её и не выполняя запись в БД.
    * Проверенный переданный проект переиспользуется; остальные проекты проверяются независимо.
    * Все документы reader используют единственный лениво построенный индекс разделов проекта.
-   * Неизвестный раздел отклоняется, ссылка на легально удалённый раздел остаётся допустимой.
+   * Неизвестный раздел отклоняется; легально удалённый проецируется в null без изменения записи.
    */
   decode(record: Readonly<EntityRecord>): ProjectEntity {
     switch (record.kind) {
@@ -94,8 +94,7 @@ export class EntityReader {
       case "document": {
         const document = decodeKnowledge(record, "document");
         this.sections ??= indexDocumentSections(this.project());
-        validateDocumentSection(document, this.sections);
-        return document;
+        return projectDocumentSection(document, this.sections);
       }
       default:
         return decodeKnowledge(record, record.kind);

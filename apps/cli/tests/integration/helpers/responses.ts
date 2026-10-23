@@ -62,6 +62,21 @@ export function entityValue(value: unknown): EntityRecord {
 }
 
 /**
+ * Читает полный успешный набор get, проверяя список и исходный адрес даже при одном элементе.
+ */
+export function readEntitiesValue(value: unknown): EntityRecord[] {
+  const result = objectValue(value);
+  assert.equal(result.view, "full");
+  numberValue(result.generation);
+  return arrayValue(result.items).map((value) => {
+    const item = objectValue(value);
+    assert.equal(item.ok, true);
+    stringValue(item.ref);
+    return entityValue(item.entity);
+  });
+}
+
+/**
  * Проверяет успешный конверт, обязательное data и форму необязательных метаданных.
  */
 export function successValue(value: unknown): SuccessResponse {

@@ -20,6 +20,7 @@ import {
 } from "@relay/contracts";
 import type { HistoryTextOptions } from "./history-input.types";
 import { historyDataMessages } from "./history-messages";
+import { HISTORY_TITLE_RULES, historyTextViolation } from "./history-text";
 
 /**
  * Проверяет форму записи и внутреннюю согласованность участия, не разрешая ссылки в БД.
@@ -69,11 +70,7 @@ class HistoryDecoder {
    * Проверяет непустой текст и формат строки без нормализации сохранённого содержания.
    */
   text(value: unknown, field: string, options: HistoryTextOptions = {}): string {
-    if (
-      typeof value !== "string" ||
-      !value.trim() ||
-      (options.singleLine && /[\r\n]/u.test(value))
-    ) {
+    if (typeof value !== "string" || historyTextViolation(value, options) !== undefined) {
       this.corrupt(field);
     }
     return value;
@@ -227,7 +224,7 @@ class HistoryDecoder {
   sessionData(): HistorySessionData {
     const input = this.object(this.record.data, "data");
     const data: HistorySessionData = {
-      title: this.text(input.title, "title", { singleLine: true }),
+      title: this.text(input.title, "title", HISTORY_TITLE_RULES),
       description: this.nullableText(input.description, "description"),
       status: this.enumeration(input.status, historySessionStatuses, "status"),
       currentRunId: this.nullableText(input.currentRunId, "currentRunId", { singleLine: true }),
@@ -323,7 +320,7 @@ class HistoryDecoder {
       intentId: this.nullableText(input.intentId, "intentId", { singleLine: true }),
       sequence: this.positiveInteger(input.sequence, "sequence"),
       sessionRevision: this.positiveInteger(input.sessionRevision, "sessionRevision"),
-      title: this.text(input.title, "title", { singleLine: true }),
+      title: this.text(input.title, "title", HISTORY_TITLE_RULES),
       body: this.text(input.body, "body"),
       summary: this.nullableText(input.summary, "summary"),
       done: this.nullableText(input.done, "done"),

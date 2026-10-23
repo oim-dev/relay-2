@@ -25,6 +25,7 @@ import {
   object,
   participants,
   plannedFor,
+  planningTitle,
   reference,
   references,
   scope,
@@ -53,11 +54,7 @@ export function parsePlanFields(input: unknown): Partial<WorkPlanFields> {
   const fields = object(input, planFields);
   const result: Partial<WorkPlanFields> = {};
   if (Object.hasOwn(fields, "title")) {
-    result.title = text(fields.title, "title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    });
+    result.title = planningTitle(fields.title);
   }
   for (const field of ["summary", "goal", "rationale", "boundaries", "expectedResult"] as const) {
     if (Object.hasOwn(fields, field)) {
@@ -82,11 +79,7 @@ export function parseReleaseFields(input: unknown): Partial<ReleaseFields> {
   const fields = object(input, releaseFields);
   const result: Partial<ReleaseFields> = {};
   if (Object.hasOwn(fields, "title")) {
-    result.title = text(fields.title, "title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    });
+    result.title = planningTitle(fields.title);
   }
   if (Object.hasOwn(fields, "version")) {
     result.version = text(fields.version, "version", {
@@ -121,11 +114,7 @@ export function parseReleaseFields(input: unknown): Partial<ReleaseFields> {
 function parseStageFields(fields: Readonly<Record<string, unknown>>): Partial<StageFields> {
   const result: Partial<StageFields> = {};
   if (Object.hasOwn(fields, "title")) {
-    result.title = text(fields.title, "title", {
-      maxLength: planningLimits.titleLength,
-      required: true,
-      singleLine: true,
-    });
+    result.title = planningTitle(fields.title);
   }
   if (Object.hasOwn(fields, "summary")) {
     result.summary = text(fields.summary, "summary", { maxLength: planningLimits.summaryLength });

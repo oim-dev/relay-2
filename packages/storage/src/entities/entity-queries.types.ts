@@ -1,4 +1,50 @@
-import type { EntityKind, EntityRecord } from "@relay/contracts";
+import type { EntityIdentity, EntityKind, EntityRecord } from "@relay/contracts";
+
+/**
+ * Совпадение обычного адреса из entity_refs без содержания сущности.
+ */
+export interface EntityReferenceIdentity extends EntityIdentity {
+  /* Исходный ID, ключ или алиас, совпавший с записью entity_refs. */
+  readonly ref: string;
+}
+
+/**
+ * Идентичность и ревизия содержания для сравнения адресно выбранных составов без полных карточек.
+ * Все значения принадлежат столбцам entities; содержание JSON и журнал комментариев не выбираются.
+ */
+export interface EntityIdentityWithRevision extends Readonly<EntityIdentity> {
+  /* Положительная ревизия содержания; независимые комментарии задачи её не меняют. */
+  readonly revision: number;
+}
+
+/**
+ * Узкая сырая проекция краткой карточки; предметную форму значений проверяет Core.
+ * undefined означает отсутствующее JSON-поле, null сохраняет явный JSON null.
+ */
+export interface EntitySummaryProjection extends Readonly<EntityIdentity> {
+  /* Положительная ревизия содержания, ограниченная схемой SQLite. */
+  readonly revision: number;
+  /* Только сохранённое name/title; отсутствие имени у seed-продукта допустимо. */
+  readonly title: unknown;
+  /* Только column/documentStatus/status применимого вида; иначе undefined. */
+  readonly state: unknown;
+  /* Только active реализации; иначе undefined. */
+  readonly active: unknown;
+}
+
+/**
+ * SQL-строка краткой проекции: JSON сохраняет тип каждого отдельного поля.
+ */
+export interface EntitySummaryRow extends Readonly<EntityIdentity> {
+  /* Ревизия содержания из entities. */
+  readonly revision: number;
+  /* JSON выбранного name/title; SQL null означает отсутствие поля. */
+  readonly title: string | null;
+  /* JSON сохранённого состояния применимого вида; SQL null означает отсутствие поля. */
+  readonly state: string | null;
+  /* JSON активности реализации, позволяющий отличить boolean от числа; иначе SQL null. */
+  readonly active: string | null;
+}
 
 /**
  * Минимальная проекция существующей сущности для проверки CAS по постоянному ID.
