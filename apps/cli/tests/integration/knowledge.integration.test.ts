@@ -52,6 +52,38 @@ describe("Знания через CLI", () => {
     },
   );
 
+  test("цифровое начало slug с явным prefix создаёт приложение и связанную доску", async () => {
+    await withCliFixture(async (cli) => {
+      const project = cli.createProject();
+
+      const application = await cli.entity([
+        "application",
+        "create",
+        "--name",
+        "Двухфакторная аутентификация",
+        "--slug",
+        "2fa",
+        "--prefix",
+        "MFA",
+        "--type",
+        "backend",
+      ]);
+
+      expect(application.data).toMatchObject({ slug: "2fa", prefix: "MFA", type: "backend" });
+      cli.withDatabase(project, (db) => {
+        const knowledge = new KnowledgeService(db);
+        const board = knowledge.get("board", "2fa");
+        expect(application.data.boardId).toBe(board.id);
+        expect(board.data).toMatchObject({
+          name: "Двухфакторная аутентификация",
+          slug: "2fa",
+          prefix: "MFA",
+          applicationId: application.id,
+        });
+      });
+    });
+  });
+
   test("переименование фичи сохраняет ID, старый алиас и полное Markdown-содержание", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();

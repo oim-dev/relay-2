@@ -12,7 +12,11 @@ import type { InputFields } from "./arguments.types";
  * Описывает строковый параметр; обязательность проверяет Gunshi до выполнения команды.
  */
 export function string(description: string, required = false): ArgSchema {
-  return { type: "string", description, required };
+  return {
+    type: "string",
+    description: required ? argumentMessages.required(description) : description,
+    required,
+  };
 }
 
 /**
@@ -90,12 +94,12 @@ export const pageArgs: Args = {
 export const refArgs: Args = { ref: positional(argumentMessages.reference) };
 
 /**
- * Создаёт пары inline- и файловых источников; их совместимость проверяется до чтения stdin.
+ * Создаёт пары источников с предметным описанием каждого текста; совместимость проверяется до stdin.
  */
-export function textArgs(...names: string[]): Args {
+export function textArgs(fields: Readonly<Record<string, string>>): Args {
   return Object.fromEntries(
-    names.flatMap((name) => [
-      [name, string(argumentMessages.text(name))],
+    Object.entries(fields).flatMap(([name, description]) => [
+      [name, string(description)],
       [`${name}-file`, string(argumentMessages.textFile(name))],
     ]),
   );

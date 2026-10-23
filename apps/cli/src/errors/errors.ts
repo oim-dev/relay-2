@@ -34,7 +34,11 @@ export class CliUsageError extends RelayError {
  */
 export function describeCliFailure(error: unknown, inputFailure?: ValidationFailure): CliFailure {
   const validationFailed = inputFailure !== undefined && error === inputFailure.error;
-  const invalidInput = error instanceof CliUsageError || validationFailed;
+  const invalidInput =
+    error instanceof CliUsageError ||
+    validationFailed ||
+    (error instanceof RelayError &&
+      ["INVALID_ARGUMENT", "INVALID_INPUT", "VALIDATION_ERROR"].includes(error.code));
   let message: string = errorMessages.unknown;
   if (validationFailed) {
     message = inputFailure.message;

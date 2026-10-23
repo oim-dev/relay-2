@@ -22,24 +22,32 @@ import {
   textArgs,
 } from "../../input/arguments";
 import { onlyFields } from "../../input/input";
+import type { InputFields } from "../../input/arguments.types";
 import { CliUsageError } from "../../errors/errors";
 import { knowledgeCommandMessages as messages } from "../../locales/commands/knowledge";
 import { result } from "../../output/output";
 import type { Result } from "../../output/output.types";
 import type { CommandRegistry } from "../../execution/registry";
 
-const common: Args = { name: string(messages.fields.name), ...textArgs("summary", "description") };
+const common: Args = {
+  name: string(messages.fields.name),
+  ...textArgs({ summary: messages.fields.summary }),
+};
 const fields: Record<KnowledgeKind, Args> = {
-  project: { ...textArgs("name"), slug: string(messages.fields.projectSlug) },
-  product: common,
-  feature: common,
+  project: {
+    ...textArgs({ name: messages.fields.projectName }),
+    slug: string(messages.fields.projectSlug),
+  },
+  product: { ...common, ...textArgs({ description: messages.fields.productDescription }) },
+  feature: { ...common, ...textArgs({ description: messages.fields.featureDescription }) },
   scenario: {
-    name: string(messages.fields.name),
+    ...common,
     feature: string(messages.fields.feature),
-    ...textArgs("summary", "description"),
+    ...textArgs({ description: messages.fields.scenarioDescription }),
   },
   application: {
     ...common,
+    ...textArgs({ description: messages.fields.applicationDescription }),
     slug: string(messages.fields.applicationSlug),
     prefix: string(messages.fields.boardPrefix),
     type: choice(messages.fields.applicationType, [...APPLICATION_TYPES]),
@@ -49,11 +57,11 @@ const fields: Record<KnowledgeKind, Args> = {
     application: string(messages.fields.application),
     target: string(messages.fields.requirementTarget),
     status: choice(messages.fields.implementationStatus, [...IMPLEMENTATION_STATUSES]),
-    ...textArgs("description"),
+    ...textArgs({ description: messages.fields.implementationDescription }),
   },
   document: {
     name: string(messages.fields.name),
-    ...textArgs("summary", "body"),
+    ...textArgs({ summary: messages.fields.summary, body: messages.fields.documentBody }),
     "document-kind": choice(messages.fields.documentKind, [...DOCUMENT_KINDS]),
     "document-status": choice(messages.fields.documentStatus, [...DOCUMENT_STATUSES]),
     "section-id": string(messages.fields.sectionId),
@@ -86,11 +94,16 @@ function knowledgeListFields(kind: KnowledgeKind): Args {
   return {
     q: string(messages.fields.query),
     ...(kind === "scenario" ? { feature: string(messages.fields.feature) } : {}),
+    ...(kind === "application"
+      ? { type: choice(messages.fields.applicationTypeFilter, [...APPLICATION_TYPES]) }
+      : {}),
+    ...(kind === "board" ? { application: string(messages.fields.applicationFilter) } : {}),
     ...(kind === "implementation"
       ? {
           status: string(messages.fields.status),
           application: string(messages.fields.application),
-          target: string(messages.fields.target),
+          feature: string(messages.fields.implementationFeatureFilter),
+          target: string(messages.fields.implementationTargetFilter),
           active: flag(messages.fields.active),
         }
       : {}),
@@ -99,11 +112,28 @@ function knowledgeListFields(kind: KnowledgeKind): Args {
           status: string(messages.fields.status),
           target: string(messages.fields.target),
           "section-id": string(messages.fields.section),
+          "without-section": flag(messages.fields.withoutSection),
           "document-kind": string(messages.fields.documentKind),
           pinned: flag(messages.fields.pinnedFilter),
         }
       : {}),
   };
+}
+
+/**
+ * Преобразует --without-section в явный null раздела, не изменяя исходный ввод.
+ * Значение false отключает этот флаг; true несовместим с любым переданным --section-id.
+ * Ссылки, значения и пересечение предметных ограничений проверяет Core.
+ */
+function readKnowledgeListFilters(input: Readonly<InputFields>): InputFields {
+  const { withoutSection, ...filters } = input;
+  if (withoutSection === true) {
+    if (Object.hasOwn(filters, "sectionId")) {
+      throw new CliUsageError(messages.conflictingSectionFilters, "CONFLICTING_OPTIONS");
+    }
+    return { ...filters, sectionId: null };
+  }
+  return filters;
 }
 
 /**
@@ -122,7 +152,7 @@ function readKnowledgeSort(value: string): EntityPageRequest["sort"] {
  */
 function documentSectionFields(action: "create" | "update" | "move" | "remove"): Args {
   if (action === "create" || action === "update") {
-    return inputArgs(textArgs("name"));
+    return inputArgs(textArgs({ name: messages.fields.sectionName }));
   }
   if (action === "move") {
     return {
@@ -159,7 +189,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     );
     registry.group(kind, messages.groups[kind]);
     registry.add(`${kind} get`, {
-      description: messages.get[kind],
+      ...messages.get(kind),
       args: singleton ? {} : refArgs,
       /**
        * Возвращает полную запись; для единственного паспорта Core выбирает ссылку сам.
@@ -168,7 +198,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     });
     if (!singleton) {
       registry.add(`${kind} list`, {
-        description: messages.list[kind],
+        ...messages.list(kind),
         args: { ...pageArgs, sort: choice(messages.fields.sort, [...listSorts], "key") },
         fields: knowledgeListFields(kind),
         /**
@@ -176,13 +206,14 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
          */
         run: (i): Result => {
           const sort = readKnowledgeSort(i.text("sort"));
-          return i.page((window) => i.knowledge.listPage(kind, i.input, { ...window, sort }));
+          const filters = readKnowledgeListFilters(i.input);
+          return i.page((window) => i.knowledge.listPage(kind, filters, { ...window, sort }));
         },
       });
     }
     if (kind !== "project" && kind !== "board") {
       registry.add(`${kind} create`, {
-        description: messages.create[kind],
+        ...messages.create[kind],
         mode: "create",
         fields: inputArgs(fields[kind], createInputAliases[kind] ?? []),
         /**
@@ -193,7 +224,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     }
     if (kind !== "board") {
       registry.add(`${kind} update`, {
-        description: messages.update[kind],
+        ...messages.update[kind],
         mode: "update",
         args: singleton ? {} : refArgs,
         fields: inputArgs(updateFields),
@@ -205,7 +236,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
       });
     }
     registry.add(`${kind} rename`, {
-      description: messages.rename,
+      ...messages.rename(kind),
       mode: "update",
       args: { ...(singleton ? {} : refArgs), key: positional(messages.fields.key) },
       /**
@@ -214,19 +245,14 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
        */
       run: (i): Result =>
         result(
-          i.knowledge.rename(
-            kind,
-            singleton ? i.knowledge.get(kind).id : i.text("ref"),
-            i.text("key"),
-            i.write,
-          ),
+          i.knowledge.rename(kind, singleton ? undefined : i.text("ref"), i.text("key"), i.write),
         ),
     });
   }
 
   registry.group("document section", messages.section);
   registry.add("document section list", {
-    description: messages.sectionList,
+    ...messages.sectionList,
     args: pageArgs,
     /**
      * Возвращает страницу полного списка разделов с ревизией проекта из снимка команды.
@@ -238,7 +264,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
   });
   for (const action of ["create", "update", "move", "remove"] as const) {
     registry.add(`document section ${action}`, {
-      description: messages.sectionActions[action],
+      ...messages.sectionActions[action],
       mode: "update",
       args: { id: positional(messages.fields.sectionId) },
       fields: documentSectionFields(action),
@@ -256,14 +282,14 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
   }
   for (const remove of [false, true]) {
     registry.add(`document ${remove ? "unlink" : "link"}`, {
-      description: remove ? messages.unlink : messages.link,
+      ...(remove ? messages.unlink : messages.link),
       mode: "update",
       args: {
         ...refArgs,
         target: string(messages.fields.relationTarget, true),
         relation: choice(messages.fields.relationType, [...DOCUMENT_RELATION_TYPES], "documents"),
       },
-      fields: remove ? {} : textArgs("description"),
+      fields: remove ? {} : textArgs({ description: messages.fields.relationDescription }),
       /**
        * Возвращает документ после изменения связи под его исходной ревизией.
        * Core разрешает цель, проверяет её допустимость и обрабатывает no-op атомарно.
@@ -282,7 +308,7 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
     });
   }
   registry.add("document links", {
-    description: messages.links,
+    ...messages.links,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу полного набора связей и ревизию документа из одного снимка.
@@ -294,25 +320,19 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
   });
   registry.group("application participation", messages.participation);
   registry.add("application participation list", {
-    description: messages.participationList,
+    ...messages.participationList,
     args: { ...refArgs, ...pageArgs },
     /**
-     * Возвращает страницу активного участия и ревизию приложения из снимка команды.
-     * Core фильтрует реализации; весь состав загружается до пагинации.
+     * Возвращает страницу участия и ревизию из одного составного чтения Core без повторного get.
+     * История только выбранного приложения фильтруется в Core; активный состав читается до окна.
      */
     run: (i): Result => {
-      const application = i.knowledge.get("application", i.text("ref"));
-      return i.page(
-        i.knowledge.list("implementation", { application: application.id, active: true }),
-        {
-          application: application.key,
-          revision: application.revision,
-        },
-      );
+      const { items, ...owner } = i.knowledge.participation(i.text("ref"));
+      return i.page(items, owner);
     },
   });
   registry.add("application participation replace", {
-    description: messages.participationReplace,
+    ...messages.participationReplace,
     mode: "update",
     args: refArgs,
     fields: inputArgs({ targets: repeated(messages.fields.requirementTarget) }),

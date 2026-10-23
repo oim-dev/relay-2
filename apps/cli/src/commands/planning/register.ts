@@ -45,7 +45,11 @@ function planStageFields(action: StageChange["action"]): Args {
   if (action === "create" || action === "update") {
     return inputArgs({
       title: string(messages.fields.title),
-      ...textArgs("summary", "outcome", "completion-conditions"),
+      ...textArgs({
+        summary: messages.fields.summary,
+        outcome: messages.fields.outcome,
+        "completion-conditions": messages.fields.completionConditions,
+      }),
       ...(action === "create" ? { before: string(messages.fields.insertBefore) } : {}),
     });
   }
@@ -65,9 +69,10 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     ["plan", "work-plan"],
     ["release", "release"],
   ] as const) {
-    registry.group(command, command === "plan" ? messages.plan : messages.release);
+    const help = messages.entities[command];
+    registry.group(command, help.group);
     registry.add(`${command} list`, {
-      description: command === "plan" ? messages.planList : messages.releaseList,
+      ...help.list,
       args: pageArgs,
       fields: { q: string(messages.fields.query), status: string(messages.fields.status) },
       /**
@@ -77,7 +82,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
         i.page((window) => i.planning.listPage(kind, i.input, { ...window, sort: "key" })),
     });
     registry.add(`${command} get`, {
-      description: messages.get,
+      ...help.get,
       args: refArgs,
       /**
        * Возвращает полную запись планирования по ссылке, разрешённой Core.
@@ -87,15 +92,20 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     const fields = inputArgs(
       {
         title: string(messages.fields.title),
-        ...textArgs("summary"),
+        ...textArgs({ summary: messages.fields.summary }),
         ...(kind === "work-plan"
           ? {
-              ...textArgs("goal", "rationale", "boundaries", "expected-result"),
+              ...textArgs({
+                goal: messages.fields.goal,
+                rationale: messages.fields.rationale,
+                boundaries: messages.fields.boundaries,
+                "expected-result": messages.fields.expectedResult,
+              }),
               scope: repeated(messages.fields.scope),
               participants: repeated(messages.fields.participant),
             }
           : {
-              ...textArgs("description"),
+              ...textArgs({ description: messages.fields.releaseDescription }),
               plans: repeated(messages.fields.releasePlan),
               "release-version": string(messages.fields.releaseVersion),
               "planned-for": string(messages.fields.plannedFor),
@@ -104,7 +114,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       kind === "release" ? ["planIds", "version"] : [],
     );
     registry.add(`${command} create`, {
-      description: messages.create,
+      ...help.create,
       mode: "create",
       fields,
       /**
@@ -113,7 +123,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       run: (i): Result => result(i.planning.create(kind, planningInput(i), i.actor)),
     });
     registry.add(`${command} update`, {
-      description: messages.update,
+      ...help.update,
       mode: "update",
       args: refArgs,
       fields,
@@ -123,21 +133,34 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       run: (i): Result => result(i.planning.update(kind, i.text("ref"), planningInput(i), i.write)),
     });
     registry.add(`${command} progress`, {
-      description: messages.progress,
+      ...help.progress,
       args: refArgs,
       /**
        * Возвращает готовность полного состава, рассчитанную Core в снимке команды.
        */
       run: (i): Result => result(i.planning.progress(kind, i.text("ref"))),
     });
-    for (const action of kind === "work-plan"
-      ? (["start", "complete", "cancel"] as const)
-      : (["plan", "publish", "cancel"] as const)) {
+    const transitions =
+      kind === "work-plan"
+        ? ([
+            ["start", messages.entities.plan.transitions.start],
+            ["complete", messages.entities.plan.transitions.complete],
+            ["cancel", messages.entities.plan.transitions.cancel],
+          ] as const)
+        : ([
+            ["plan", messages.entities.release.transitions.plan],
+            ["publish", messages.entities.release.transitions.publish],
+            ["cancel", messages.entities.release.transitions.cancel],
+          ] as const);
+    for (const [action, transitionHelp] of transitions) {
       registry.add(`${command} ${action}`, {
-        description: messages.transitions[action],
+        ...transitionHelp,
         mode: "update",
         args: refArgs,
-        fields: kind === "work-plan" && action !== "start" ? inputArgs(textArgs("result")) : {},
+        fields:
+          kind === "work-plan" && action !== "start"
+            ? inputArgs(textArgs({ result: messages.fields.result }))
+            : {},
         /**
          * Возвращает запись после перехода; Core атомарно проверяет её ревизию и готовность.
          * Возможность no-op определяется предметным переходом, а не обработчиком CLI.
@@ -149,7 +172,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
   }
   registry.group("plan stage", messages.stage);
   registry.add("plan stage list", {
-    description: messages.stageList,
+    ...messages.stageList,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу полного списка этапов с ревизией плана из одного снимка.
@@ -160,7 +183,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     },
   });
   registry.add("plan stage get", {
-    description: messages.stageGet,
+    ...messages.stageGet,
     args: { ...refArgs, stage: positional(messages.fields.stageId) },
     /**
      * Возвращает этап с ревизией содержащего его плана из снимка команды.
@@ -169,7 +192,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
   });
   for (const action of ["create", "update", "move", "remove"] as const) {
     registry.add(`plan stage ${action}`, {
-      description: messages.stageActions[action],
+      ...messages.stageActions[action],
       mode: "update",
       args: {
         ...refArgs,
@@ -197,19 +220,24 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
   }
   registry.group("plan stage task", messages.stageTask);
   registry.add("plan stage task list", {
-    description: messages.stageTaskList,
+    ...messages.stageTaskList,
     args: { ...refArgs, stage: positional(messages.fields.stageId), ...pageArgs },
     /**
-     * Возвращает страницу задач этапа и ревизию плана; полный состав читается в одном снимке.
+     * После проверки курсора читает только карточки окна задач и ревизию плана в одном снимке.
      */
-    run: (i): Result => {
-      const { items, ...owner } = i.planning.stageTasks(i.text("ref"), i.text("stage"));
-      return i.page(items, owner);
-    },
+    run: (i): Result =>
+      i.page((window) => {
+        const { items, total, ...owner } = i.planning.stageTasksPage(
+          i.text("ref"),
+          i.text("stage"),
+          window,
+        );
+        return { items, total, owner };
+      }),
   });
   for (const remove of [false, true]) {
     registry.add(`plan stage task ${remove ? "remove" : "add"}`, {
-      description: remove ? messages.stageTaskRemove : messages.stageTaskAdd,
+      ...(remove ? messages.stageTaskRemove : messages.stageTaskAdd),
       mode: "update",
       args: {
         ...refArgs,
@@ -227,7 +255,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     });
   }
   registry.add("plan stage task transfer", {
-    description: messages.stageTaskTransfer,
+    ...messages.stageTaskTransfer,
     mode: "update",
     args: {
       ...refArgs,
@@ -236,7 +264,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       "target-plan": string(messages.fields.targetPlan, true),
       "target-revision": { ...integer(messages.fields.targetRevision, 1), required: true },
     },
-    fields: textArgs("reason"),
+    fields: textArgs({ reason: messages.fields.reason }),
     /**
      * Возвращает исходный и целевой планы после атомарного переноса включения задачи.
      * Обе переданные ревизии проверяются Core, в том числе для одного плана и no-op.
@@ -257,7 +285,7 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
   });
   registry.group("plan task", messages.task);
   registry.add("plan task memberships", {
-    description: messages.memberships,
+    ...messages.memberships,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу полного набора включений задачи, рассчитанного Core в одном снимке.
@@ -268,14 +296,15 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
     },
   });
   registry.add("release plans", {
-    description: messages.releasePlans,
+    ...messages.releasePlans,
     args: { ...refArgs, ...pageArgs },
     /**
-     * Возвращает страницу полного состава релиза с метаданными владельца из снимка команды.
+     * После проверки курсора читает только карточки окна планов и ревизию релиза в одном снимке.
      */
-    run: (i): Result => {
-      const { items, ...owner } = i.planning.releasePlans(i.text("ref"));
-      return i.page(items, owner);
-    },
+    run: (i): Result =>
+      i.page((window) => {
+        const { items, total, ...owner } = i.planning.releasePlansPage(i.text("ref"), window);
+        return { items, total, owner };
+      }),
   });
 }

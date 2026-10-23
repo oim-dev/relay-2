@@ -9,15 +9,20 @@ import type {
   PlanStages,
   PlanStageResult,
   PlanStageTasks,
+  PlanStageTasksPage,
   TaskPlanMemberships,
   ReleasePlans,
+  ReleasePlansPage,
+  PlanningCompositionPageRequest,
   EntityPage,
   EntityPageRequest,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { TasksService } from "../tasks/tasks";
+import { taskRecord } from "../tasks/task-data";
 import { decodePlanning, decodePlan, decodeRelease } from "./planning-data";
+import { readCompositionWindow } from "./planning-composition";
 import { requireStage } from "./planning-rules";
 import { parsePlanningFilter, planningKind } from "./planning-input";
 import { reference } from "./planning-validation";
@@ -213,6 +218,25 @@ export class PlanningQueries {
   }
 
   /**
+   * Читает задачи только выбранного окна в порядке включения вместе с total и ревизией плана.
+   * Владелец, все идентичности состава и карточки окна принадлежат одному снимку.
+   * Отсутствующая ссылка или чужой вид дают NOT_FOUND даже вне окна; повреждение
+   * содержания владельца или карточки окна — CORRUPT_DATA. Границы проверяются до чтений.
+   */
+  stageTasksPage(
+    ref: string,
+    stageId: string,
+    request: Readonly<PlanningCompositionPageRequest>,
+  ): PlanStageTasksPage {
+    validateEntityPageRequest({ ...request, sort: "key" });
+    return this.db.snapshot(() => {
+      const { plan, revision, stage } = this.getStage(ref, stageId);
+      const items = readCompositionWindow(this.db, stage.taskIds, "task", request).map(taskRecord);
+      return { plan, revision, items, total: stage.taskIds.length };
+    });
+  }
+
+  /**
    * Возвращает текущие и исторические включения задачи с ревизией каждого плана.
    * Для отбора загружает все планы проекта в общем снимке; пустой список означает отсутствие включений.
    */
@@ -239,6 +263,31 @@ export class PlanningQueries {
         release: release.key,
         revision: release.revision,
         items: release.data.planIds.map((id) => this.get("work-plan", id)),
+      };
+    });
+  }
+
+  /**
+   * Читает планы только выбранного окна в порядке включения вместе с total и ревизией релиза.
+   * Владелец, все идентичности состава и карточки окна принадлежат одному снимку.
+   * Отсутствующая ссылка или чужой вид дают NOT_FOUND даже вне окна; повреждение
+   * содержания владельца или карточки окна — CORRUPT_DATA. Границы проверяются до чтений.
+   */
+  releasePlansPage(
+    ref: string,
+    request: Readonly<PlanningCompositionPageRequest>,
+  ): ReleasePlansPage {
+    validateEntityPageRequest({ ...request, sort: "key" });
+    return this.db.snapshot(() => {
+      const release = this.get("release", ref);
+      const items = readCompositionWindow(this.db, release.data.planIds, "work-plan", request).map(
+        (record) => decodePlan(record, this.db.projectId),
+      );
+      return {
+        release: release.key,
+        revision: release.revision,
+        items,
+        total: release.data.planIds.length,
       };
     });
   }

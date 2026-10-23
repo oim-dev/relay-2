@@ -26,6 +26,11 @@ const keyWriteCases = [
   { name: "insert", method: "insert", expectedCode: "CONFLICT" },
   { name: "update", method: "update", expectedCode: "CONFLICT" },
 ] as const;
+const invalidMutationIds = [
+  { name: "отсутствующий ID", reference: "missing" },
+  { name: "текущий ключ вместо ID", reference: "key" },
+  { name: "алиас вместо ID", reference: "alias" },
+] as const;
 let fixture: ProjectDatabaseFixture;
 
 beforeEach(() => {
@@ -123,6 +128,34 @@ describe("Файловая база проекта", () => {
 });
 
 describe("Ревизии и общее пространство ссылок", () => {
+  test.each(invalidMutationIds)(
+    "$name отклоняется в update и rename без изменения сущности",
+    ({ reference }) => {
+      const db = fixture.create();
+      const original = createDocument();
+      db.insert(original);
+      const current = db.rename(original.id, "DOC-RENAMED", 1, "editor");
+      const generation = db.getGeneration();
+      const references = { missing: "missing-id", key: current.key, alias: original.key };
+      const id = references[reference];
+
+      const updateError = expectRelayError(
+        () => db.update({ ...current, id, revision: 3 }, 2),
+        "NOT_FOUND",
+      );
+      const renameError = expectRelayError(
+        () => db.rename(id, current.key, 2, "other-editor"),
+        "NOT_FOUND",
+      );
+
+      expect(updateError.details).toEqual({ id });
+      expect(renameError.details).toEqual({ id });
+      expect(db.get(original.id)).toEqual(current);
+      expect(db.get(original.key)).toEqual(current);
+      expect(db.getGeneration()).toBe(generation);
+    },
+  );
+
   test.each(keyWriteCases)(
     "$name запрещает ключ с синтаксисом типизированной ссылки",
     ({ method, expectedCode }) => {

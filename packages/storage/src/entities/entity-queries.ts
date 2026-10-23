@@ -9,7 +9,7 @@ import {
   type EntityRecord,
   type EntityPageRequest,
 } from "@relay/contracts";
-import type { EntityCountRow, EntityRow } from "./entity-queries.types";
+import type { EntityCountRow, EntityRevision, EntityRow } from "./entity-queries.types";
 import { entityMessages } from "./entity.messages";
 
 // Полная карточка и журнал читаются одним запросом, без N+1 и копий комментариев в payload.
@@ -87,6 +87,63 @@ export function getEntityIdentity(
 }
 
 /**
+ * Читает существование постоянного ID и ревизию без содержания, журнала и разрешения алиасов.
+ * Отсутствующий ID возвращает undefined; согласованность с записью удерживает вызывающая транзакция.
+ */
+export function getEntityRevision(connection: Database, id: string): EntityRevision | undefined {
+  return (
+    connection
+      .query<EntityRevision, [string]>("SELECT id, revision FROM entities WHERE id = ?")
+      .get(id) ?? undefined
+  );
+}
+
+/**
+ * Загружает найденные карточки по постоянным ID одним SQL-запросом, включая журналы задач.
+ * Порядок и повторы входа сохраняются; отсутствующие ID и другой вид пропускаются до декодирования.
+ * Ключи и алиасы не разрешаются; пустой пакет не обращается к SQL.
+ */
+export function getEntities(
+  connection: Database,
+  ids: readonly string[],
+  kind?: EntityKind,
+): EntityRecord[] {
+  if (ids.length === 0) {
+    return [];
+  }
+  return connection
+    .query<EntityRow, [string, string | null, string | null]>(
+      `SELECT ${ENTITY_COLUMNS}
+       FROM json_each(?) requested JOIN entities e ON e.id = requested.value
+       WHERE (? IS NULL OR e.kind = ?) ORDER BY requested.key`,
+    )
+    .all(JSON.stringify(ids), kind ?? null, kind ?? null)
+    .map(decodeEntityRow);
+}
+
+/**
+ * Читает идентичности по постоянным ID одним SQL-запросом без содержания и журналов.
+ * Сохраняет порядок и повторы входа, пропуская отсутствующие ID и несовпадающий вид.
+ * Ключи и алиасы не разрешаются; пустой пакет не обращается к SQL.
+ */
+export function getEntityIdentities(
+  connection: Database,
+  ids: readonly string[],
+  kind?: EntityKind,
+): EntityIdentity[] {
+  if (ids.length === 0) {
+    return [];
+  }
+  return connection
+    .query<EntityIdentity, [string, string | null, string | null]>(
+      `SELECT e.id, e.kind, e.key
+       FROM json_each(?) requested JOIN entities e ON e.id = requested.value
+       WHERE (? IS NULL OR e.kind = ?) ORDER BY requested.key`,
+    )
+    .all(JSON.stringify(ids), kind ?? null, kind ?? null);
+}
+
+/**
  * Находит все точные строковые slug/prefix внутри вида в порядке постоянного ID.
  * Неоднозначность и допустимость такого адреса разрешает Core.
  */
@@ -121,6 +178,58 @@ export function listEntities(connection: Database, kind?: EntityKind): EntityRec
           )
           .all(kind);
   return rows.map(decodeEntityRow);
+}
+
+/**
+ * Загружает карточки выбранного вида с точным строковым полем верхнего уровня JSON.
+ * Один SQL-запрос отбирает записи до загрузки содержания и журналов; порядок — по ключу и ID.
+ * Имя поля сравнивается буквально, включая точки и кавычки, а не интерпретируется как JSON-путь.
+ */
+export function listEntitiesByField(
+  connection: Database,
+  kind: EntityKind,
+  field: string,
+  value: string,
+): EntityRecord[] {
+  return connection
+    .query<EntityRow, [string, string, string]>(
+      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE e.kind = ? AND EXISTS (
+         SELECT 1 FROM json_each(e.data) field
+         WHERE field.key = ? AND field.type = 'text' AND field.value = ?
+       ) ORDER BY e.key, e.id`,
+    )
+    .all(kind, field, value)
+    .map(decodeEntityRow);
+}
+
+/**
+ * Проверяет наличие объекта с точным строковым полем в верхнеуровневом массиве сущности вида.
+ * Имена полей буквальные; один SQL-запрос возвращает только признак существования без содержания.
+ * Неподходящие формы массива, элемента и поля не совпадают; скалярный текст не разбирается как JSON.
+ * Снимок нескольких обращений удерживает вызывающий.
+ */
+export function hasEntityArrayItemByField(
+  connection: Database,
+  kind: EntityKind,
+  arrayField: string,
+  itemField: string,
+  value: string,
+): boolean {
+  return (
+    connection
+      .query<unknown, [string, string, string, string]>(
+        `SELECT 1 FROM entities e WHERE e.kind = ? AND EXISTS (
+           SELECT 1 FROM json_each(e.data) array_field
+           JOIN json_each(CASE WHEN array_field.type = 'array'
+             THEN array_field.value ELSE '[]' END) item
+           JOIN json_each(CASE WHEN item.type = 'object'
+             THEN item.value ELSE '{}' END) item_field
+           WHERE array_field.key = ? AND item_field.key = ?
+             AND item_field.type = 'text' AND item_field.value = ?
+         ) LIMIT 1`,
+      )
+      .get(kind, arrayField, itemField, value) !== null
+  );
 }
 
 /**

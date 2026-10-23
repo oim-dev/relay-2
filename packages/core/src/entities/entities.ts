@@ -14,6 +14,7 @@ import {
   validateEntityAddresses,
 } from "./entity-addresses";
 import { entityMessages } from "./entity.messages";
+import type { EntityMutationOptions, PrepareEntityChange } from "./entity.types";
 import {
   validateEntityAddress,
   validateEntityData,
@@ -119,26 +120,7 @@ export class EntityService {
     options: Readonly<WriteOptions>,
   ): EntityRecord {
     validateEntityData(patch);
-    return this.db.transaction(() => {
-      const current = this.get(ref, kind);
-      validateEntityWrite(current, options);
-      const data = { ...current.data, ...structuredClone(patch) };
-      if (kind === "task") {
-        data.comments = current.data.comments;
-      }
-      if (isDeepStrictEqual(current.data, data)) {
-        return current;
-      }
-      const entity: EntityRecord = {
-        ...current,
-        data,
-        revision: current.revision + 1,
-        updatedAt: new Date().toISOString(),
-        updatedBy: options.actor,
-      };
-      this.db.update(entity, options.ifRevision);
-      return this.get(entity.id);
-    });
+    return this.change(ref, kind, options, () => ({ patch }));
   }
 
   /**
@@ -152,11 +134,93 @@ export class EntityService {
     options: Readonly<WriteOptions>,
   ): EntityRecord {
     validateEntityAddress(key, "key");
+    return this.change(ref, kind, options, () => ({ key }));
+  }
+
+  /**
+   * Читает владельца и готовит предметное изменение внутри одной транзакции после CAS.
+   * Callback получает копию актуальной карточки, а не переданный извне доверенный снимок.
+   * Если подготовка сама изменила БД, владелец перечитывается и CAS проверяется повторно,
+   * включая no-op. Обычная подготовка без записи не требует повторной загрузки содержания.
+   * Запись сохраняет алиасы и журнал; комментарии задач никогда не заменяются patch.
+   */
+  change(
+    ref: string,
+    kind: EntityKind,
+    options: Readonly<WriteOptions>,
+    prepare: PrepareEntityChange,
+  ): EntityRecord {
+    return this.mutate(ref, kind, { kind: "explicit", write: options }, prepare);
+  }
+
+  /**
+   * Изменяет запись под её ревизией, прочитанной внутри внутреннего шага сценария:
+   * зависимая доска после CAS приложения либо заполнение пустого паспорта продукта.
+   * Предметные условия и внешнюю транзакцию удерживает вызывающий сервис;
+   * пользовательские update/rename передают свою ожидаемую ревизию через change.
+   * Карточка извне не принимается; подготовка и no-op имеют гарантии change.
+   */
+  changeRelated(
+    ref: string,
+    kind: EntityKind,
+    actor: string,
+    prepare: PrepareEntityChange,
+  ): EntityRecord {
+    return this.mutate(ref, kind, { kind: "related", actor }, prepare);
+  }
+
+  /**
+   * Удерживает актуальное содержание и выбранную исходную ревизию до записи либо no-op.
+   * Повторное чтение требуется только после вложенной записи подготовки, не между слоями Core.
+   */
+  private mutate(
+    ref: string,
+    kind: EntityKind,
+    options: EntityMutationOptions,
+    prepare: PrepareEntityChange,
+  ): EntityRecord {
     return this.db.transaction(() => {
-      const current = this.get(ref, kind);
-      validateEntityWrite(current, options);
-      validateEntityAddresses(this.db, { ...current, key });
-      return this.db.rename(current.id, key, options.ifRevision, options.actor);
+      const generation = this.db.getGeneration();
+      let current = this.get(ref, kind);
+      const write =
+        options.kind === "explicit"
+          ? { actor: options.write.actor, ifRevision: options.write.ifRevision }
+          : { actor: options.actor, ifRevision: current.revision };
+      validateEntityWrite(current, write);
+      const change = prepare(structuredClone(current));
+      if (this.db.getGeneration() !== generation) {
+        current = this.get(current.id, kind);
+        validateEntityWrite(current, write);
+      }
+      let key = current.key;
+      let data = current.data;
+      if ("patch" in change) {
+        validateEntityData(change.patch);
+        data = { ...current.data, ...structuredClone(change.patch) };
+        if (kind === "task") {
+          data.comments = current.data.comments;
+        }
+      } else {
+        validateEntityAddress(change.key, "key");
+        key = change.key;
+      }
+      if (key === current.key && isDeepStrictEqual(current.data, data)) {
+        return current;
+      }
+      const entity: EntityRecord = {
+        ...current,
+        key,
+        data,
+        revision: current.revision + 1,
+        updatedAt: new Date().toISOString(),
+        updatedBy: write.actor,
+      };
+      if (key !== current.key) {
+        validateEntityAddresses(this.db, entity);
+      }
+      this.db.update(entity, write.ifRevision);
+      // Журнал имеет независимую ревизию: возвращаем его актуальную проекцию.
+      return kind === "task" ? this.get(entity.id, kind) : entity;
     });
   }
 }

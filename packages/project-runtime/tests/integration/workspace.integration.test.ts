@@ -6,6 +6,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   symlinkSync,
 } from "node:fs";
@@ -44,6 +45,38 @@ describe("Локальные регистрации workspace", () => {
     expect(workspace.configPath).toBe(join(cwd, "relay.workspace.json"));
     expect(listProjects({ cwd, home })).toEqual([]);
     expect(existsSync(home)).toBe(false);
+  });
+
+  test("список через symlink однократно читает и декодирует весь реестр с физическими путями", () => {
+    const { cwd, home, root } = fixture;
+    const workspace = initializeWorkspace({ cwd, home });
+    writeConfig(workspace.configPath, {
+      version: 1,
+      projects: [
+        { name: "alpha", path: "projects/alpha" },
+        { name: "beta", path: "../beta" },
+      ],
+    });
+    const alias = join(root, "workspace-link.json");
+    symlinkSync(workspace.configPath, alias);
+    const contents = readFileSync(workspace.configPath, "utf8");
+    const reader = spyOn(fs, "readFileSync");
+    const decoder = spyOn(JSON, "parse");
+    try {
+      const projects = listProjects({ cwd: root, home, config: alias });
+
+      expect(projects).toEqual([
+        { name: "alpha", path: join(cwd, "projects", "alpha") },
+        { name: "beta", path: join(root, "beta") },
+      ]);
+      expect(reader).toHaveBeenCalledTimes(1);
+      expect(decoder.mock.calls.map(([text]) => text)).toEqual([contents]);
+      expect(readdirSync(cwd)).toEqual(["relay.workspace.json"]);
+      expect(existsSync(home)).toBe(false);
+    } finally {
+      decoder.mockRestore();
+      reader.mockRestore();
+    }
   });
 
   test("регистрация каталогов сохраняет абсолютные пути в порядке добавления", () => {
@@ -287,6 +320,27 @@ describe("Локальные регистрации workspace", () => {
     expect(removed).toBe(true);
     expect(listProjects({ cwd, home })).toEqual([]);
     expect(existsSync(join(root, "missing"))).toBe(false);
+  });
+
+  test("отсутствующая база не мешает списку и удалению регистрации и не создаётся заново", () => {
+    const { cwd, home, root } = fixture;
+    initializeWorkspace({ cwd, home });
+    const project = initializeProject({ cwd: join(root, "alpha"), home });
+    registerProject({ cwd, home }, "alpha", dirname(project.configPath));
+    const config = readFileSync(project.configPath, "utf8");
+    const database = readFileSync(project.databasePath);
+    const saved = `${project.databasePath}.saved`;
+    renameSync(project.databasePath, saved);
+
+    const projects = listProjects({ cwd, home });
+    const removed = unregisterProject({ cwd, home }, "alpha");
+
+    expect(projects).toEqual([{ name: "alpha", path: join(root, "alpha") }]);
+    expect(removed).toBe(true);
+    expect(listProjects({ cwd, home })).toEqual([]);
+    expect(existsSync(project.databasePath)).toBe(false);
+    expect(readFileSync(saved)).toEqual(database);
+    expect(readFileSync(project.configPath, "utf8")).toBe(config);
   });
 
   test("повтор init workspace по явному пути не изменяет файл", () => {

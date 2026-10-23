@@ -1,5 +1,4 @@
 import { cli } from "gunshi";
-import { renderValidationErrors } from "gunshi/renderer";
 import { describeCliFailure, isBrokenPipe } from "../errors/errors";
 import type { ValidationFailure } from "../errors/errors.types";
 import { errorMessages } from "../locales/errors";
@@ -9,6 +8,7 @@ import type { CliOutput } from "./run.types";
 import { processRuntime } from "../execution/runtime";
 import type { CliRuntime } from "../execution/runtime.types";
 import type { CliProgram } from "./program.types";
+import { renderCliValidationErrors } from "./validation-errors";
 
 export type { CliRuntime } from "../execution/runtime.types";
 export type { CliOutput } from "./run.types";
@@ -39,6 +39,7 @@ export async function runProgram(
 ): Promise<number> {
   let inputFailure: ValidationFailure | undefined;
   let format = "text";
+  let helpPath: readonly string[] = [];
   try {
     const { command, options } = create();
     const result = await cli([...argv], command, {
@@ -48,6 +49,7 @@ export async function runProgram(
        */
       onBeforeCommand(ctx): void {
         format = ctx.values.format === "json" ? "json" : "text";
+        helpPath = ctx.commandPath;
         options.onBeforeCommand(ctx);
       },
       /**
@@ -55,7 +57,8 @@ export async function runProgram(
        */
       renderValidationErrors: async (ctx, error): Promise<string> => {
         format = ctx.values.format === "json" ? "json" : "text";
-        const message = await renderValidationErrors(ctx, error);
+        helpPath = ctx.commandPath;
+        const message = await renderCliValidationErrors(ctx, error);
         inputFailure = { error, message };
         return message;
       },
@@ -73,15 +76,24 @@ export async function runProgram(
     return 0;
   } catch (error) {
     const failure = describeCliFailure(error, inputFailure);
+    const helpCommand = ["relay", ...helpPath, "--help"].join(" ");
     if (format === "json") {
       const { code, message, details } = failure;
       output.stderr(
-        `${JSON.stringify({ ok: false, error: { code, message, ...(details ? { details } : {}) } })}\n`,
+        `${JSON.stringify({
+          ok: false,
+          error: {
+            code,
+            message,
+            ...(details ? { details } : {}),
+            ...(failure.invalidInput ? { helpCommand } : {}),
+          },
+        })}\n`,
       );
     } else {
       output.stderr(errorMessages.failure(failure.code, terminalText(failure.message)));
       if (failure.invalidInput) {
-        output.stderr(errorMessages.help);
+        output.stderr(errorMessages.help(helpCommand));
       }
     }
     return failure.exitCode;

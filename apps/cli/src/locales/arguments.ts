@@ -14,6 +14,11 @@ export const argumentMessages = {
   mixedInput: "--input/--input-file нельзя смешивать с отдельными полями",
 
   /**
+   * Помечает безусловно обязательный параметр, проверяемый парсером.
+   */
+  required: (description: string): string => `${description} (обязательно)`,
+
+  /**
    * Дополняет описание повторяемого параметра правилом его передачи.
    */
   repeated: (description: string): string => `${description}; повторяйте параметр`,
@@ -24,14 +29,9 @@ export const argumentMessages = {
   integerRange: (min: number, max: number): string => `ожидается целое число от ${min} до ${max}`,
 
   /**
-   * Подписывает inline-источник именованного текстового поля.
-   */
-  text: (name: string): string => `Содержание: ${name}`,
-
-  /**
    * Подписывает файловый UTF-8 источник именованного поля.
    */
-  textFile: (name: string): string => `UTF-8 файл для ${name}; «-» читает stdin`,
+  textFile: (name: string): string => `Текст --${name} из UTF-8 файла; «-» читает stdin`,
 
   /**
    * Перечисляет разрешённые поля цельного JSON-ввода в порядке схемы команды.

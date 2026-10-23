@@ -82,10 +82,7 @@ export function allocateEntityKey(
   }
   let allocatedKey = db.nextKey(prefix);
   if (hasVirtualAddresses(kind)) {
-    const reserved = new Set(
-      db.list(kind).flatMap((entity) => [entity.data.slug, entity.data.prefix]),
-    );
-    while (reserved.has(allocatedKey)) {
+    while (db.findAddressIdentities(allocatedKey, kind).length > 0) {
       allocatedKey = db.nextKey(prefix);
     }
   }
@@ -93,29 +90,45 @@ export function allocateEntityKey(
 }
 
 /**
- * Проверяет адреса создаваемой или переименовываемой доски/приложения под общей транзакцией.
- * Ключи, алиасы и виртуальные адреса одного вида не могут переходить к другой записи.
- * Один список вида используется для всех проверок кандидата; конфликт даёт CONFLICT.
+ * Проверяет глобальную занятость ключа и виртуальные адреса доски/приложения в транзакции.
+ * Читает только идентичности совпадений, без содержания коллекций. Чужой ID, ключ,
+ * алиас либо виртуальный адрес того же вида даёт предметный CONFLICT с владельцем.
  */
 export function validateEntityAddresses(db: ProjectDatabase, entity: Readonly<EntityRecord>): void {
+  const owner = db.getIdentity(entity.key);
+  if (owner && owner.id !== entity.id) {
+    occupiedAddress(entity, entity.key, owner);
+  }
   if (!hasVirtualAddresses(entity.kind)) {
     return;
   }
-  const others = db.list(entity.kind).filter((record) => record.id !== entity.id);
   // Проверяем оба направления: новый ключ и новые slug/prefix при создании.
-  for (const address of [entity.key, entity.data.slug, entity.data.prefix]) {
+  for (const address of new Set([entity.key, entity.data.slug, entity.data.prefix])) {
     if (typeof address !== "string" || !address) {
       continue;
     }
-    const stored = db.getIdentity(address, entity.kind);
-    if (
-      (stored && stored.id !== entity.id) ||
-      others.some((record) => record.data.slug === address || record.data.prefix === address)
-    ) {
-      throw new RelayError("CONFLICT", entityMessages.occupiedAddress(address), 4, {
-        kind: entity.kind,
-        ref: address,
-      });
+    const stored = address === entity.key ? owner : db.getIdentity(address, entity.kind);
+    const virtual = db
+      .findAddressIdentities(address, entity.kind)
+      .find((record) => record.id !== entity.id);
+    const conflict = stored && stored.id !== entity.id ? stored : virtual;
+    if (conflict) {
+      occupiedAddress(entity, address, conflict);
     }
   }
+}
+
+/**
+ * Сообщает занятый адрес и его владельца без технической диагностики SQLite.
+ */
+function occupiedAddress(
+  entity: Readonly<EntityRecord>,
+  address: string,
+  owner: EntityIdentity,
+): never {
+  throw new RelayError("CONFLICT", entityMessages.occupiedAddress(address), 4, {
+    kind: entity.kind,
+    ref: address,
+    owner,
+  });
 }

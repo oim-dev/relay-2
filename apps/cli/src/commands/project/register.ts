@@ -37,9 +37,9 @@ function workspacePageContext(options: RuntimeOptions): string {
  */
 export function registerProjectCommands(registry: CommandRegistry): void {
   registry.add("init", {
-    description: messages.init,
+    ...messages.init,
     local: true,
-    fields: { ...textArgs("name"), slug: string(messages.projectSlug) },
+    fields: { ...textArgs({ name: messages.projectName }), slug: string(messages.projectSlug) },
     /**
      * Создаёт файлы проекта через Runtime и возвращает его локальное расположение.
      */
@@ -47,8 +47,9 @@ export function registerProjectCommands(registry: CommandRegistry): void {
   });
   registry.group("config", messages.config);
   registry.add("config get", {
-    description: messages.configGet,
+    ...messages.configGet,
     local: true,
+    presentation: "configuration",
     /**
      * Возвращает JSON выбранной конфигурации с метаданными расположения проекта.
      * Ошибки выбора проекта, чтения файла и разбора JSON передаются границе CLI.
@@ -61,7 +62,7 @@ export function registerProjectCommands(registry: CommandRegistry): void {
   registry.group("workspace", messages.workspace);
   registry.group("workspace project", messages.workspaceProject);
   const initialize = {
-    description: messages.workspaceInit,
+    ...messages.workspaceInit,
     local: true,
     /**
      * Создаёт конфигурацию workspace через Runtime и возвращает её расположение.
@@ -71,9 +72,10 @@ export function registerProjectCommands(registry: CommandRegistry): void {
   registry.add("workspace init", initialize);
   registry.add("workspace project init", initialize);
   registry.add("workspace project list", {
-    description: messages.projectList,
+    ...messages.projectList,
     args: pageArgs,
     local: true,
+    presentation: "workspace-projects",
     /**
      * Возвращает страницу регистраций, упорядоченных по имени.
      * Полный реестр читается до пагинации; отпечаток связывает курсор с его содержимым.
@@ -92,7 +94,7 @@ export function registerProjectCommands(registry: CommandRegistry): void {
     },
   });
   registry.add("workspace project add", {
-    description: messages.projectAdd,
+    ...messages.projectAdd,
     local: true,
     args: {
       name: positional(messages.registrationName),
@@ -107,7 +109,7 @@ export function registerProjectCommands(registry: CommandRegistry): void {
     },
   });
   registry.add("workspace project remove", {
-    description: messages.projectRemove,
+    ...messages.projectRemove,
     local: true,
     args: { name: positional(messages.registrationName) },
     /**

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { EntityRecord } from "@relay/contracts";
 import {
   ProjectDatabaseFixture,
@@ -81,10 +82,26 @@ describe("Независимый append-only журнал задачи", () => {
     // Порядок публикаций определяется sequence, а не временем чужого компьютера.
     const second = { ...createComment("Второе сообщение"), createdAt: "2000-01-01T00:00:00.000Z" };
     peer.appendTaskComment(task.id, second);
-    db.update(
-      { ...stale, revision: 2, updatedBy: "editor", data: { ...stale.data, title: "Уточнение" } },
-      1,
-    );
+    const decoder = spyOn(JSON, "parse");
+    const queries = spyOn(Database.prototype, "query");
+    try {
+      db.update(
+        { ...stale, revision: 2, updatedBy: "editor", data: { ...stale.data, title: "Уточнение" } },
+        1,
+      );
+
+      expect(decoder).not.toHaveBeenCalled();
+      expect(queries).toHaveBeenCalled();
+      const selectedColumns = queries.mock.results
+        .filter((result) => result.type === "return")
+        .flatMap((result) => result.value.columnNames);
+      expect(selectedColumns.every((column) => column === "id" || column === "revision")).toBe(
+        true,
+      );
+    } finally {
+      queries.mockRestore();
+      decoder.mockRestore();
+    }
     const updated = requireRecord(db, task.id);
     expect(updated.data).toEqual({ title: "Уточнение", comments: [first, second] });
     expect(db.list("task")).toEqual([updated]);
@@ -99,7 +116,12 @@ describe("Независимый append-only журнал задачи", () => {
         raw.query("SELECT count(*) AS count FROM task_comments WHERE task_id = ?").get(task.id),
       ).toEqual({ count: 2 });
     });
-    db.rename(task.id, "TASK-RENAMED", 2, "editor");
+    const renamed = db.rename(task.id, "TASK-RENAMED", 2, "editor");
+    expect(renamed.data).toEqual({ title: "Уточнение", comments: [first, second] });
+    expect(db.get(task.id)).toEqual(renamed);
+    const generationAfterRename = db.getGeneration();
+    expect(db.rename(task.id, renamed.key, 3, "other-editor")).toEqual(renamed);
+    expect(db.getGeneration()).toBe(generationAfterRename);
     const third = createComment("По прежнему ключу");
     const expected = db.appendTaskComment(task.key, third);
     expect(expected.revision).toBe(3);

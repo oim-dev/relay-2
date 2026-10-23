@@ -97,7 +97,7 @@ export class HistoryService {
       const values = historyStartInput(input);
       const author = validateActor(actor);
       const now = new Date().toISOString();
-      const records = new HistoryRecordFactory(this.db, this.reader.sessions(), {
+      const records = new HistoryRecordFactory(this.db, {
         actor: author,
         now,
       });
@@ -161,6 +161,8 @@ export class HistoryService {
    * save может записать новый материал того же содержания, no-op отсутствует. Закрытый intent,
    * чужой run, непринятые дети, неверная ревизия или повреждённая история вызывают отказ
    * с полным откатом записей и поколения. references сохраняются снимками через общий resolver.
+   * Читаются материалы сессии и исходного intent, выбранные ссылки и прямые дети при закрытии;
+   * история остальных сессий не загружается ради sequence, фабрики или выделения ID.
    */
   checkpoint(
     ref: string,
@@ -175,27 +177,30 @@ export class HistoryService {
       const session = intent === null ? this.get(ref) : this.get(intent.data.sessionId);
       checkHistoryRevision(session, write.ifRevision);
       const run = checkHistoryOwner(session, values.runId, write.actor);
-      const materials = this.reader.checkpoints();
+      const materials = this.reader.sessionCheckpoints(session.id);
+      let children: HistorySession[] = [];
       if (intent !== null) {
-        checkOpenHistoryIntent(intent, materials);
+        checkOpenHistoryIntent(intent, this.reader.intentCheckpoints(intent.id));
+        if (action === "complete" || action === "cancel") {
+          children = this.reader.intentChildren(session.id, intent.id);
+        }
         checkHistoryAcceptance(
           session.id,
           intent.id,
-          this.reader.acceptedSessions(values.acceptedSessionIds),
+          this.reader.acceptedSessions(values.acceptedSessionIds, children),
         );
       }
-      const sessions = this.reader.sessions();
       if (intent !== null && (action === "complete" || action === "cancel")) {
         checkHistoryChildrenClosure(
           session.id,
           intent.id,
           values.acceptedSessionIds,
-          sessions,
+          children,
           materials,
         );
       }
       const now = new Date().toISOString();
-      const records = new HistoryRecordFactory(this.db, sessions, { actor: write.actor, now });
+      const records = new HistoryRecordFactory(this.db, { actor: write.actor, now });
       const checkpoint = records.checkpoint({
         action,
         values,
@@ -272,7 +277,7 @@ export class HistoryService {
     if (input.action === "takeover") {
       endHistoryRun(session, "transferred", input.reason, now);
     }
-    const records = new HistoryRecordFactory(this.db, this.reader.sessions(), { actor, now });
+    const records = new HistoryRecordFactory(this.db, { actor, now });
     const run = records.run(input, session.data.runs.at(-1)?.id ?? null);
     if (input.action === "attach" && input.operator === undefined) {
       run.operator = this.reader.inheritedOperator(session);
@@ -327,7 +332,7 @@ export class HistoryService {
     const run = checkHistoryOwner(parent, input.runId, options.actor);
     checkOpenHistoryIntent(intent, this.reader.checkpoints());
     const now = new Date().toISOString();
-    const records = new HistoryRecordFactory(this.db, this.reader.sessions(), {
+    const records = new HistoryRecordFactory(this.db, {
       actor: options.actor,
       now,
     });

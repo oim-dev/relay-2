@@ -1,4 +1,40 @@
-import type { EntityKind } from "@relay/contracts";
+import type { EntityKind, EntityRecord, WriteOptions } from "@relay/contracts";
+
+/**
+ * Подготовленное изменение содержания либо ключа; отсутствие полей patch означает no-op.
+ */
+export type EntityChange =
+  | {
+      /* Частичный проверенный JSON; остальные поля актуальной записи сохраняются. */
+      readonly patch: Readonly<Record<string, unknown>>;
+    }
+  | {
+      /* Новый ключ; прежний остаётся алиасом после успешного CAS. */
+      readonly key: string;
+    };
+
+/**
+ * Подготовка изменения по независимой копии актуальной записи внутри транзакции.
+ * Полученный объект не является доверенным снимком для последующих вызовов записи.
+ */
+export type PrepareEntityChange = (current: Readonly<EntityRecord>) => EntityChange;
+
+/**
+ * Внутренний выбор CAS: входная ревизия либо ревизия адресно прочитанного связанного владельца.
+ */
+export type EntityMutationOptions =
+  | {
+      /* Ревизия передана вызывающим сценарием и никогда не подменяется. */
+      readonly kind: "explicit";
+      /* Автор и обязательная ожидаемая ревизия. */
+      readonly write: Readonly<WriteOptions>;
+    }
+  | {
+      /* Внутренний шаг связанного агрегата под внешней транзакцией. */
+      readonly kind: "related";
+      /* Автор основной предметной операции. */
+      readonly actor: string;
+    };
 
 /**
  * Назначение строкового адреса при проверке ссылок и назначении ключа.

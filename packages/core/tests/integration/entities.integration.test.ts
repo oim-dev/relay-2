@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RelayError, type EntityRecord } from "@relay/contracts";
+import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
 import { EntityService } from "../../src/entities/entities";
 import * as publicCore from "../../src/index";
 import { entityWriteOptions, expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
@@ -64,6 +64,14 @@ const invalidAddressOperations = ["ключ", "префикс", "переиме�
 const invalidIdentityInputs = [
   { name: "пустой автор", actor: " ", key: "DOC-1", code: "INVALID_ARGUMENT" },
   { name: "ключ с пробелом", actor: "author", key: "BAD KEY", code: "VALIDATION_ERROR" },
+] as const;
+const nestedChanges = [
+  { name: "no-op", patch: {} },
+  { name: "изменение", patch: { title: "Из устаревшего снимка" } },
+] as const;
+const absentRevisionInputs = [
+  { name: "пропущенная ревизия", value: undefined },
+  { name: "строка вместо ревизии", value: "current" },
 ] as const;
 
 /**
@@ -244,9 +252,100 @@ describe("Границы общего механизма сущностей Core
       expect(entities.create("document", "DOC", {}, "author").key).toBe("DOC-1");
     });
   });
+
+  test.each(nestedChanges)(
+    "подготовка после вложенной записи: $name отвергает устаревшую карточку",
+    ({ patch }) => {
+      withEntityDatabase((db) => {
+        const entities = new EntityService(db);
+        const initial = entities.create("document", "DOC", { title: "До изменения" }, "author");
+        const generation = db.getGeneration();
+
+        expectRelayError(
+          () =>
+            entities.change(initial.id, "document", entityWriteOptions(initial), (current) => {
+              entities.rename(current.id, "document", "NESTED-KEY", entityWriteOptions(current));
+              return { patch };
+            }),
+          "REVISION_CONFLICT",
+        );
+
+        expect(entities.get(initial.id)).toEqual(initial);
+        expect(db.getIdentity("NESTED-KEY")).toBeUndefined();
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test("подготовка получает копию и не может превратить реальное изменение в ложный no-op", () => {
+    withEntityDatabase((db) => {
+      const entities = new EntityService(db);
+      const initial = entities.create("document", "DOC", { title: "До изменения" }, "author");
+
+      const updated = entities.change(
+        initial.id,
+        "document",
+        entityWriteOptions(initial),
+        (current) => {
+          current.data.title = "После изменения";
+          return { patch: current.data };
+        },
+      );
+
+      expect(updated.data.title).toBe("После изменения");
+      expect(updated.revision).toBe(initial.revision + 1);
+      expect(entities.get(initial.id)).toEqual(updated);
+    });
+  });
+
+  test.each(absentRevisionInputs)(
+    "$name не подменяется текущей при подготовке no-op",
+    ({ value }) => {
+      withEntityDatabase((db) => {
+        const entities = new EntityService(db);
+        const initial = entities.create("document", "DOC", {}, "author");
+        const generation = db.getGeneration();
+        // Намеренно неверный транспортный тип проверяет runtime-границу примитива записи.
+        const invalidWrite = { actor: "author", ifRevision: value } as unknown as WriteOptions;
+
+        expectRelayError(
+          () => entities.change(initial.id, "document", invalidWrite, () => ({ patch: {} })),
+          "VALIDATION_ERROR",
+        );
+
+        expect(entities.get(initial.id)).toEqual(initial);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
 });
 
 describe("Независимый журнал комментариев задачи", () => {
+  test("комментарий, добавленный во время подготовки no-op, возвращается без потери журнала", () => {
+    withEntityDatabase((db) => {
+      const entities = new EntityService(db);
+      const task = entities.create("task", "TASK", { title: "Задача" }, "author");
+      const comment = {
+        id: crypto.randomUUID(),
+        title: "",
+        body: "Новое обсуждение",
+        createdAt: new Date().toISOString(),
+        createdBy: "reviewer",
+      };
+      const generation = db.getGeneration();
+
+      const unchanged = entities.change(task.id, "task", entityWriteOptions(task), (current) => {
+        db.appendTaskComment(current.id, comment);
+        return { patch: { comments: [] } };
+      });
+
+      expect(unchanged.revision).toBe(task.revision);
+      expect(unchanged.data.comments).toEqual([comment]);
+      expect(entities.get(task.id)).toEqual(unchanged);
+      expect(db.getGeneration()).toBe(generation + 1);
+    });
+  });
+
   test("создание задачи возвращает ту же пустую проекцию журнала, что get", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);

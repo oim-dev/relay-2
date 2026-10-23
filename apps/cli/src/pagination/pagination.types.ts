@@ -47,13 +47,15 @@ export interface PageWindow {
 }
 
 /**
- * Записи окна и полное число совпадений, прочитанные в одном снимке.
+ * Записи окна, полное число совпадений и необязательный владелец из одного снимка.
  */
 export interface PageSelection<T> {
   /* Записи в устойчивом порядке запроса. */
   readonly items: T[];
   /* Число совпадений до применения окна. */
   readonly total: number;
+  /* Метаданные владельца состава из снимка источника; отсутствие означает обычный список. */
+  readonly owner?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -90,6 +92,8 @@ export interface Paginated<T> {
   readonly items: T[];
   /* Метаданные согласованности и продолжения списка. */
   readonly page: Page;
+  /* Метаданные владельца из источника; не относятся к курсору или параметрам запроса. */
+  readonly owner?: Readonly<Record<string, unknown>>;
 }
 
 /**

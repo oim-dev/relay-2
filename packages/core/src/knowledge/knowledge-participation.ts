@@ -31,15 +31,6 @@ export class KnowledgeParticipation {
   }
 
   /**
-   * Загружает состав приложения один раз, включая снятые исторические реализации.
-   */
-  private implementations(applicationId: string): KnowledgeRecord<"implementation">[] {
-    return this.queries
-      .records("implementation")
-      .filter((record) => record.data.applicationId === applicationId);
-  }
-
-  /**
    * Создаёт новое участие и обновляет состав приложения; прежнее снятое участие не дублируется.
    */
   create(
@@ -50,7 +41,7 @@ export class KnowledgeParticipation {
   ): KnowledgeRecord<"implementation"> {
     const application = this.queries.resolve(applicationRef, "application");
     const target = requireImplementationTarget(this.queries.resolve(targetRef));
-    const existing = this.implementations(application.id);
+    const existing = this.queries.applicationImplementations(application);
     if (existing.some((record) => record.data.targetId === target.id)) {
       throw new RelayError("ALREADY_EXISTS", knowledgeMessages.participationExists, 4);
     }
@@ -90,7 +81,7 @@ export class KnowledgeParticipation {
     refs: readonly string[],
     actor: string,
   ): KnowledgeRecord<"application"> {
-    const existing = this.implementations(application.id);
+    const existing = this.queries.applicationImplementations(application);
     const selected = refs.map((ref) => this.selectedTarget(ref, application.id));
     requireParticipationSelection(selected);
     const byTarget = new Map<string, KnowledgeRecord<"implementation">>();

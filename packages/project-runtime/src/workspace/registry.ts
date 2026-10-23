@@ -19,7 +19,7 @@ import { readProjectLocation } from "../project/selection";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import { workspaceMessages } from "./registry.messages";
 import type { ProjectRegistration } from "../configuration/config.types";
-import type { WorkspaceLocation } from "./registry.types";
+import type { WorkspaceLocation, WorkspaceSnapshot } from "./registry.types";
 
 /**
  * Проверяет имя регистрации до чтения или изменения реестра.
@@ -31,10 +31,11 @@ function validateRegistrationName(name: string): void {
 }
 
 /**
- * Находит и проверяет workspace, затем возвращает физический путь для общего mutex.
+ * Находит workspace и однократно читает проверенный снимок вместе с физическим путём.
  * Разные символьные ссылки на один файл обязаны конкурировать за одну блокировку.
+ * Снимок пригоден для чтения; мутации перечитывают актуальный реестр уже под mutex.
  */
-function workspacePath(options: RuntimeOptions): string {
+function readSelectedWorkspace(options: RuntimeOptions): WorkspaceSnapshot {
   validateOptions(options);
   const path = explicitConfig(options) ?? findConfig(options.cwd, true);
   if (!path) {
@@ -44,8 +45,8 @@ function workspacePath(options: RuntimeOptions): string {
       3,
     );
   }
-  readWorkspace(path);
-  return realpathSync(path);
+  const config = readWorkspace(path);
+  return { configPath: realpathSync(path), config };
 }
 
 /**
@@ -86,10 +87,11 @@ export function initializeWorkspace(options: RuntimeOptions): WorkspaceLocation 
 
 /**
  * Возвращает весь список регистраций из одного целого снимка workspace в порядке добавления.
+ * Читает и декодирует полный реестр ровно один раз за вызов.
  * Не открывает конфиги и базы зарегистрированных проектов, поэтому недоступные ссылки видны.
  */
 export function listProjects(options: RuntimeOptions): ProjectRegistration[] {
-  return withFileErrors(() => readWorkspace(workspacePath(options)).projects);
+  return withFileErrors(() => readSelectedWorkspace(options).config.projects);
 }
 
 /**
@@ -100,7 +102,7 @@ export function listProjects(options: RuntimeOptions): ProjectRegistration[] {
 export function registerProject(options: RuntimeOptions, name: string, path: string): void {
   withFileErrors(() => {
     validateRegistrationName(name);
-    const workspace = workspacePath(options);
+    const workspace = readSelectedWorkspace(options).configPath;
     const directory = registrationDirectory(options, path);
 
     withWorkspaceLock(workspace, () => {
@@ -126,7 +128,7 @@ export function registerProject(options: RuntimeOptions, name: string, path: str
 export function unregisterProject(options: RuntimeOptions, name: string): boolean {
   return withFileErrors(() => {
     validateRegistrationName(name);
-    const workspace = workspacePath(options);
+    const workspace = readSelectedWorkspace(options).configPath;
     return withWorkspaceLock(workspace, () => {
       const current = readWorkspace(workspace);
       const index = current.projects.findIndex((entry) => entry.name === name);

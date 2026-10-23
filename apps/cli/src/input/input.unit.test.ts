@@ -35,7 +35,7 @@ describe("Источники ввода CLI", () => {
         return "";
       },
     };
-    const fields = inputArgs(textArgs("body", "summary"));
+    const fields = inputArgs(textArgs({ body: "Полный текст", summary: "Аннотация" }));
 
     await expect(readInput(input, fields, context)).rejects.toMatchObject({
       code: "CONFLICTING_OPTIONS",
@@ -46,7 +46,7 @@ describe("Источники ввода CLI", () => {
   });
 
   test("текст из stdin сохраняет значимые пробелы вместе с пустым отдельным полем", async () => {
-    const fields = textArgs("body", "summary");
+    const fields = textArgs({ body: "Полный текст", summary: "Аннотация" });
 
     const input = await readInput({ "body-file": "-", summary: "" }, fields, runtime);
 
@@ -54,7 +54,10 @@ describe("Источники ввода CLI", () => {
   });
 
   test("общий JSON сохраняет false и пустую строку", async () => {
-    const fields = inputArgs({ pinned: flag("Закрепление"), ...textArgs("summary") });
+    const fields = inputArgs({
+      pinned: flag("Закрепление"),
+      ...textArgs({ summary: "Аннотация" }),
+    });
 
     const input = await readInput({ input: '{"pinned":false,"summary":""}' }, fields, runtime);
 

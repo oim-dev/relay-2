@@ -40,6 +40,8 @@ describe("Поставляемый бинарник CLI", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stderr).toBe("");
       expect(result.stdout).toContain("ИСПОЛЬЗОВАНИЕ:");
+      expect(result.stdout).toContain("ПОДРОБНОСТИ:\n");
+      expect(result.stdout).toContain("ПРИМЕРЫ:\n  # ");
       expect(result.files).toEqual([]);
     },
   );
@@ -51,6 +53,23 @@ describe("Поставляемый бинарник CLI", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).not.toBe("");
     expect(result.stderr).toContain("INVALID_ARGUMENT");
+    expect(result.stderr).toContain("Справка: relay document --help");
+    expect(result.files).toEqual([]);
+  });
+
+  test("JSON-ошибка вложенной группы содержит отдельную исполнимую команду справки", async () => {
+    const result = await invokeBinary(["application", "participation", "missing", "--format=json"]);
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toMatchObject({
+      ok: false,
+      error: {
+        code: "INVALID_ARGUMENT",
+        helpCommand: "relay application participation --help",
+      },
+    });
+    expect(result.stderr.trim().split("\n")).toHaveLength(1);
     expect(result.files).toEqual([]);
   });
 

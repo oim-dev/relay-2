@@ -21,30 +21,23 @@ const checkpointKinds = {
 
 /**
  * Создаёт новые записи истории без сохранения, резервируя ID на время одной транзакции.
- * Набор существующих участий загружается вызывающим сценарием один раз; фабрика не переживает
- * операцию и не заменяет атомарную вставку и CAS сессии в HistoryService.
+ * Занятость адресов и ID участий проверяется без загрузки содержания чужих сессий.
+ * Фабрика не переживает операцию и не заменяет атомарную вставку и CAS в HistoryService.
  */
 export class HistoryRecordFactory {
   /* БД того же снимка операции для проверки занятых ID, ключей и алиасов. */
   private readonly db: ProjectDatabase;
   /* Проверенный автор и единое время создания записей операции. */
   private readonly metadata: HistoryRecordMetadata;
-  /* ID существующих участий и уже выданные ID этой операции. */
-  private readonly reservedIds: Set<string>;
+  /* Уже выданные ID этой операции, в том числе ещё не сохранённого первого участия. */
+  private readonly reservedIds = new Set<string>();
 
   /**
-   * Создаёт локальный резерв ID из декодированных сессий текущей транзакции.
+   * Подключает фабрику к текущей транзакции с пустым локальным резервом новых ID.
    */
-  constructor(
-    db: ProjectDatabase,
-    sessions: readonly HistorySession[],
-    metadata: HistoryRecordMetadata,
-  ) {
+  constructor(db: ProjectDatabase, metadata: HistoryRecordMetadata) {
     this.db = db;
     this.metadata = metadata;
-    this.reservedIds = new Set(
-      sessions.flatMap((session) => session.data.runs.map((run) => run.id)),
-    );
   }
 
   /**
@@ -56,10 +49,11 @@ export class HistoryRecordFactory {
       id = crypto.randomUUID();
     } while (
       this.reservedIds.has(id) ||
-      this.db.get(id) !== undefined ||
-      this.db.get(`S-${id}`) !== undefined ||
-      this.db.get(`CP-${id}`) !== undefined ||
-      this.db.get(`RUN-${id}`) !== undefined
+      this.db.getIdentity(id) !== undefined ||
+      this.db.getIdentity(`S-${id}`) !== undefined ||
+      this.db.getIdentity(`CP-${id}`) !== undefined ||
+      this.db.getIdentity(`RUN-${id}`) !== undefined ||
+      this.db.hasArrayItemByField("work-session", "runs", "id", id)
     );
     this.reservedIds.add(id);
     return id;

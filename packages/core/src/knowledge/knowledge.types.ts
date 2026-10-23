@@ -19,6 +19,18 @@ import type {
 export type KnowledgeInput = Readonly<Record<string, unknown>>;
 
 /**
+ * Активное участие и владелец его ревизии из одного согласованного снимка.
+ */
+export interface ApplicationParticipation {
+  /* Текущий ключ приложения, включая обращение по прежнему алиасу. */
+  readonly application: string;
+  /* Ревизия приложения для замены всего состава участия. */
+  readonly revision: number;
+  /* Полные активные реализации в порядке list по ключу и ID; снятая история исключена. */
+  readonly items: KnowledgeRecord<"implementation">[];
+}
+
+/**
  * Проверенные тексты и статус реализации без связей и признака участия.
  */
 export type ImplementationContent = Readonly<

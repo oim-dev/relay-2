@@ -21,4 +21,7 @@ export interface CommandRoute {
 
   /* Имена вложенных команд от корня до проверяемого узла. */
   readonly argv: readonly string[];
+
+  /* Группа показывает справку и при вызове без действия. */
+  readonly group: boolean;
 }

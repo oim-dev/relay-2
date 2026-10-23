@@ -22,7 +22,7 @@ const participation = {
   "source-session-id": string(messages.fields.sourceSessionId),
   "user-name": string(messages.fields.userName),
   "user-email": string(messages.fields.userEmail),
-  ...textArgs("reason"),
+  ...textArgs({ reason: messages.fields.reason }),
 };
 
 /**
@@ -74,13 +74,20 @@ function historyTransitionFields(action: string): Args {
       {
         run: string(messages.fields.runId),
         title: string(messages.fields.forkTitle),
-        ...textArgs("description"),
+        ...textArgs({ description: messages.fields.description }),
       },
       ["runId"],
     );
   }
   return inputArgs(
-    { run: string(messages.fields.runId), ...textArgs(action === "pause" ? "reason" : "result") },
+    {
+      run: string(messages.fields.runId),
+      ...textArgs(
+        action === "pause"
+          ? { reason: messages.fields.reason }
+          : { result: messages.fields.result },
+      ),
+    },
     ["runId"],
   );
 }
@@ -93,7 +100,7 @@ function historyTransitionFields(action: string): Args {
 export function registerHistoryCommands(registry: CommandRegistry): void {
   registry.group("session", messages.session);
   registry.add("session list", {
-    description: messages.list,
+    ...messages.list,
     args: pageArgs,
     fields: {
       q: string(messages.fields.query),
@@ -115,7 +122,7 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
     },
   });
   registry.add("session get", {
-    description: messages.get,
+    ...messages.get,
     args: refArgs,
     /**
      * Возвращает полную запись поручения по ссылке, разрешённой Core.
@@ -123,10 +130,14 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.history.get(i.text("ref"))),
   });
   registry.add("session start", {
-    description: messages.start,
+    ...messages.start,
     mode: "create",
     fields: inputArgs(
-      { title: string(messages.fields.title), ...textArgs("description"), ...participation },
+      {
+        title: string(messages.fields.title),
+        ...textArgs({ description: messages.fields.description }),
+        ...participation,
+      },
       ["operator"],
     ),
     /**
@@ -136,7 +147,7 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.history.start(historyInput(i, true), i.actor)),
   });
   registry.add("session history", {
-    description: messages.history,
+    ...messages.history,
     args: { ref: positional(messages.fields.branch, false), ...pageArgs },
     /**
      * Возвращает страницу полной истории проекта либо выбранного поручения в одном снимке.
@@ -154,9 +165,11 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
     "cancel",
   ] as const) {
     registry.add(`session ${action}`, {
-      description: messages.transitions[action],
+      ...messages.transitions[action],
       mode: "update",
-      args: refArgs,
+      args: {
+        ref: positional(action === "fork" ? messages.fields.intent : messages.fields.branch),
+      },
       fields: historyTransitionFields(action),
       /**
        * Возвращает поручение после атомарного перехода Core; повтор не считается no-op.
@@ -174,15 +187,16 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
     });
   }
   registry.add("session tree", {
-    description: messages.tree,
+    ...messages.tree,
     args: { ...refArgs, ...pageArgs },
+    presentation: "session-tree",
     /**
      * Возвращает страницу дерева поручений; Core строит полное дерево до пагинации.
      */
     run: (i): Result => i.page(i.history.tree(i.text("ref"))),
   });
   registry.add("session intents", {
-    description: messages.intents,
+    ...messages.intents,
     args: { ...refArgs, ...pageArgs, "include-children": flag(messages.fields.includeChildren) },
     /**
      * Возвращает страницу открытых намерений; весь выбранный набор читается в снимке команды.
@@ -191,7 +205,7 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
       i.page(i.history.intents(i.text("ref"), i.values["include-children"] === true)),
   });
   registry.add("session context", {
-    description: messages.context,
+    ...messages.context,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает контекст поручения и страницу материалов из общего снимка.
@@ -204,7 +218,7 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
   });
   registry.group("checkpoint", messages.checkpoint);
   registry.add("checkpoint get", {
-    description: messages.checkpointGet,
+    ...messages.checkpointGet,
     args: refArgs,
     /**
      * Возвращает полную неизменяемую контрольную точку по ссылке, разрешённой Core.
@@ -213,14 +227,23 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
   });
   for (const action of ["open", "save", "complete", "cancel"] as const) {
     registry.add(`checkpoint ${action}`, {
-      description: messages.checkpointActions[action],
+      ...messages.checkpointActions[action],
       mode: "update",
-      args: refArgs,
+      args: {
+        ref: positional(action === "open" ? messages.fields.branch : messages.fields.intent),
+      },
       fields: inputArgs(
         {
           run: string(messages.fields.runId),
           title: string(messages.fields.checkpointTitle),
-          ...textArgs("body", "summary", "done", "remaining", "next-step", "checks"),
+          ...textArgs({
+            body: messages.fields.body,
+            summary: messages.fields.summary,
+            done: messages.fields.done,
+            remaining: messages.fields.remaining,
+            "next-step": messages.fields.nextStep,
+            checks: messages.fields.checks,
+          }),
           references: repeated(messages.fields.reference),
           ...(action === "open" ? {} : { accept: repeated(messages.fields.acceptedSessionId) }),
         },

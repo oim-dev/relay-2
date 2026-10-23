@@ -1,8 +1,10 @@
+import type { EntityKind } from "@relay/contracts";
+
 /**
  * Подписи предметных полей в полном текстовом представлении CLI.
  * Неизвестное поле сохраняет своё машинное имя.
  */
-export const outputLabels: Readonly<Record<string, string>> = {
+export const outputLabels = {
   id: "ID",
   kind: "Тип",
   key: "Ключ",
@@ -70,6 +72,13 @@ export const outputLabels: Readonly<Record<string, string>> = {
   sectionId: "ID раздела",
   pinned: "Закреплён",
   plan: "План",
+  plans: "Планы",
+  release: "Релиз",
+  plannedFor: "Плановая дата",
+  releasedAt: "Время выпуска",
+  releasedBy: "Автор выпуска",
+  canRelease: "Можно выпустить",
+  percent: "Процент",
   stage: "Этап",
   task: "Задача",
   session: "Сессия",
@@ -77,6 +86,9 @@ export const outputLabels: Readonly<Record<string, string>> = {
   planIds: "ID планов",
   parentSessionId: "Родительская сессия",
   sessionId: "ID сессии",
+  sessionRevision: "Ревизия сессии при записи",
+  acceptedSessionIds: "Принятые дочерние сессии (ID)",
+  sequence: "Порядковый номер в сессии",
   intentId: "ID намерения",
   runs: "Участия",
   operator: "Пользователь",
@@ -90,6 +102,42 @@ export const outputLabels: Readonly<Record<string, string>> = {
   blocked: "Заблокировано",
   records: "Записей",
   bytes: "Размер в байтах",
+} as const;
+
+/**
+ * Уточнения одинаковых имён полей по виду записи, не меняющие подписи других DTO.
+ */
+export const outputEntityLabels: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  release: { version: "Версия выпуска" },
+  "work-checkpoint": { revision: "Ревизия контрольной точки" },
+};
+
+/**
+ * Подписи исходной конфигурации, отличающие сохранённое переопределение от вычисленного пути.
+ */
+export const configurationLabels: Readonly<Record<string, string>> = {
+  ...outputLabels,
+  version: "Версия конфигурации",
+  databasePath: "Путь базы в конфиге (переопределение)",
+};
+
+/**
+ * Названия глобальных счётчиков записей в компактной сводке проекта.
+ */
+export const overviewKindLabels: Readonly<Record<EntityKind, string>> = {
+  project: "Проекты",
+  product: "Продукты",
+  feature: "Фичи",
+  scenario: "Сценарии",
+  application: "Приложения",
+  implementation: "Реализации",
+  board: "Доски",
+  document: "Документы",
+  task: "Задачи",
+  "work-plan": "Планы",
+  release: "Релизы",
+  "work-session": "Сессии",
+  "work-checkpoint": "Контрольные точки",
 };
 
 /**
@@ -102,6 +150,65 @@ export const outputMessages = {
   completed: "выполнено",
   unfinished: "не выполнено",
   emptyPage: "Записей нет.",
+  inactiveImplementation: "участие снято",
+  comment: "Комментарий",
+  commentAuthor: "Автор",
+  sessionRoot: "корень",
+  configurationSource: "Исходная конфигурация",
+  configurationLocation: "Вычисленное расположение",
+  overviewSummary: "Сводка проекта",
+
+  /**
+   * Отделяет полное тело комментария от метаданных, не меняя его пробелы и переводы строк.
+   */
+  commentBody: (body: string): string => `Содержание:\n${body}`,
+
+  /**
+   * Подписывает родительскую сессию, чей ключ присутствует на этой же странице.
+   */
+  sessionParent: (key: string): string => `  Родительская сессия: ${key}`,
+
+  /**
+   * Сохраняет адрес родителя за пределами окна, не выдавая дочернюю сессию за корень.
+   */
+  sessionParentOutsidePage: (id: string): string =>
+    `  Родительская сессия (ID, вне страницы): ${id}`,
+
+  /**
+   * Дополняет краткую карточку проекта поколением общего снимка.
+   */
+  overviewProject: (summary: string, generation: number): string =>
+    `${summary} · поколение ${generation}`,
+
+  /**
+   * Показывает размер всего проекта, а не текущего окна карты.
+   */
+  overviewRecords: (total: number): string => `Записей: ${total}`,
+
+  /**
+   * Показывает один счётчик вида записи либо колонки задач.
+   */
+  overviewCount: (label: string, count: number): string => `${label} ${count}`,
+
+  /**
+   * Отделяет глобальную сводку задач от общего каталога записей.
+   */
+  overviewTasks: (total: number, columns: string): string => `Задачи (${total}): ${columns}`,
+
+  /**
+   * Уточняет предметный смысл блокировок в обзоре проекта.
+   */
+  overviewBlocked: (count: number): string => `С незавершёнными прямыми обязательствами: ${count}`,
+
+  /**
+   * Отмечает размер текущего окна рядом с заголовком карты.
+   */
+  overviewMap: (count: number, total: number): string => `Карта — ${count} из ${total}`,
+
+  /**
+   * Добавляет вид записи к её адресу в смешанной карте проекта.
+   */
+  mapKey: (key: string, kind: string): string => `${key} [${kind}]`,
 
   /**
    * Форматирует поле, начиная многострочное значение с отдельной строки.

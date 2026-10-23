@@ -81,6 +81,7 @@ export const knowledgeMessages = {
   productExists: "Паспорт уже заполнен; используйте update с его ревизией",
   participationExists:
     "Участие в этой цели уже существует; снятое участие возвращается через replaceParticipation",
+  participationMismatch: "Активные реализации не совпадают с составом участия приложения",
   boardUpdate: "Имя доски приложения меняется через application update",
   emptyUpdate: "Укажите хотя бы одно изменяемое поле",
   foreignBoard: "Доска не принадлежит приложению",

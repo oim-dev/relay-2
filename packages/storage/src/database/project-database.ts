@@ -13,9 +13,14 @@ import {
   countEntities,
   entityWindow,
   findAddressIdentities,
+  getEntities,
   getEntity,
+  getEntityIdentities,
   getEntityIdentity,
+  getEntityRevision,
+  hasEntityArrayItemByField,
   listEntities,
+  listEntitiesByField,
   taskGraphRecords,
 } from "../entities/entity-queries";
 import {
@@ -232,6 +237,24 @@ export class ProjectDatabase {
   }
 
   /**
+   * Читает полные карточки и журналы только запрошенных постоянных ID одним SQL-запросом.
+   * Сохраняет порядок и повторы ID, пропуская отсутствующие записи и несовпадающий вид.
+   * Ключи и алиасы не разрешаются; пустой пакет возвращает пустой массив без SQL.
+   */
+  getMany(ids: readonly string[], kind?: EntityKind): EntityRecord[] {
+    return this.withOpenConnection(() => getEntities(this.connection, ids, kind));
+  }
+
+  /**
+   * Читает идентичности запрошенных постоянных ID одним SQL-запросом без JSON и журналов.
+   * Порядок, повторы и пропуски соответствуют getMany; ключи и алиасы не разрешаются.
+   * Пустой пакет возвращает пустой массив без SQL; отсутствующие и чужие ссылки проверяет Core.
+   */
+  getManyIdentities(ids: readonly string[], kind?: EntityKind): EntityIdentity[] {
+    return this.withOpenConnection(() => getEntityIdentities(this.connection, ids, kind));
+  }
+
+  /**
    * Ищет точные строковые slug/prefix внутри вида, без выдачи содержания, в порядке ID.
    * Приоритет адресов, допустимые виды виртуальных ссылок и неоднозначность проверяет Core.
    */
@@ -245,6 +268,32 @@ export class ProjectDatabase {
    */
   list(kind?: EntityKind): EntityRecord[] {
     return this.withOpenConnection(() => listEntities(this.connection, kind));
+  }
+
+  /**
+   * Читает карточки вида с точным строковым полем верхнего уровня JSON одним SQL-запросом.
+   * Имя поля сравнивается буквально, не как JSON-путь; порядок — по ключу и ID.
+   * Фильтрация выполняется в SQLite; в TypeScript передаются только выбранные карточки и журналы.
+   */
+  listByField(kind: EntityKind, field: string, value: string): EntityRecord[] {
+    return this.withOpenConnection(() => listEntitiesByField(this.connection, kind, field, value));
+  }
+
+  /**
+   * Проверяет существование записи вида с объектом в верхнеуровневом массиве arrayField.
+   * Поле itemField объекта должно точно совпадать со строкой value; имена полей буквальные.
+   * Неподходящие формы и отсутствие совпадений дают false. Один SQL-запрос не загружает содержание.
+   * Общий snapshot/transaction задаёт вызывающий; закрытая база даёт DATABASE_CLOSED.
+   */
+  hasArrayItemByField(
+    kind: EntityKind,
+    arrayField: string,
+    itemField: string,
+    value: string,
+  ): boolean {
+    return this.withOpenConnection(() =>
+      hasEntityArrayItemByField(this.connection, kind, arrayField, itemField, value),
+    );
   }
 
   /**
@@ -287,11 +336,12 @@ export class ProjectDatabase {
    * Атомарно заменяет содержание по постоянному ID и ожидаемой ревизии, сохраняя журнал задачи.
    * Вызывающий передаёт следующую ревизию; no-op здесь не распознаётся, SQL требует прирост на один.
    * Отсутствующий ID даёт NOT_FOUND, устаревшая ревизия — REVISION_CONFLICT до попытки записи.
+   * Предварительная проверка читает только ID и ревизию; неизменяемые поля защищает SQL.
    */
   update(entity: EntityRecord, expectedRevision: number): void {
     this.transaction(() => {
-      const current = this.get(entity.id);
-      if (!current || current.id !== entity.id) {
+      const current = getEntityRevision(this.connection, entity.id);
+      if (!current) {
         throw new RelayError("NOT_FOUND", entityMessages.entityMissing, 3, { id: entity.id });
       }
       if (current.revision !== expectedRevision) {
@@ -341,6 +391,7 @@ export class ProjectDatabase {
    * Атомарно меняет читаемый ключ по постоянному ID, сохраняя прежний алиас и увеличивая ревизию.
    * Ключ и алиас вместо ID не принимаются; их заранее разрешает вызывающий Core.
    * При прежнем ключе возвращает текущую карточку без записи, но только после проверки CAS.
+   * Полное содержание и журнал для результата читаются один раз в той же транзакции.
    */
   rename(id: string, key: string, expectedRevision: number, actor: string): EntityRecord {
     // Двоеточие принадлежит синтаксису kind:ref, а не пространству читаемых ключей.
@@ -365,7 +416,9 @@ export class ProjectDatabase {
         updatedBy: actor,
         updatedAt: new Date().toISOString(),
       };
-      this.update(renamed, expectedRevision);
+      if (!updateEntity(this.connection, renamed, expectedRevision)) {
+        throw revisionConflict(current, expectedRevision);
+      }
       return renamed;
     });
   }

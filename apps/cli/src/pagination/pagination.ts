@@ -8,7 +8,13 @@ import {
   MAX_PAGE_SIZE,
   MIN_PAGE_SIZE,
 } from "./pagination.constants";
-import type { Cursor, Paginated, PageSource, PaginationOptions } from "./pagination.types";
+import type {
+  Cursor,
+  Paginated,
+  PageSelection,
+  PageSource,
+  PaginationOptions,
+} from "./pagination.types";
 
 /**
  * Вычисляет SHA-256 по JSON-представлению значения; порядок полей является частью отпечатка.
@@ -106,8 +112,8 @@ function checkCursor(
 
 /**
  * Проверяет курсор и читает единственное окно источника, не изменяя переданный массив.
- * Вызывающий код удерживает общий снимок для generation, total и items. Ленивый источник
- * получает offset/limit для ограничения запроса; массив уже полностью вычислен до вызова.
+ * Вызывающий код удерживает общий снимок для generation, total, items и необязательного owner.
+ * Ленивый источник получает offset/limit для ограничения запроса; массив уже полностью вычислен.
  */
 export function paginate<T>(source: PageSource<T>, options: PaginationOptions): Paginated<T> {
   const query = fingerprint(options.query);
@@ -115,7 +121,7 @@ export function paginate<T>(source: PageSource<T>, options: PaginationOptions): 
   checkCursor(previous, query, options);
   const offset = previous?.offset ?? 0;
   const limit = previous?.limit ?? options.limit;
-  const selection =
+  const selection: PageSelection<T> =
     typeof source === "function"
       ? source({ offset, limit })
       : { items: source.slice(offset, offset + limit), total: source.length };
@@ -132,6 +138,7 @@ export function paginate<T>(source: PageSource<T>, options: PaginationOptions): 
       : null;
   return {
     items: selection.items,
+    ...(selection.owner === undefined ? {} : { owner: selection.owner }),
     page: {
       count: selection.items.length,
       total: selection.total,

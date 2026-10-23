@@ -78,6 +78,18 @@ const scriptMarkers = [
 const bashValues = [
   { name: "значение через равенство", words: ["relay", "--format=j"], expected: "json\n" },
   { name: "пустое слово", words: ["relay", "--format", ""], expected: "text\njson\n" },
+  {
+    name: "флаг после завершённого разделителя",
+    words: ["relay", "document", "get", "--", "--f"],
+    expected: "\n",
+  },
+] as const;
+
+const terminatedQueries = [
+  { name: "префикс флага", words: ["document", "get", "--", "--f"] },
+  { name: "пустое слово", words: ["document", "get", "--", ""] },
+  { name: "значение enum", words: ["document", "get", "--", "--format", "j"] },
+  { name: "второе слово --", words: ["document", "get", "--", "--"] },
 ] as const;
 
 const stdoutFailures = [
@@ -130,6 +142,15 @@ function candidateValues(stdout: string): string[] {
 }
 
 describe("Shell completion собранного CLI", () => {
+  test.each(terminatedQueries)(
+    "$name после завершённого -- возвращает только директиву без файлового fallback",
+    async ({ words }) => {
+      const result = await invokeBinary(["complete", "--", ...words], { openStdin: true });
+
+      expect(result).toEqual({ exitCode: 0, stdout: ":4\n", stderr: "", files: [] });
+    },
+  );
+
   test.each(queries)(
     "$name: возвращаются подходящие кандидаты",
     async ({ words, included, excluded }) => {
@@ -168,7 +189,7 @@ describe("Shell completion собранного CLI", () => {
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toMatchObject({
       ok: false,
-      error: { code: "INVALID_ARGUMENT" },
+      error: { code: "INVALID_ARGUMENT", helpCommand: "relay complete --help" },
     });
     expect(result.files).toEqual([]);
   });

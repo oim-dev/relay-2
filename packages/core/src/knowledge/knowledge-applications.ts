@@ -1,9 +1,9 @@
-import { RelayError, type KnowledgeRecord, type WriteOptions } from "@relay/contracts";
+import { RelayError, type KnowledgeRecord } from "@relay/contracts";
+import type { ProjectDatabase } from "@relay/storage";
 import type { EntityService } from "../entities/entities";
 import { decodeKnowledge } from "./knowledge-data";
-import type { KnowledgeQueries } from "./knowledge-queries";
 import { knowledgeMessages } from "./knowledge.messages";
-import type { ApplicationCreationData, KnowledgePatchMap } from "./knowledge.types";
+import type { ApplicationCreationData } from "./knowledge.types";
 
 /**
  * Совместные изменения приложения и принадлежащей ему доски.
@@ -12,15 +12,15 @@ import type { ApplicationCreationData, KnowledgePatchMap } from "./knowledge.typ
 export class KnowledgeApplications {
   /* Внутренний механизм записи с CAS и сохранением адресов. */
   private readonly entities: EntityService;
-  /* Чтение проверенных записей той же операции. */
-  private readonly queries: KnowledgeQueries;
+  /* Адресные проекции той же транзакции без загрузки содержания. */
+  private readonly db: ProjectDatabase;
 
   /**
    * Принимает механизмы чтения и записи внешнего транзакционного владельца.
    */
-  constructor(entities: EntityService, queries: KnowledgeQueries) {
+  constructor(db: ProjectDatabase, entities: EntityService) {
     this.entities = entities;
-    this.queries = queries;
+    this.db = db;
   }
 
   /**
@@ -60,30 +60,18 @@ export class KnowledgeApplications {
   }
 
   /**
-   * Обновляет тексты приложения и синхронно имя доски под её собственной ревизией.
-   * CAS приложения проверен вызывающим; неизменные значения сохраняют обе ревизии.
+   * Синхронизирует имя доски после изменения приложения в той же внешней транзакции.
+   * Доска читается один раз и сохраняет собственный ключ; равное имя — no-op.
+   * Отсутствие или чужой владелец доски откатывает также уже записанное приложение.
    */
-  update(
-    current: KnowledgeRecord<"application">,
-    patch: Readonly<KnowledgePatchMap["application"]>,
-    write: WriteOptions,
-  ): KnowledgeRecord<"application"> {
-    const board =
-      patch.name === undefined ? undefined : this.queries.resolve(current.data.boardId, "board");
-    if (board !== undefined && board.data.applicationId !== current.id) {
-      throw new RelayError("INVALID_STATE", knowledgeMessages.foreignBoard, 4);
-    }
-    const updated = this.entities.update(current.id, "application", { ...patch }, write);
-    if (board !== undefined) {
-      // Собственная ревизия доски сохраняет независимые переименования её ключа.
-      this.entities.update(
-        board.id,
-        "board",
-        { name: patch.name },
-        { actor: write.actor, ifRevision: board.revision },
-      );
-    }
-    return decodeKnowledge(updated, "application");
+  synchronizeBoard(application: KnowledgeRecord<"application">, name: string, actor: string): void {
+    this.entities.changeRelated(application.data.boardId, "board", actor, (record) => {
+      const board = decodeKnowledge(record, "board");
+      if (board.data.applicationId !== application.id) {
+        throw new RelayError("INVALID_STATE", knowledgeMessages.foreignBoard, 4);
+      }
+      return { patch: { name } };
+    });
   }
 
   /**
@@ -91,13 +79,11 @@ export class KnowledgeApplications {
    * Коллизиями ключей и исторических алиасов дополнительно владеет EntityService.
    */
   private requireFreeAddress(data: ApplicationCreationData): void {
-    const occupied =
-      this.queries
-        .records("board")
-        .some((record) => record.data.slug === data.slug || record.data.prefix === data.prefix) ||
-      this.queries
-        .records("application")
-        .some((record) => record.data.slug === data.slug || record.data.prefix === data.prefix);
+    const occupied = (["board", "application"] as const).some((kind) =>
+      [data.slug, data.prefix].some(
+        (address) => this.db.findAddressIdentities(address, kind).length > 0,
+      ),
+    );
     if (occupied) {
       throw new RelayError("ALREADY_EXISTS", knowledgeMessages.boardAddress, 4);
     }

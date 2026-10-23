@@ -17,6 +17,11 @@ import {
   writeConfig,
 } from "./helpers/runtime-fixture";
 
+const initializers = [
+  { name: "проекта", initialize: initializeProject },
+  { name: "workspace", initialize: initializeWorkspace },
+] as const;
+
 describe("Инициализация и выбор локального проекта", () => {
   let fixture: RuntimeFixture;
 
@@ -27,6 +32,21 @@ describe("Инициализация и выбор локального прое
   afterEach(async () => {
     await fixture.dispose();
   });
+
+  test.each(initializers)(
+    "пустой явно заданный home отклоняется при инициализации $name без создания файлов",
+    ({ initialize }) => {
+      const { cwd, root } = fixture;
+
+      const code = runtimeErrorCode(() =>
+        initialize({ cwd: join(cwd, "nested"), home: "", config: "settings/config.json" }),
+      );
+
+      expect(code).toBe("INVALID_ARGUMENT");
+      expect(readdirSync(cwd)).toEqual([]);
+      expect(readdirSync(root)).toEqual(["work"]);
+    },
+  );
 
   test("init публикует конфиг без databasePath и выбирает созданную базу через home", () => {
     const { cwd, home } = fixture;

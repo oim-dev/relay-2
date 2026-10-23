@@ -5,7 +5,7 @@
 import type { Database } from "bun:sqlite";
 import { RelayError, type EntityRecord, type TaskComment } from "@relay/contracts";
 import { getEntityIdentity } from "./entity-queries";
-import type { KeyCounterRow } from "./entity-queries.types";
+import type { EntityRevision, KeyCounterRow } from "./entity-queries.types";
 import { entityMessages } from "./entity.messages";
 
 /**
@@ -144,7 +144,7 @@ export function appendComment(connection: Database, taskId: string, comment: Tas
 /**
  * Формирует отказ CAS по фактической ревизии содержания сущности.
  */
-export function revisionConflict(entity: EntityRecord, expectedRevision: number): RelayError {
+export function revisionConflict(entity: EntityRevision, expectedRevision: number): RelayError {
   return new RelayError("REVISION_CONFLICT", entityMessages.revisionConflict, 4, {
     id: entity.id,
     expectedRevision,

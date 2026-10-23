@@ -20,7 +20,7 @@ import type { TaskCommentInput } from "./input.types";
 
 const content = {
   title: string(messages.fields.title),
-  ...textArgs("description"),
+  ...textArgs({ description: messages.fields.description }),
   targets: repeated(messages.fields.target),
 };
 
@@ -45,7 +45,7 @@ function readTaskCommentInput(input: Readonly<Record<string, unknown>>): TaskCom
 export function registerTaskCommands(registry: CommandRegistry): void {
   registry.group("task", messages.task);
   registry.add("task list", {
-    description: messages.list,
+    ...messages.list,
     args: pageArgs,
     fields: {
       board: string(messages.fields.board),
@@ -63,7 +63,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => i.page((window) => i.tasks.listPage(i.input, { ...window, sort: "key" })),
   });
   registry.add("task get", {
-    description: messages.get,
+    ...messages.get,
     args: refArgs,
     /**
      * Возвращает полную карточку задачи по ссылке, разрешённой Core.
@@ -71,7 +71,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.get(i.text("ref"))),
   });
   registry.add("task create", {
-    description: messages.create,
+    ...messages.create,
     mode: "create",
     fields: inputArgs({
       ...content,
@@ -88,7 +88,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.create(i.input, i.actor)),
   });
   registry.add("task update", {
-    description: messages.update,
+    ...messages.update,
     mode: "update",
     args: refArgs,
     fields: inputArgs(content),
@@ -98,7 +98,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.update(i.text("ref"), i.input, i.write)),
   });
   registry.add("task move", {
-    description: messages.move,
+    ...messages.move,
     mode: "update",
     args: refArgs,
     fields: inputArgs({
@@ -111,7 +111,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.move(i.text("ref"), i.input, i.write)),
   });
   registry.add("task progress", {
-    description: messages.progress,
+    ...messages.progress,
     args: refArgs,
     /**
      * Возвращает рассчитанные Core обязательства и блокеры задачи в снимке команды.
@@ -119,7 +119,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.progress(i.text("ref"))),
   });
   registry.add("task children", {
-    description: messages.children,
+    ...messages.children,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу прямых детей; разрешение родителя и фильтрация принадлежат Core.
@@ -130,7 +130,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   registry.group("task parent", messages.parent);
   for (const clear of [false, true]) {
     registry.add(`task parent ${clear ? "clear" : "set"}`, {
-      description: clear ? messages.parentClear : messages.parentSet,
+      ...(clear ? messages.parentClear : messages.parentSet),
       mode: "update",
       args: { ...refArgs, ...(clear ? {} : { parent: positional(messages.fields.parentTask) }) },
       /**
@@ -143,20 +143,20 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   }
   registry.group("task dependency", messages.dependency);
   registry.add("task dependency list", {
-    description: messages.dependencyList,
+    ...messages.dependencyList,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу зависимостей и ревизию владельца из общего снимка команды.
      * Полный список зависимостей читается до пагинации.
      */
     run: (i): Result => {
-      const task = i.tasks.get(i.text("ref"));
-      return i.page(i.tasks.dependencies(task.id), { ref: task.key, revision: task.revision });
+      const { task, revision, items } = i.tasks.dependenciesWithOwner(i.text("ref"));
+      return i.page(items, { ref: task, revision });
     },
   });
   for (const remove of [false, true]) {
     registry.add(`task dependency ${remove ? "remove" : "add"}`, {
-      description: remove ? messages.dependencyRemove : messages.dependencyAdd,
+      ...(remove ? messages.dependencyRemove : messages.dependencyAdd),
       mode: "update",
       args: { ...refArgs, target: positional(messages.fields.dependencyTask) },
       /**
@@ -168,34 +168,27 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   }
   registry.group("task criterion", messages.criterion);
   registry.add("task criterion list", {
-    description: messages.criterionList,
+    ...messages.criterionList,
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу полного набора критериев и ревизию задачи из одного снимка.
      */
     run: (i): Result => {
-      const task = i.tasks.get(i.text("ref"));
-      return i.page(i.tasks.criteria(task.id), { ref: task.key, revision: task.revision });
+      const { task, revision, items } = i.tasks.criteriaWithOwner(i.text("ref"));
+      return i.page(items, { ref: task, revision });
     },
   });
   registry.add("task criterion get", {
-    description: messages.criterionGet,
+    ...messages.criterionGet,
     args: { ...refArgs, criterion: positional(messages.fields.criterionId) },
     /**
      * Возвращает критерий с ключом и ревизией его задачи из снимка команды.
      */
-    run: (i): Result => {
-      const task = i.tasks.get(i.text("ref"));
-      return result({
-        task: task.key,
-        revision: task.revision,
-        criterion: i.tasks.getCriterion(task.id, i.text("criterion")),
-      });
-    },
+    run: (i): Result => result(i.tasks.getCriterionWithOwner(i.text("ref"), i.text("criterion"))),
   });
   for (const action of ["add", "update", "complete", "reopen", "remove"] as const) {
     registry.add(`task criterion ${action}`, {
-      description: messages.criterionActions[action],
+      ...messages.criterionActions[action],
       mode: "update",
       args: {
         ...refArgs,
@@ -205,7 +198,10 @@ export function registerTaskCommands(registry: CommandRegistry): void {
         action === "add" || action === "update"
           ? inputArgs({
               title: string(messages.fields.heading),
-              ...textArgs("summary", "description"),
+              ...textArgs({
+                summary: messages.fields.criterionSummary,
+                description: messages.fields.criterionDescription,
+              }),
             })
           : {},
       /**
@@ -225,18 +221,19 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   }
   registry.group("task comment", messages.comment);
   registry.add("task comment list", {
-    description: messages.commentList,
+    ...messages.commentList,
+    presentation: "task-comments",
     args: { ...refArgs, ...pageArgs },
     /**
      * Возвращает страницу полного журнала комментариев и ревизию задачи из одного снимка.
      */
     run: (i): Result => {
-      const task = i.tasks.get(i.text("ref"));
-      return i.page(i.tasks.comments(task.id), { task: task.key, revision: task.revision });
+      const { task, revision, items } = i.tasks.commentsWithOwner(i.text("ref"));
+      return i.page(items, { task, revision });
     },
   });
   registry.add("task comment get", {
-    description: messages.commentGet,
+    ...messages.commentGet,
     args: { ...refArgs, comment: positional(messages.fields.commentId) },
     /**
      * Возвращает комментарий указанной задачи по его постоянному ID.
@@ -244,10 +241,13 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     run: (i): Result => result(i.tasks.getComment(i.text("ref"), i.text("comment"))),
   });
   registry.add("task comment add", {
-    description: messages.commentAdd,
+    ...messages.commentAdd,
     mode: "create",
     args: refArgs,
-    fields: inputArgs({ title: string(messages.fields.heading), ...textArgs("body") }),
+    fields: inputArgs({
+      title: string(messages.fields.commentTitle),
+      ...textArgs({ body: messages.fields.commentBody }),
+    }),
     /**
      * Публикует новый комментарий и возвращает задачу с дополненным журналом.
      * Запись Core атомарна и не меняет ревизию содержания задачи; повтор создаёт новую запись.
@@ -259,7 +259,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
   });
   for (const remove of [false, true]) {
     registry.add(`task ${remove ? "unlink" : "link"}`, {
-      description: remove ? messages.unlink : messages.link,
+      ...(remove ? messages.unlink : messages.link),
       mode: "update",
       args: { ...refArgs, target: positional(messages.fields.related) },
       /**

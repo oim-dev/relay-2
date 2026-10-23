@@ -119,6 +119,18 @@ describe("Курсор страницы CLI", () => {
     expect(second.page.nextCursor).toBeNull();
   });
 
+  test("метаданные владельца возвращаются из источника даже для пустого окна", () => {
+    const owner = Object.freeze({ plan: "PLN-1", revision: 4 });
+    const selection = { items: [], total: 0, owner };
+
+    const page = paginate(() => selection, paginationOptions());
+
+    expect(page.owner).toEqual({ plan: "PLN-1", revision: 4 });
+    expect(page.items).toEqual([]);
+    expect(page.page).toMatchObject({ total: 0, count: 0, nextCursor: null });
+    expect(selection).toEqual({ items: [], total: 0, owner: { plan: "PLN-1", revision: 4 } });
+  });
+
   test("устаревший курсор отклоняется до обращения к ленивому источнику", () => {
     const options = paginationOptions();
     const cursor = nextCursor(paginate(["a", "b"], options).page);

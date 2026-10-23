@@ -34,6 +34,7 @@ import type { TaskCriterionAction, TaskLinkChange } from "./task-input.types";
 import { selectTaskRecords } from "./task-list";
 import { taskLabels, taskMessages } from "./task-messages";
 import { TaskReferences } from "./task-references";
+import type { TaskCollection, TaskCriterionRead } from "./task-read.types";
 import {
   changeTaskLink,
   ensureTaskDone,
@@ -296,7 +297,19 @@ export class TasksService {
    * Возвращает журнал в порядке публикации из одного снимка карточки задачи.
    */
   comments(ref: string): TaskComment[] {
-    return this.get(ref).data.comments;
+    return this.commentsWithOwner(ref).items;
+  }
+
+  /**
+   * Возвращает весь независимый журнал в порядке публикации вместе с ключом и ревизией задачи.
+   * Полная карточка с журналом читается и проверяется один раз в общем снимке;
+   * отсутствие задачи даёт NOT_FOUND, повреждение содержания — CORRUPT_DATA.
+   */
+  commentsWithOwner(ref: string): TaskCollection<TaskComment> {
+    return this.db.snapshot(() => {
+      const task = this.get(ref);
+      return { task: task.key, revision: task.revision, items: task.data.comments };
+    });
   }
 
   /**
@@ -358,14 +371,40 @@ export class TasksService {
    * Отсутствующие или повреждённые задачи отвергают чтение всего состава.
    */
   dependencies(ref: string): TaskRecord[] {
-    return this.db.snapshot(() => this.get(ref).data.dependencies.map((id) => this.get(id)));
+    return this.dependenciesWithOwner(ref).items;
+  }
+
+  /**
+   * Возвращает ключ/ревизию владельца и полные карточки прямых зависимостей из одного снимка.
+   * Владелец читается один раз; все зависимости с журналами загружаются в сохранённом порядке.
+   * Отсутствие задачи даёт NOT_FOUND, повреждённое содержание — CORRUPT_DATA;
+   * ошибка любой зависимости отвергает весь состав. Пагинация потребителя не сокращает чтение.
+   */
+  dependenciesWithOwner(ref: string): TaskCollection<TaskRecord> {
+    return this.db.snapshot(() => {
+      const task = this.get(ref);
+      const items = task.data.dependencies.map((id) => this.get(id));
+      return { task: task.key, revision: task.revision, items };
+    });
   }
 
   /**
    * Возвращает критерии в сохранённом порядке из снимка полной карточки.
    */
   criteria(ref: string): TaskCriterion[] {
-    return this.get(ref).data.acceptanceCriteria;
+    return this.criteriaWithOwner(ref).items;
+  }
+
+  /**
+   * Возвращает все критерии в сохранённом порядке вместе с ключом и ревизией задачи.
+   * Полная карточка с журналом читается и проверяется один раз в общем снимке;
+   * отсутствие задачи даёт NOT_FOUND, повреждение содержания — CORRUPT_DATA.
+   */
+  criteriaWithOwner(ref: string): TaskCollection<TaskCriterion> {
+    return this.db.snapshot(() => {
+      const task = this.get(ref);
+      return { task: task.key, revision: task.revision, items: task.data.acceptanceCriteria };
+    });
   }
 
   /**
@@ -374,6 +413,17 @@ export class TasksService {
   getCriterion(ref: string, id: string): TaskCriterion {
     const criterionId = reference(id, taskLabels.criterionId);
     return findTaskCriterion(this.criteria(ref), criterionId);
+  }
+
+  /**
+   * Находит критерий внутри задачи и возвращает его с ключом/ревизией владельца того же снимка.
+   * Сначала один раз читает и проверяет полную карточку с журналом, затем проверяет ID критерия.
+   * Чужой или отсутствующий критерий даёт NOT_FOUND; повреждение карточки — CORRUPT_DATA.
+   */
+  getCriterionWithOwner(ref: string, id: string): TaskCriterionRead {
+    const { task, revision, items } = this.criteriaWithOwner(ref);
+    const criterionId = reference(id, taskLabels.criterionId);
+    return { task, revision, criterion: findTaskCriterion(items, criterionId) };
   }
 
   /**

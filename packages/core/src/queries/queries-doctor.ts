@@ -84,6 +84,7 @@ function inspectRecords(items: readonly EntityRecord[], projectId: string): stri
 
 /**
  * Декодирует все карточки единственным reader и сохраняет проверенные задачи для общего графа.
+ * Проект для разделов берётся из полного состава, без повторного адресного чтения.
  * CORRUPT_DATA добавляется в диагностику; неожиданные ошибки и отказы хранилища пробрасываются.
  * Первая повреждённая задача сохраняется, чтобы неполный набор не прошёл проверку графа.
  */
@@ -91,7 +92,10 @@ function inspectDecodedRecords(
   db: ProjectDatabase,
   items: readonly EntityRecord[],
 ): EntityDecodingInspection {
-  const reader = new EntityReader(db);
+  const reader = new EntityReader(
+    db,
+    items.find((item) => item.id === db.projectId && item.kind === "project") ?? null,
+  );
   const tasks: TaskRecord[] = [];
   const issues: string[] = [];
   let taskError: RelayError | undefined;

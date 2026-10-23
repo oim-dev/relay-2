@@ -11,21 +11,21 @@ import type { CommandRegistry } from "../../execution/registry";
  */
 export function registerQueryCommands(registry: CommandRegistry): void {
   registry.add("search", {
-    description: messages.search,
+    ...messages.search,
     args: pageArgs,
     fields: {
       q: string(messages.query, true),
       kind: choice(messages.kind, [...QueryService.kinds]),
     },
     /**
-     * Возвращает страницу поиска Core; полный набор совпадений загружается до пагинации.
+     * Проверяет курсор до запуска Core; успешный запрос вычисляет полный состав перед выбором окна.
      */
-    run: (i): Result => i.entities(i.queries.search(i.input)),
+    run: (i): Result => i.entities(() => i.queries.search(i.input)),
   });
   registry.group("inspect", messages.inspect);
   for (const command of ["get", "resolve"]) {
     registry.add(`inspect ${command}`, {
-      description: messages.inspectGet,
+      ...messages.inspectGet,
       args: refArgs,
       /**
        * Возвращает полную запись, найденную Core по пользовательской ссылке.
@@ -34,8 +34,9 @@ export function registerQueryCommands(registry: CommandRegistry): void {
     });
   }
   registry.add("overview", {
-    description: messages.overview,
+    ...messages.overview,
     args: pageArgs,
+    presentation: "overview",
     /**
      * Возвращает сводку и страницу карты из одного снимка; карта читается целиком.
      */
@@ -46,7 +47,7 @@ export function registerQueryCommands(registry: CommandRegistry): void {
   });
   registry.group("storage", messages.storage);
   registry.add("storage status", {
-    description: messages.storageStatus,
+    ...messages.storageStatus,
     /**
      * Возвращает диагностические сведения о выбранном хранилище без изменения данных.
      */
@@ -54,7 +55,7 @@ export function registerQueryCommands(registry: CommandRegistry): void {
   });
   registry.group("doctor", messages.doctor);
   registry.add("doctor check", {
-    description: messages.doctorCheck,
+    ...messages.doctorCheck,
     /**
      * Возвращает результаты предметных проверок Core, не исправляя сохранённые записи.
      */

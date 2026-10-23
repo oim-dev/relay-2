@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KnowledgeService } from "@relay/core";
 import { initializeProject, initializeWorkspace, registerProject } from "@relay/project-runtime";
@@ -25,6 +25,10 @@ const workspaceSelections = [
     registration: "two",
     argv: ["project", "get", "--project", "two"],
   },
+] as const;
+const invalidRelayHomes = [
+  { name: "пустой", value: "" },
+  { name: "из пробельных символов", value: " \t " },
 ] as const;
 
 describe("Локальный проект CLI", () => {
@@ -58,6 +62,45 @@ describe("Локальный проект CLI", () => {
       const selected = await cli.entity(["project", "get"], { env: { HOME: home } });
 
       expect(selected.id).toBe(project.projectId);
+    });
+  });
+
+  test.each(invalidRelayHomes)(
+    "RELAY_HOME $name отклоняется при init без создания файлов",
+    async ({ value }) => {
+      await withCliFixture(async (cli) => {
+        const env = { HOME: join(cli.root, "user"), RELAY_HOME: value };
+
+        const error = await cli.error(["init", "--config", "settings/project.json"], 2, { env });
+
+        expect(error.code).toBe("INVALID_ARGUMENT");
+        expect(readdirSync(cli.runtime.cwd)).toEqual([]);
+        expect(readdirSync(cli.root)).toEqual(["project"]);
+      });
+    },
+  );
+
+  test("относительный RELAY_HOME и явный config сохраняются при создании и выборе проекта", async () => {
+    await withCliFixture(async (cli) => {
+      const env = {
+        HOME: join(cli.root, "user"),
+        RELAY_HOME: "../local-data",
+        RELAY_CONFIG: "missing.json",
+      };
+      const config = "settings/project.json";
+
+      const answer = await cli.success(["init", "--config", config], { env });
+
+      const data = objectValue(answer.data);
+      const projectId = stringValue(data.projectId);
+      expect(data.configPath).toBe(join(cli.runtime.cwd, config));
+      expect(data.databasePath).toBe(
+        join(cli.root, "local-data", "projects", projectId, "project.sqlite"),
+      );
+      expect((await cli.entity(["project", "get", "--config", config], { env })).id).toBe(
+        projectId,
+      );
+      expect(readdirSync(cli.root).sort()).toEqual(["local-data", "project"]);
     });
   });
 

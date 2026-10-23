@@ -1,13 +1,16 @@
-import type {
-  HistoryCheckpoint,
-  HistoryContext,
-  HistoryOperator,
-  HistoryReference,
-  HistorySession,
-  ProjectEntity,
+import {
+  RelayError,
+  type EntityRecord,
+  type HistoryCheckpoint,
+  type HistoryContext,
+  type HistoryOperator,
+  type HistoryReference,
+  type HistorySession,
+  type ProjectEntity,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../entities/entities";
+import { entityMessages } from "../entities/entity.messages";
 import { EntityReader } from "../projections/entity-reader";
 import { decodeHistoryCheckpoint, decodeHistorySession } from "./history-data";
 import { historyFilters, invalidHistoryInput } from "./history-input";
@@ -120,6 +123,41 @@ export class HistoryReader {
   }
 
   /**
+   * Декодирует только материалы указанной сессии для проверки истории и следующего sequence.
+   * Повреждение её соседнего материала не пропускается; снимком владеет вызывающий сценарий.
+   */
+  sessionCheckpoints(sessionId: string): HistoryCheckpoint[] {
+    return this.db
+      .listByField("work-checkpoint", "sessionId", sessionId)
+      .map(decodeHistoryCheckpoint);
+  }
+
+  /**
+   * Читает продолжения исходного intent независимо от их сохранённого sessionId.
+   * Ошибочная ссылка на другую сессию не должна скрыть существующее закрытие намерения.
+   */
+  intentCheckpoints(intentId: string): HistoryCheckpoint[] {
+    return this.db
+      .listByField("work-checkpoint", "intentId", intentId)
+      .map(decodeHistoryCheckpoint);
+  }
+
+  /**
+   * Читает прямых детей сессии и поручения, явно связанные с исходным intent, в общей транзакции.
+   * Обе стороны происхождения нужны, чтобы повреждённая половина связи не скрыла ребёнка.
+   * Пересечение декодируется один раз; допустимость состояния проверяется предметными правилами.
+   */
+  intentChildren(sessionId: string, intentId: string): HistorySession[] {
+    const records = new Map(
+      [
+        ...this.db.listByField("work-session", "parentSessionId", sessionId),
+        ...this.db.listByField("work-session", "originCheckpointId", intentId),
+      ].map((record) => [record.id, record]),
+    );
+    return [...records.values()].map(decodeHistorySession);
+  }
+
+  /**
    * Фильтрует все декодированные сессии одного снимка и возвращает новые записи первыми.
    * Фильтры ограничивают выдачу, но не объём чтения БД.
    */
@@ -199,18 +237,32 @@ export class HistoryReader {
   }
 
   /**
-   * Разрешает ссылки общим читателем и создаёт снимки названий в текущей транзакции.
-   * Разные адреса одной записи запрещены; повреждение любой цели прерывает всю запись материала.
+   * Разрешает адреса общим resolver и одним пакетом читает содержание целей в текущей транзакции.
+   * Разные адреса одной записи запрещены; повреждение любой цели прерывает запись материала.
    */
   references(references: readonly string[]): HistoryReference[] {
+    if (references.length === 0) {
+      return [];
+    }
     const ids = new Set<string>();
-    const reader = new EntityReader(this.db);
-    return references.map((reference) => {
-      const target = reader.get(reference);
-      if (ids.has(target.id)) {
+    const identities = references.map((reference) => {
+      const identity = this.entities.resolve(reference);
+      if (ids.has(identity.id)) {
         invalidHistoryInput(historyInputMessages.duplicateReference);
       }
-      ids.add(target.id);
+      ids.add(identity.id);
+      return identity;
+    });
+    const records = new Map(this.db.getMany([...ids]).map((record) => [record.id, record]));
+    const reader = new EntityReader(this.db);
+    return identities.map((identity) => {
+      const record = records.get(identity.id);
+      if (record === undefined) {
+        throw new RelayError("CORRUPT_DATA", entityMessages.missingResolvedRecord, 1, {
+          id: identity.id,
+        });
+      }
+      const target = reader.decode(record);
       return {
         id: target.id,
         kind: target.kind,
@@ -221,15 +273,35 @@ export class HistoryReader {
   }
 
   /**
-   * Разрешает принимаемых детей, отклоняя ключи и типизированные адреса вместо постоянных ID.
+   * Читает принимаемых детей одним пакетом постоянных ID, переиспользуя уже выбранных детей.
+   * Неверный адрес диагностируется общим resolver; ключи и типизированные ссылки запрещены.
+   * Известные сессии и пакет должны принадлежать текущей транзакции, межоперационного кеша нет.
    */
-  acceptedSessions(ids: readonly string[]): HistorySession[] {
+  acceptedSessions(
+    ids: readonly string[],
+    knownSessions: readonly HistorySession[] = [],
+  ): HistorySession[] {
+    const known = new Map(knownSessions.map((session) => [session.id, session]));
+    const missing = ids.filter((id) => !known.has(id));
+    const records = new Map<string, EntityRecord>(
+      missing.length === 0
+        ? []
+        : this.db.getMany(missing, "work-session").map((record) => [record.id, record]),
+    );
     return ids.map((id) => {
-      const child = this.session(id);
-      if (child.id !== id) {
-        invalidHistoryInput(historyInputMessages.acceptedIdRequired);
+      const child = known.get(id);
+      if (child !== undefined) {
+        return child;
       }
-      return child;
+      const record = records.get(id);
+      if (record === undefined) {
+        const identity = this.entities.resolve(id, "work-session");
+        if (identity.id !== id) {
+          invalidHistoryInput(historyInputMessages.acceptedIdRequired);
+        }
+        throw new RelayError("CORRUPT_DATA", entityMessages.missingResolvedRecord, 1, { id });
+      }
+      return decodeHistorySession(record);
     });
   }
 

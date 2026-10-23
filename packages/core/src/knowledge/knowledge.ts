@@ -14,11 +14,11 @@ import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { parseDocumentSectionChange } from "./document-section-input";
 import { changeDocumentSections, requireActiveDocumentSection } from "./document-sections";
-import type { DocumentSectionAction } from "./document-sections.types";
+import type { DocumentSectionAction, DocumentSectionIndex } from "./document-sections.types";
 import { KnowledgeApplications } from "./knowledge-applications";
 import { DOCUMENT_SECTION_ACTIONS } from "./knowledge-constants";
 import { decodeKnowledge } from "./knowledge-data";
-import { parseKnowledgeFilters } from "./knowledge-filters";
+import { compareKnowledge, parseKnowledgeFilters } from "./knowledge-filters";
 import {
   parseKnowledgeCreation,
   parseKnowledgeLink,
@@ -38,7 +38,7 @@ import type {
   KnowledgeCreation,
   KnowledgeInput,
   KnowledgeLinkOptions,
-  KnowledgeUpdate,
+  ApplicationParticipation,
 } from "./knowledge.types";
 import {
   invalidKnowledge,
@@ -63,7 +63,7 @@ export class KnowledgeService {
   /* Совместные изменения приложения и его доски. */
   private readonly applications: KnowledgeApplications;
   /* Состав активных и исторических реализаций приложений. */
-  private readonly participation: KnowledgeParticipation;
+  private readonly participationWriter: KnowledgeParticipation;
 
   /**
    * Привязывает сценарии к соединению без открытия дополнительных ресурсов.
@@ -72,8 +72,8 @@ export class KnowledgeService {
     this.db = db;
     this.entities = new EntityService(db);
     this.queries = new KnowledgeQueries(db);
-    this.applications = new KnowledgeApplications(this.entities, this.queries);
-    this.participation = new KnowledgeParticipation(this.entities, this.queries);
+    this.applications = new KnowledgeApplications(db, this.entities);
+    this.participationWriter = new KnowledgeParticipation(this.entities, this.queries);
   }
 
   /**
@@ -175,14 +175,15 @@ export class KnowledgeService {
   private createChecked(command: KnowledgeCreation, actor: string): KnowledgeRecord {
     switch (command.kind) {
       case "product": {
-        const current = this.queries.resolve(this.queries.singletonRef("product"), "product");
-        requireEmptyProduct(current);
         return decodeKnowledge(
-          this.entities.update(
-            current.id,
+          this.entities.changeRelated(
+            this.queries.singletonRef("product"),
             "product",
-            { ...command.data },
-            { actor, ifRevision: current.revision },
+            actor,
+            (record) => {
+              requireEmptyProduct(decodeKnowledge(record, "product"));
+              return { patch: { ...command.data } };
+            },
           ),
           "product",
         );
@@ -190,7 +191,12 @@ export class KnowledgeService {
       case "application":
         return this.applications.create(command.data, actor);
       case "implementation":
-        return this.participation.create(command.application, command.target, command.data, actor);
+        return this.participationWriter.create(
+          command.application,
+          command.target,
+          command.data,
+          actor,
+        );
       case "feature":
         return decodeKnowledge(
           this.entities.create("feature", "FEATURE", { ...command.data }, actor),
@@ -246,73 +252,79 @@ export class KnowledgeService {
       if (selected === "board") {
         invalidKnowledge(knowledgeMessages.boardUpdate);
       }
-      const current = this.queries.resolve(ref ?? this.queries.singletonRef(selected), selected);
-      requireKnowledgeRevision(current, write.ifRevision);
-      return this.updateChecked(current, parseKnowledgeUpdate(selected, input), write);
-    });
-  }
-
-  /**
-   * Применяет типизированный patch внутри внешней транзакции после CAS владельца.
-   * Документ сохраняет исторический sectionId, если новый раздел явно не передан.
-   */
-  private updateChecked(
-    current: KnowledgeRecord,
-    command: KnowledgeUpdate,
-    write: WriteOptions,
-  ): KnowledgeRecord {
-    if (command.kind === "application") {
-      return this.applications.update(decodeKnowledge(current, "application"), command.data, write);
-    }
-    if (command.kind === "document") {
-      const document = decodeKnowledge(current, "document");
-      const sections = this.queries.sectionIndex();
-      if (command.data.sectionId !== undefined) {
-        requireActiveDocumentSection(command.data.sectionId, sections);
-      }
-      const relations =
-        command.relations === undefined
-          ? undefined
-          : resolveKnowledgeRelations(command.relations, this.queries, document);
-      return this.queries.projectDocument(
-        this.entities.update(
-          current.id,
-          "document",
-          {
-            ...command.data,
-            ...(relations === undefined ? {} : { relations }),
-          },
-          write,
-        ),
-        sections,
+      let sections: DocumentSectionIndex | undefined;
+      let applicationName: string | undefined;
+      const updated = this.entities.change(
+        knowledgeText(ref ?? this.queries.singletonRef(selected), "ref", true),
+        selected,
+        write,
+        (record) => {
+          const current = decodeKnowledge(record, selected);
+          const command = parseKnowledgeUpdate(selected, input);
+          if (command.kind === "document") {
+            const document = decodeKnowledge(current, "document");
+            sections = this.queries.sectionIndex();
+            if (command.data.sectionId !== undefined) {
+              requireActiveDocumentSection(command.data.sectionId, sections);
+            }
+            const relations =
+              command.relations === undefined
+                ? undefined
+                : resolveKnowledgeRelations(command.relations, this.queries, document);
+            return {
+              patch: { ...command.data, ...(relations === undefined ? {} : { relations }) },
+            };
+          }
+          if (command.kind === "application") {
+            applicationName = command.data.name;
+          }
+          return { patch: { ...command.data } };
+        },
       );
-    }
-    return this.queries.projectDocument(
-      this.entities.update(current.id, command.kind, { ...command.data }, write),
-    );
+      if (applicationName !== undefined) {
+        this.applications.synchronizeBoard(
+          decodeKnowledge(updated, "application"),
+          applicationName,
+          write.actor,
+        );
+      }
+      return this.queries.projectDocument(updated, sections);
+    });
   }
 
   /**
    * Переименовывает запись под её CAS, включая no-op; прежний ключ остаётся алиасом.
    * Чужой адрес даёт CONFLICT; при прежнем ключе автор, ревизия и поколение сохраняются.
+   * undefined выбирает singleton проекта или продукта; остальным видам требуется ref.
    */
   rename<K extends EntityKind>(
     entityKind: K,
-    ref: string,
+    ref: string | undefined,
     key: string,
     write: WriteOptions,
   ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
   /**
    * Проверяет CAS до no-op и возвращает проекцию записи из той же транзакции.
    */
-  rename(entityKind: EntityKind, ref: string, key: string, write: WriteOptions): KnowledgeRecord {
+  rename(
+    entityKind: EntityKind,
+    ref: string | undefined,
+    key: string,
+    write: WriteOptions,
+  ): KnowledgeRecord {
     const selected = knowledgeKind(entityKind);
     return this.db.transaction(() => {
       validateKnowledgeWrite(write);
-      const current = this.queries.resolve(ref, selected);
-      requireKnowledgeRevision(current, write.ifRevision);
-      knowledgeText(key, "key", true);
-      return this.queries.projectDocument(this.entities.rename(current.id, selected, key, write));
+      const renamed = this.entities.change(
+        knowledgeText(ref === undefined ? this.queries.singletonRef(selected) : ref, "ref", true),
+        selected,
+        write,
+        (record) => {
+          decodeKnowledge(record, selected);
+          return { key: knowledgeText(key, "key", true) };
+        },
+      );
+      return this.queries.projectDocument(renamed);
     });
   }
 
@@ -341,6 +353,25 @@ export class KnowledgeService {
   }
 
   /**
+   * Читает приложение один раз и возвращает активное участие с его ключом и ревизией
+   * из одного снимка. Загружает только историю этого приложения; чужие реализации
+   * не читаются. Несогласованность активных записей с составом владельца даёт CORRUPT_DATA.
+   */
+  participation(ref: string): ApplicationParticipation {
+    return this.db.snapshot(() => {
+      const application = this.queries.resolve(ref, "application");
+      const items = this.queries
+        .applicationImplementations(application)
+        .filter((record) => record.data.active);
+      return {
+        application: application.key,
+        revision: application.revision,
+        items: items.sort((left, right) => compareKnowledge(left, right, "key")),
+      };
+    });
+  }
+
+  /**
    * Меняет разделы под CAS проекта, включая no-op. Удаление навсегда резервирует ID,
    * не переписывая документы; эффективный раздел проецируется при чтении.
    * Проверка состояния, резервирование и запись атомарны.
@@ -353,14 +384,19 @@ export class KnowledgeService {
     return this.db.transaction(() => {
       const selected = knowledgeChoice(action, DOCUMENT_SECTION_ACTIONS, "action");
       validateKnowledgeWrite(write);
-      const project = this.queries.project();
-      requireKnowledgeRevision(project, write.ifRevision);
-      const next = changeDocumentSections(project, parseDocumentSectionChange(selected, input));
-      if (sameKnowledgeCollection(next.documentSections, project.data.documentSections ?? [])) {
-        return project;
-      }
       return decodeKnowledge(
-        this.entities.update(project.id, "project", { ...next }, write),
+        this.entities.change(this.queries.singletonRef("project"), "project", write, (record) => {
+          const project = decodeKnowledge(record, "project");
+          const next = changeDocumentSections(project, parseDocumentSectionChange(selected, input));
+          return {
+            patch: sameKnowledgeCollection(
+              next.documentSections,
+              project.data.documentSections ?? [],
+            )
+              ? {}
+              : { ...next },
+          };
+        }),
         "project",
       );
     });
@@ -378,20 +414,18 @@ export class KnowledgeService {
   ): KnowledgeRecord<"document"> {
     return this.db.transaction(() => {
       validateKnowledgeWrite(write, ["remove", "type", "description"]);
-      const document = this.queries.resolve(ref, "document");
-      requireKnowledgeRevision(document, write.ifRevision);
-      const change = parseKnowledgeLink(write);
-      const next = changeKnowledgeRelation(document, this.queries.resolve(target), change);
-      if (sameKnowledgeCollection(next, document.data.relations)) {
-        return this.queries.projectDocument(document);
-      }
       return this.queries.projectDocument(
         decodeKnowledge(
-          this.entities.update(
-            document.id,
+          this.entities.change(
+            knowledgeText(ref, "ref", true),
             "document",
-            { relations: next },
             { actor: write.actor, ifRevision: write.ifRevision },
+            (record) => {
+              const document = decodeKnowledge(record, "document");
+              const change = parseKnowledgeLink(write);
+              const next = changeKnowledgeRelation(document, this.queries.resolve(target), change);
+              return { patch: { relations: next } };
+            },
           ),
           "document",
         ),
@@ -414,7 +448,11 @@ export class KnowledgeService {
       validateKnowledgeWrite(write);
       const current = this.queries.resolve(application, "application");
       requireKnowledgeRevision(current, write.ifRevision);
-      return this.participation.replace(current, parseParticipationTargets(targets), write.actor);
+      return this.participationWriter.replace(
+        current,
+        parseParticipationTargets(targets),
+        write.actor,
+      );
     });
   }
 }

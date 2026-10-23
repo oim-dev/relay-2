@@ -1,6 +1,7 @@
 import type { EntityData, EntityRecord } from "../entities/entity.types";
 import type { PLAN_SCOPE_KINDS, PLAN_STATUSES, RELEASE_STATUSES } from "./planning.constants";
 import type { TaskRecord } from "../tasks/tasks.types";
+import type { EntityPage, EntityPageRequest } from "../pagination/pagination.types";
 
 /**
  * Вид сущности планирования, определяющий её жизненный цикл и состав.
@@ -192,6 +193,18 @@ export interface PlanStageTasks extends PlanOwner {
 }
 
 /**
+ * Окно состава этапа или релиза с общими границами EntityPageRequest.
+ * Порядок задаётся сохранённым включением; сортировка карточек не применяется.
+ */
+export type PlanningCompositionPageRequest = Pick<EntityPageRequest, "offset" | "limit">;
+
+/**
+ * Страница задач этапа, полный размер состава и ревизия плана из одного снимка.
+ * Полные карточки читаются только для окна; существование всех ссылок проверяется отдельно.
+ */
+export interface PlanStageTasksPage extends PlanOwner, EntityPage<TaskRecord> {}
+
+/**
  * Текущие и исторические включения задачи в планы из одного снимка.
  */
 export interface TaskPlanMemberships {
@@ -212,6 +225,12 @@ export interface ReleasePlans {
   /* Полные карточки планов в порядке их включения в релиз. */
   items: WorkPlanRecord[];
 }
+
+/**
+ * Страница планов релиза и полный размер состава из того же снимка, что владелец.
+ * Полные карточки читаются только для окна; существование всех ссылок проверяется отдельно.
+ */
+export interface ReleasePlansPage extends ReleasePlans, EntityPage<WorkPlanRecord> {}
 
 /**
  * Состояния обоих планов после атомарного переноса задачи.

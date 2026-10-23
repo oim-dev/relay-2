@@ -1,10 +1,11 @@
-import type {
-  EntityKind,
-  EntityPage,
-  EntityPageRequest,
-  EntityRecord,
-  KnowledgeKind,
-  KnowledgeRecord,
+import {
+  RelayError,
+  type EntityKind,
+  type EntityPage,
+  type EntityPageRequest,
+  type EntityRecord,
+  type KnowledgeKind,
+  type KnowledgeRecord,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
 import { EntityService } from "../entities/entities";
@@ -105,27 +106,54 @@ export class KnowledgeQueries {
   }
 
   /**
-   * Загружает и проверяет весь набор вида; ограничение стоимости задаётся вызывающим сценарием.
+   * Читает историю приложения и сверяет активные ID с уже прочитанным владельцем.
+   * Несогласованность, включая отфильтрованную повреждённую обратную ссылку, даёт CORRUPT_DATA.
+   * Чужие карточки не загружаются; владелец и выборка принадлежат снимку вызывающего сценария.
    */
-  records<K extends KnowledgeKind>(kind: K): KnowledgeRecord<K>[] {
-    return this.entities.list(kind).map((record) => decodeKnowledge(record, kind));
+  applicationImplementations(
+    application: Readonly<KnowledgeRecord<"application">>,
+  ): KnowledgeRecord<"implementation">[] {
+    const records = this.db
+      .listByField("implementation", "applicationId", application.id)
+      .map((record) => decodeKnowledge(record, "implementation"));
+    const activeIds = new Set(
+      records.filter((record) => record.data.active).map((record) => record.id),
+    );
+    if (
+      activeIds.size !== application.data.implementationIds.length ||
+      application.data.implementationIds.some((id) => !activeIds.has(id))
+    ) {
+      throw new RelayError("CORRUPT_DATA", knowledgeMessages.participationMismatch, 1, {
+        id: application.id,
+      });
+    }
+    return records;
   }
 
   /**
    * Фильтрует полный набор после декодирования и единой проекции разделов снимка.
    */
   list(kind: KnowledgeKind, filters: KnowledgeFilters): KnowledgeRecord[] {
+    return this.filtered(kind, filters).sort((left, right) =>
+      compareKnowledge(left, right, filters.sort),
+    );
+  }
+
+  /**
+   * Декодирует и фильтрует полный набор без предварительной сортировки перед окном.
+   */
+  private filtered(kind: KnowledgeKind, filters: KnowledgeFilters): KnowledgeRecord[] {
     const resolved = resolveKnowledgeFilters(kind, filters, this);
     const sections = kind === "document" ? this.sectionIndex() : undefined;
     return this.entities
       .list(kind)
       .map((record) => this.projectDocument(record, sections))
-      .filter((record) => matchesKnowledge(record, resolved))
-      .sort((left, right) => compareKnowledge(left, right, filters.sort));
+      .filter((record) => matchesKnowledge(record, resolved));
   }
 
   /**
-   * Читает ограниченное SQL-окно без предметных фильтров; иначе вычисляет полный list.
+   * Читает ограниченное SQL-окно без предметных фильтров; иначе фильтрует полный набор
+   * и сортирует его ровно один раз окончательным компаратором страницы.
    * Окно, count и разделы должны читаться под единым внешним снимком.
    */
   listPage(
@@ -134,7 +162,7 @@ export class KnowledgeQueries {
     filters?: KnowledgeFilters,
   ): EntityPage<KnowledgeRecord> {
     if (filters !== undefined) {
-      return pageEntities(this.list(kind, filters), request);
+      return pageEntities(this.filtered(kind, filters), request);
     }
     const page = this.db.listPage(kind, request);
     const sections = kind === "document" ? this.sectionIndex() : undefined;

@@ -1,7 +1,7 @@
 import completion, { pluginId, type CompletionOptions } from "@gunshi/plugin-completion";
 import { plugin, type CommandContext } from "gunshi";
 import { CliUsageError } from "../errors/errors";
-import { renderHelp } from "../execution/registry";
+import { createHelpRenderer } from "../output/help";
 import { positional } from "../input/arguments";
 import { completionMessages as messages } from "../locales/completion";
 import { bashCompletionScript } from "./completion-bash";
@@ -99,12 +99,15 @@ export function enableCompletion(program: CliProgram): void {
           throw new Error(messages.missingCommand);
         }
         const nativeRun = command.run;
-        command.description = messages.description;
-        command.examples = messages.examples;
+        const renderHelp = createHelpRenderer(messages.help);
+        command.description = messages.help.description;
+        delete command.examples;
+        command.rendering = { usage: renderHelp };
         command.args = { shell: positional(messages.shell, false) };
         /**
          * Печатает shell-скрипт или передаёт проверенные слова официальному протоколу кандидатов.
          * Нормализация argv сохраняет глобальные параметры перед complete и пустое слово под курсором.
+         * После завершённого -- нет кандидатов: позиционные ссылки не дополняются из проекта.
          */
         command.run = async (context): Promise<void | string> => {
           const request = completionRequest(context);
@@ -116,6 +119,10 @@ export function enableCompletion(program: CliProgram): void {
               return bashCompletionScript;
             }
             return nativeRun({ ...context, _: ["complete", request.shell] });
+          }
+          if (request.words.slice(0, -1).includes("--")) {
+            // Последнее слово ещё набирается: самостоятельное -- под курсором предлагает флаги.
+            return ":4";
           }
           Object.assign(
             config,

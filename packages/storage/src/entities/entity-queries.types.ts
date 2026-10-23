@@ -1,4 +1,9 @@
-import type { EntityKind } from "@relay/contracts";
+import type { EntityKind, EntityRecord } from "@relay/contracts";
+
+/**
+ * Минимальная проекция существующей сущности для проверки CAS по постоянному ID.
+ */
+export type EntityRevision = Pick<EntityRecord, "id" | "revision">;
 
 /**
  * Строка SQL-проекции сущности до декодирования JSON; предметную форму data проверяет Core.

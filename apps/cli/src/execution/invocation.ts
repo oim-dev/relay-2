@@ -75,7 +75,8 @@ export class Invocation {
 
   /**
    * Вычисляет параметры Project Runtime без обращения к файловой системе.
-   * CLI имеет приоритет над окружением; относительный RELAY_HOME разрешается от runtime.cwd.
+   * CLI имеет приоритет над окружением; RELAY_HOME передаётся дословно, включая пустое значение.
+   * Runtime проверяет home до файловых операций и разрешает относительный путь от runtime.cwd.
    */
   get options(): RuntimeOptions {
     const config = this.values.config ?? this.runtime.env.RELAY_CONFIG;
@@ -84,7 +85,7 @@ export class Invocation {
       (this.runtime.env.HOME ? resolve(this.runtime.env.HOME, ".relay") : undefined);
     return {
       cwd: this.runtime.cwd,
-      ...(home !== undefined ? { home: resolve(this.runtime.cwd, home) } : {}),
+      ...(home !== undefined ? { home } : {}),
       ...(config !== undefined ? { config: String(config) } : {}),
       ...(this.values.project !== undefined ? { project: this.text("project") } : {}),
     };
@@ -175,10 +176,18 @@ export class Invocation {
   }
 
   /**
-   * Упорядочивает уже вычисленный состав сущностей и выдаёт его страницу в текущем снимке.
-   * Исходный массив не меняется; весь состав присутствует в памяти до пагинации.
+   * Проверяет курсор до вызова ленивого читателя, затем сортирует и ограничивает состав.
+   * Читатель выполняется один раз в снимке команды; неверный курсор не запускает поиск.
+   * Готовый массив также допустим. Успешная страница пока вычисляет весь состав в памяти.
    */
-  entities(items: readonly EntityRecord[]): Result {
-    return this.page(orderEntities(items, this.text("sort") || "key"));
+  entities(source: readonly EntityRecord[] | (() => readonly EntityRecord[])): Result {
+    return this.page((window) => {
+      const records = typeof source === "function" ? source() : source;
+      const ordered = orderEntities(records, this.text("sort") || "key");
+      return {
+        total: ordered.length,
+        items: ordered.slice(window.offset, window.offset + window.limit),
+      };
+    });
   }
 }

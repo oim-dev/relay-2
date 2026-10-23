@@ -10,7 +10,8 @@ import { registerTaskCommands } from "../commands/tasks/register";
 import { registerPlanningCommands } from "../commands/planning/register";
 import { registerHistoryCommands } from "../commands/history/register";
 import { registerQueryCommands } from "../commands/queries/register";
-import { checkPositionals, CommandRegistry, renderHelp } from "../execution/registry";
+import { checkPositionals, CommandRegistry } from "../execution/registry";
+import { createHelpRenderer } from "../output/help";
 import { processRuntime } from "../execution/runtime";
 import type { CliRuntime } from "../execution/runtime.types";
 import type { CliProgram, CliProgramOptions } from "./program.types";
@@ -31,10 +32,10 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
   ]) {
     register(registry);
   }
+  const renderHelp = createHelpRenderer(programMessages.help);
   const command = define({
     name: "relay",
-    description: programMessages.description,
-    examples: programMessages.examples,
+    description: programMessages.help.description,
     run: renderHelp,
   });
 

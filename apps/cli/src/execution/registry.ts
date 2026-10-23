@@ -6,16 +6,11 @@ import { CliUsageError } from "../errors/errors";
 import { Invocation } from "./invocation";
 import { registryMessages } from "../locales/registry";
 import { renderResult } from "../output/output";
+import { createHelpRenderer } from "../output/help";
+import type { CommandHelp } from "../output/help.types";
 import type { Result } from "../output/output.types";
 import type { Action, RegistryCommand } from "./registry.types";
 import type { CliRuntime } from "./runtime.types";
-
-/**
- * Строит справку выбранной команды без создания Invocation, чтения stdin и выбора проекта.
- */
-export async function renderHelp(ctx: Readonly<CommandContext>): Promise<string> {
-  return `${ctx.description ?? ctx.env.description}\n\n${await renderUsage(ctx)}`;
-}
 
 /**
  * Выполняет синхронный сценарий в общей транзакции записи либо согласованном снимке чтения.
@@ -53,10 +48,14 @@ export class CommandRegistry {
   }
 
   /**
-   * Создаёт промежуточный путь при необходимости и назначает описание группы для справки.
+   * Назначает группе автономную справку, общую для --help и вызова без подкоманды.
    */
-  group(path: string, description: string): void {
-    this.node(path).description = description;
+  group(path: string, help: CommandHelp): void {
+    const node = this.node(path);
+    const render = createHelpRenderer(help);
+    node.description = help.description;
+    node.rendering = { usage: render };
+    node.run = render;
   }
 
   /**
@@ -73,6 +72,7 @@ export class CommandRegistry {
       define({
         name: node.name,
         description: action.description,
+        rendering: { usage: createHelpRenderer(action) },
         args: {
           ...action.args,
           ...action.fields,
@@ -85,7 +85,11 @@ export class CommandRegistry {
           const input = await readInput(context.values, action.fields ?? {}, this.runtime);
           const invocation = new Invocation(context, this.runtime, input);
           try {
-            return renderResult(runAction(action, invocation), invocation.text("format") || "text");
+            return renderResult(
+              runAction(action, invocation),
+              invocation.text("format") || "text",
+              action.presentation,
+            );
           } finally {
             invocation.close();
           }
@@ -104,7 +108,7 @@ export class CommandRegistry {
     for (const name of path.split(" ")) {
       command = commands.get(name);
       if (!command) {
-        command = { name, description: name, run: renderHelp, subCommands: new Map() };
+        command = { name, description: name, run: renderUsage, subCommands: new Map() };
         commands.set(name, command);
       }
       commands = command.subCommands;

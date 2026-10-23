@@ -1,23 +1,37 @@
 import { describe, expect, test } from "bun:test";
-import type { Command } from "gunshi";
 import { version } from "../../package.json";
-import type { CommandRoute, InvocationResult } from "../../tests/helpers/run-fixture.types";
+import {
+  commandRoutes,
+  helpRuntime as isolatedRuntime,
+  invokeIsolatedCli as invoke,
+} from "../../tests/helpers/help";
 import { runCli } from "./run";
 import { createProgram } from "./program";
-import type { CliRuntime } from "../execution/runtime.types";
-
-const isolatedRuntime: CliRuntime = {
-  cwd: "/missing-relay-cli-test",
-  env: { RELAY_CONFIG: "/missing-relay-config.json" },
-  /**
-   * Делает ошибкой любое чтение stdin в справке и других командах без ввода.
-   */
-  stdin: (): never => {
-    throw new Error("Справка не должна читать stdin");
-  },
-};
 const helpRoutes = commandRoutes(createProgram(isolatedRuntime).options.subCommands);
 const helpContent = [
+  {
+    name: "изменение критерия объясняет сброс приёмки и запрет в done",
+    argv: ["task", "criterion", "update", "--help"],
+    included: [
+      "сбрасывает отметку выполнения",
+      "При неизменном содержании",
+      "В колонке done любые изменения критериев запрещены",
+      "task move",
+    ],
+    excluded: ["Отметка выполнения меняется через complete/reopen"],
+  },
+  {
+    name: "принятие ребёнка требует постоянный ID из карточки сессии",
+    argv: ["checkpoint", "save", "--help"],
+    included: ["Только постоянный ID", "поле id из session get", "ключ не принимается"],
+    excluded: ["ID или ключ завершённого"],
+  },
+  {
+    name: "публикация релиза требует явного завершения каждого плана",
+    argv: ["release", "publish", "--help"],
+    included: ["каждый план", "completed", "plan complete", "--result"],
+    excluded: [],
+  },
   {
     name: "поиск описывает предметные тексты и курсор",
     argv: ["search", "--help"],
@@ -36,6 +50,51 @@ const helpContent = [
     included: ["--before"],
     excluded: [],
   },
+  {
+    name: "задача объясняет Markdown и новую форму критериев",
+    argv: ["task", "create", "--help"],
+    included: [
+      "цель, основания, работа, границы и проверка",
+      "--acceptance-criteria",
+      "acceptanceCriteria",
+      "## Проверка",
+    ],
+    excluded: ["--criterion-title", "Содержание: description", "--server-url"],
+  },
+  {
+    name: "изменение задачи объясняет замену и явное очищение набора",
+    argv: ["task", "update", "--help"],
+    included: [
+      "Неуказанные поля сохраняются",
+      "заменяет весь набор",
+      "--input '{\"targets\":[]}'",
+      "task get",
+    ],
+    excluded: ["--clear-targets"],
+  },
+  {
+    name: "раздел документа использует ревизию проекта",
+    argv: ["document", "section", "remove", "--help"],
+    included: ["ревизия проекта", "Документы сохраняются", "ID раздела остаётся зарезервированным"],
+    excluded: [],
+  },
+  {
+    name: "перенос задачи объясняет порядок аргументов и обе ревизии",
+    argv: ["plan", "stage", "task", "transfer", "--help"],
+    included: [
+      "исходный план, задача, ID целевого этапа",
+      "--target-revision",
+      "одинаковые ревизии",
+      "непустая reason",
+    ],
+    excluded: [],
+  },
+  {
+    name: "ветвление истории адресует intent и ревизию родителя",
+    argv: ["session", "fork", "--help"],
+    included: ["checkpoint вида intent", "родительской сессии", "--run", "session attach"],
+    excluded: [],
+  },
 ] as const;
 const invalidArguments = [
   {
@@ -49,6 +108,16 @@ const invalidArguments = [
     message: "Недопустимое значение",
   },
   {
+    name: "неизвестный флаг вместе с версией",
+    argv: ["--version", "--unknown"],
+    message: "Неизвестный параметр: --unknown",
+  },
+  {
+    name: "переданный format без обязательного значения",
+    argv: ["--format"],
+    message: "Не указано значение параметра '--format'",
+  },
+  {
     name: "неизвестная команда вместе со справкой",
     argv: ["missing", "--help"],
     message: "Неизвестная команда: «missing»",
@@ -60,51 +129,44 @@ const invalidArguments = [
   },
 ] as const;
 
-/**
- * Собирает каждый зарегистрированный узел дерева в отдельный именованный случай справки.
- * Обход не запускает команды и не обращается к проекту.
- */
-function commandRoutes(
-  commands: ReadonlyMap<string, Command>,
-  path: readonly string[] = [],
-): readonly CommandRoute[] {
-  const routes: CommandRoute[] = [];
-  for (const [name, command] of commands) {
-    const argv = [...path, name];
-    routes.push({ name: argv.join(" "), argv });
-    if (command.subCommands instanceof Map) {
-      routes.push(...commandRoutes(command.subCommands, argv));
-    }
-  }
-  return routes;
-}
-
-/**
- * Запускает CLI с недоступным проектом и собственными буферами потоков для каждого вызова.
- */
-async function invoke(argv: readonly string[]): Promise<InvocationResult> {
-  let stdout = "";
-  let stderr = "";
-  const exitCode = await runCli(
-    argv,
-    {
-      /**
-       * Сохраняет полный stdout этого вызова.
-       */
-      stdout: (text): void => {
-        stdout += text;
-      },
-      /**
-       * Сохраняет полный stderr этого вызова.
-       */
-      stderr: (text): void => {
-        stderr += text;
-      },
-    },
-    isolatedRuntime,
-  );
-  return { exitCode, stdout, stderr };
-}
+const contextualErrors = [
+  {
+    name: "отсутствующий аргумент",
+    argv: ["task", "get"],
+    help: "relay task get --help",
+    code: "INVALID_ARGUMENT",
+  },
+  {
+    name: "неизвестное действие",
+    argv: ["task", "creat"],
+    help: "relay task --help",
+    code: "INVALID_ARGUMENT",
+  },
+  {
+    name: "неизвестное действие вложенной группы участия",
+    argv: ["application", "participation", "missing"],
+    help: "relay application participation --help",
+    code: "INVALID_ARGUMENT",
+  },
+  {
+    name: "неизвестный вложенный параметр",
+    argv: ["task", "criterion", "add", "--unknown"],
+    help: "relay task criterion add --help",
+    code: "INVALID_ARGUMENT",
+  },
+  {
+    name: "глобальный параметр перед путём команды",
+    argv: ["--config", "/missing", "document", "get"],
+    help: "relay document get --help",
+    code: "INVALID_ARGUMENT",
+  },
+  {
+    name: "конфликт источников до чтения stdin",
+    argv: ["document", "create", "--body", "Текст", "--body-file", "-"],
+    help: "relay document create --help",
+    code: "CONFLICTING_OPTIONS",
+  },
+] as const;
 
 describe("Потоки и изоляция CLI", () => {
   test("закрытый получателем stdout завершает вызов успешно без диагностики", async () => {
@@ -188,6 +250,50 @@ describe("Потоки и изоляция CLI", () => {
       expect(result.stderr).toContain("Справка: relay --help");
     },
   );
+
+  test.each(contextualErrors)(
+    "$name направляет к справке выбранной команды",
+    async ({ argv, help, code }) => {
+      const response = await invoke(argv);
+
+      expect(response.exitCode).toBe(2);
+      expect(response.stdout).toBe("");
+      expect(response.stderr).toContain(code);
+      expect(response.stderr).toContain(`Справка: ${help}\n`);
+      expect(response.stderr.match(/Справка:/g)).toHaveLength(1);
+    },
+  );
+
+  test.each(contextualErrors)(
+    "$name возвращает адрес справки отдельным полем JSON-ошибки",
+    async ({ argv, help, code }) => {
+      const response = await invoke([...argv, "--format=json"]);
+
+      expect(response.exitCode).toBe(2);
+      expect(response.stdout).toBe("");
+      const parsed = JSON.parse(response.stderr);
+      expect(parsed).toMatchObject({ ok: false, error: { code, helpCommand: help } });
+      expect(parsed.error.message).not.toContain("Справка:");
+      expect(response.stderr.trim().split("\n")).toHaveLength(1);
+    },
+  );
+
+  test("параллельные ошибки сохраняют независимые пути справки и JSON", async () => {
+    const [task, document, json] = await Promise.all([
+      invoke(["task", "get"]),
+      invoke(["document", "get"]),
+      invoke(["plan", "get", "--format", "json"]),
+    ]);
+
+    expect(task.stderr).toContain("Справка: relay task get --help");
+    expect(document.stderr).toContain("Справка: relay document get --help");
+    expect(json.exitCode).toBe(2);
+    expect(json.stdout).toBe("");
+    expect(JSON.parse(json.stderr)).toMatchObject({
+      ok: false,
+      error: { code: "INVALID_ARGUMENT", helpCommand: "relay plan get --help" },
+    });
+  });
 });
 
 describe("Справка CLI", () => {
@@ -197,6 +303,42 @@ describe("Справка CLI", () => {
     expect(help.exitCode).toBe(0);
     expect(help.stderr).toBe("");
     expect(help.stdout).toContain("ИСПОЛЬЗОВАНИЕ:");
+    expect(help.stdout).toContain("ПОДРОБНОСТИ:\n");
+    expect(help.stdout).toContain("ПРИМЕРЫ:\n  # ");
+    expect(help.stdout).toContain("--format <format>");
+    expect(help.stdout).not.toContain("--format [format]");
+    expect(help.stdout).not.toContain("Содержание: ");
+    expect(help.stdout).not.toContain("\u001b");
+  });
+
+  test.each(helpRoutes.filter((route) => route.group))(
+    "$name без подкоманды совпадает с --help и сохраняет полный путь",
+    async ({ argv }) => {
+      const help = await invoke([...argv, "--help"]);
+      const empty = await invoke(argv);
+
+      expect(empty).toEqual(help);
+      expect(help.stdout).toContain(`ИСПОЛЬЗОВАНИЕ:\n  relay ${argv.join(" ")} [КОМАНДЫ]`);
+    },
+  );
+
+  test("описание действия выводится один раз, а -h с JSON остаётся текстовой справкой", async () => {
+    const help = await invoke(["task", "create", "--help"]);
+    const short = await invoke([
+      "task",
+      "create",
+      "-h",
+      "--format",
+      "json",
+      "--description-file",
+      "-",
+    ]);
+
+    expect(short).toEqual(help);
+    expect(
+      help.stdout.startsWith("Создать задачу с критериями и связями атомарно\n\nИСПОЛЬЗОВАНИЕ:"),
+    ).toBe(true);
+    expect(help.stdout.match(/Создать задачу с критериями и связями атомарно/g)).toHaveLength(1);
   });
 
   test("пустой вызов и --help показывают одинаковую русскую справку", async () => {
@@ -208,7 +350,18 @@ describe("Справка CLI", () => {
     expect(help.stdout).toContain("ИСПОЛЬЗОВАНИЕ:");
     expect(help.stdout).toContain("Показать справку");
     expect(help.stdout).toContain("Показать версию");
+    expect(help.stdout).toContain("--format <format>");
+    expect(help.stdout).toContain("по умолчанию: text, допустимые значения: text | json");
     expect(empty).toEqual(help);
+  });
+
+  test("значение limit обязательно после флага, а необязательный ref сохраняет скобки", async () => {
+    const history = await invoke(["session", "history", "--help"]);
+
+    expect(history.exitCode).toBe(0);
+    expect(history.stdout).toContain("--limit <limit>");
+    expect(history.stdout).toContain("по умолчанию: 20");
+    expect(history.stdout).toContain("[<ref>]");
   });
 
   test.each(helpContent)("$name", async ({ argv, included, excluded }) => {

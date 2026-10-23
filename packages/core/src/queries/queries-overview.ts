@@ -7,9 +7,7 @@ import {
   type TaskRecord,
 } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
-import { EntityService } from "../entities/entities";
 import { EntityReader } from "../projections/entity-reader";
-import { decodeKnowledge } from "../knowledge/knowledge-data";
 import { taskGraphNode } from "../tasks/task-data";
 import { TaskGraph } from "../tasks/task-graph";
 import type { ProjectOverview, ProjectTaskOverview } from "./queries.types";
@@ -52,19 +50,21 @@ function summarizeTasks(tasks: readonly TaskRecord[]): ProjectTaskOverview {
 
 /**
  * Строит полный обзор внутри снимка, которым владеет вызывающий QueryService.
- * Полный список читается один раз; счётчики и общий граф задач используют загруженные карточки.
+ * Полный список читается один раз; проект, разделы, счётчики и граф используют загруженные карточки.
  * Повреждённые карточки и неверный граф отклоняются предметными декодерами без записи в БД.
  */
 export function readProjectOverview(db: ProjectDatabase): ProjectOverview {
-  const entities = new EntityService(db);
-  const reader = new EntityReader(db);
-  const items = entities
-    .list()
+  const records = db.list();
+  const reader = new EntityReader(
+    db,
+    records.find((item) => item.id === db.projectId && item.kind === "project") ?? null,
+  );
+  const items = records
     .map((item) => reader.decode(item))
     .sort((left, right) => left.key.localeCompare(right.key) || left.id.localeCompare(right.id));
   return {
     items,
-    project: decodeKnowledge(entities.get(db.projectId, "project"), "project"),
+    project: reader.project(),
     generation: db.getGeneration(),
     counts: countEntityKinds(items),
     tasks: summarizeTasks(items.filter((item) => item.kind === "task")),

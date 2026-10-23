@@ -14,7 +14,46 @@ const globalPositions = [
   { name: "после команды", before: ["task", "create", "--title", "Разбор параметров"], after: [] },
 ] as const;
 
+const invalidDomainInput = [
+  {
+    name: "документ без тела",
+    argv: ["document", "create", "--name", "Без тела"],
+    code: "INVALID_ARGUMENT",
+    help: "document create",
+  },
+  {
+    name: "план без заголовка",
+    argv: ["plan", "create"],
+    code: "VALIDATION_ERROR",
+    help: "plan create",
+  },
+  {
+    name: "сессия без заголовка",
+    argv: ["session", "start"],
+    code: "INVALID_INPUT",
+    help: "session start",
+  },
+] as const;
+
 describe("Аргументы вызова CLI", () => {
+  test.each(invalidDomainInput)(
+    "$name получает адресную справку после проверки Core без записи",
+    async ({ argv, code, help }) => {
+      await withCliFixture(async (cli) => {
+        const project = cli.createProject();
+        const generation = cli.withDatabase(project, (db) => db.getGeneration());
+
+        const result = await cli.invoke(argv);
+
+        expect(result.code).toBe(2);
+        expect(result.stdout).toBe("");
+        expect(result.stderr).toContain(`Ошибка: ${code}:`);
+        expect(result.stderr).toContain(`Справка: relay ${help} --help\n`);
+        expect(cli.withDatabase(project, (db) => db.getGeneration())).toBe(generation);
+      });
+    },
+  );
+
   test.each(globalPositions)(
     "глобальные параметры $name имеют приоритет над env",
     async ({ before, after }) => {

@@ -456,6 +456,8 @@ describe("Диагностика целостности проекта", () => {
         const generation = db.getGeneration();
         const queries = new QueryService(db);
         const reads = spyOn(db, "get");
+        const identities = spyOn(db, "getIdentity");
+        const lists = spyOn(db, "list");
         try {
           const result = queries.check();
 
@@ -466,9 +468,13 @@ describe("Диагностика целостности проекта", () => {
             records: 5,
             issues: [],
           });
-          expect(reads.mock.calls.filter(([ref]) => ref === db.projectId)).toHaveLength(1);
+          expect(reads).not.toHaveBeenCalled();
+          expect(identities).not.toHaveBeenCalled();
+          expect(lists).toHaveBeenCalledTimes(1);
         } finally {
           reads.mockRestore();
+          identities.mockRestore();
+          lists.mockRestore();
         }
         expect(knowledge.get("document", first.id).data.sectionId).toBe(retired ? null : "guides");
         expect(db.list()).toEqual(snapshot);

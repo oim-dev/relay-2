@@ -87,6 +87,7 @@ function continuationCommand(
  * Привязывает страницу к текущему вызову и оформляет метаданные ответа.
  * Вызывающий реестр удерживает snapshot; локальный источник передаёт собственные context/generation
  * и не открывает БД. Источник-функция вызывается только после проверки курсора.
+ * Его owner дополняет data и имеет приоритет над extra; items всегда принадлежит окну.
  */
 export function invocationPage<T>(
   invocation: InvocationPageContext,
@@ -108,7 +109,7 @@ export function invocationPage<T>(
     command: (cursor: string, limit: number): string =>
       continuationCommand(invocation, entries, source, cursor, limit),
   });
-  return { data: { ...extra, items: page.items }, meta: { page: page.page } };
+  return { data: { ...extra, ...page.owner, items: page.items }, meta: { page: page.page } };
 }
 
 /**
