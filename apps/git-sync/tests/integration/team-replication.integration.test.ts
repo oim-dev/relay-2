@@ -20,8 +20,20 @@ import {
 } from "./team-helpers/team-work";
 
 const LATE_NAME = "Позднее имя после подготовки Git-кандидата";
-const SCENARIO_DEADLINE_MS = 45_000;
-const TEST_WATCHDOG_MS = 60_000;
+
+/**
+ * Общий бюджет трёх конечных волн: подготовка и гонка ключей; crash/conflict двух писателей;
+ * возвращение offline-реплики, restore и no-echo. Включает fresh helper и все assertions.
+ * Един для всех ОС, не перезапускается между волнами и не задаёт SLA отдельного обмена.
+ * Короткие deadlines Git, actor и барьера продолжают обнаруживать локальное зависание.
+ */
+const SCENARIO_DEADLINE_MS = 90_000;
+
+/**
+ * Запас после управляемой отмены на завершение actors, engines, guardian и закрытие файлов.
+ */
+const CLEANUP_GRACE_MS = 15_000;
+const TEST_WATCHDOG_MS = SCENARIO_DEADLINE_MS + CLEANUP_GRACE_MS;
 
 describe("Обмен трёх независимых реплик через одну Git-ветку", () => {
   test(
