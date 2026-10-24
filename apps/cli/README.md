@@ -128,7 +128,11 @@ relay git-sync service enable
 relay git-sync auto enable
 ```
 
-`connect` принимает имя remote, URL или путь Git-репозитория. `auto enable` включает
+`connect` принимает `origin` из Git-каталога запуска, URL или путь Git-репозитория.
+Один `now` обрабатывает ограниченное окно: успех не означает пустую очередь,
+проверьте pending в `status`. Подключение и получение новой реплики описаны в
+[руководстве Git-синхронизации](../../docs/CLI.md#git-синхронизация).
+`auto enable` включает
 автоматический обмен проекта и запрашивает живой worker у уже работающего supervisor.
 Сначала запустите supervisor через `service enable` либо в отдельном терминале через
 `git-sync supervise`; без него start/auto enable возвращают `SUPERVISOR_REQUIRED` с кодом 4.

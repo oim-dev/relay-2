@@ -151,10 +151,10 @@ changeset, конфликт, решение и экземпляр процесс
 начинающая независимую запись, MUST получить новый `replicaId` для новых changeset,
 сохраняя IDs ранее записанных пакетов.
 
-**VER-01.** Каждая независимо изменяемая запись MUST иметь переносимый токен версии.
-В формате v1 версия имеет `id` и `parents`: непрозрачный уникальный ID версии
-и набор непосредственно предшествовавших переносимых версий этой записи.
-ID версии не является временем, счётчиком или значением для выбора победителя.
+**VER-01.** Каждая независимо изменяемая запись MUST иметь переносимый токен `version`
+и отдельный массив `parents` непосредственно предшествовавших переносимых версий.
+Токен — непрозрачная строка SHA-256 по предметному алгоритму SNAP-03, а не вложенный
+объект с `id`. Он не является временем, счётчиком или значением для выбора победителя.
 
 **VER-02.** Изменение MUST ссылаться на исходную версию; создание имеет отсутствие
 base; снятие сохраняет версию снятия и необходимый tombstone. При объединении
@@ -314,16 +314,16 @@ model/format — переносимое предметное состояние 
 [`PortableProjectSnapshot`](packages/contracts/src/replication/replication.types.ts)
 в следующие файлы. Формы wrappers и Markdown для каждой версии заданы в SNAP-02.
 
-| Часть snapshot | Физическое представление |
-| --- | --- |
-| `formatVersion`, `modelVersion`, `projectId` | `manifest.json` с дополнительным файловым `layoutVersion` |
-| `entities[]` — raw owners без local CAS | По одному `PortableEntity` в `entities/<entity-hash>/record.json` |
-| `components[]` — первичные scoped части, включая tombstones | По одному `PortableComponent` в `components/<component-hash>/record.json` |
-| `comments[]` — append-only журнал | По одному `PortableComment` в `comments/<comment-hash>/record.json` |
-| `receipts[]` — первоначальные batch-квитанции | По одному `{operationKey, requestJson, resultJson}` без wrapper в `receipts/<receipt-hash>.json` |
-| `addresses[]` — карта `{ref, entityId}` | Массив в `addresses.json`, упорядоченный по `ref` |
-| `confirmations[]` — принятые sequence и точные proofs | Массив в `confirmations.json`, упорядоченный по `replicaId` |
-| `publication` — последняя публикация | Сам объект в `publication.json`; локальный capture может содержать `null`, который не является удалённой публикацией |
+| Часть snapshot                                              | Физическое представление                                                                                             |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `formatVersion`, `modelVersion`, `projectId`                | `manifest.json` с дополнительным файловым `layoutVersion`                                                            |
+| `entities[]` — raw owners без local CAS                     | По одному `PortableEntity` в `entities/<entity-hash>/record.json`                                                    |
+| `components[]` — первичные scoped части, включая tombstones | По одному `PortableComponent` в `components/<component-hash>/record.json`                                            |
+| `comments[]` — append-only журнал                           | По одному `PortableComment` в `comments/<comment-hash>/record.json`                                                  |
+| `receipts[]` — первоначальные batch-квитанции               | По одному `{operationKey, requestJson, resultJson}` без wrapper в `receipts/<receipt-hash>.json`                     |
+| `addresses[]` — карта `{ref, entityId}`                     | Массив в `addresses.json`, упорядоченный по `ref`                                                                    |
+| `confirmations[]` — принятые sequence и точные proofs       | Массив в `confirmations.json`, упорядоченный по `replicaId`                                                          |
+| `publication` — последняя публикация                        | Сам объект в `publication.json`; локальный capture может содержать `null`, который не является удалённой публикацией |
 
 Идентичность и версии назначений адресов сохраняются в scoped компонентах вида
 `address-assignment`; карта `addresses` не заменяет эти записи. Вынесенный Markdown
@@ -1106,7 +1106,7 @@ macOS/Windows или доказательством универсального
 | `relay git-sync auto disable`                    | Отключение новых автоматических fetch/retry; ручной `now` остаётся доступен                       |
 | `relay git-sync connect`                         | Проверенная настройка remote/общей ветки и идентичности                                           |
 | `relay git-sync conflicts list`                  | Список открытых конфликтов и заблокированных цепочек                                              |
-| `relay git-sync conflicts get <id>`              | Полный материал и fingerprint реального конфликта либо причина ожидания blocked без fingerprint      |
+| `relay git-sync conflicts get <id>`              | Полный материал и fingerprint реального конфликта либо причина ожидания blocked без fingerprint   |
 | `relay git-sync conflicts resolve <id>`          | Проверенное решение с обязательным fingerprint и автором                                          |
 | `relay git-sync restore`                         | Новая реплика из Git либо явная привязка сохранённой БД в режиме resume                           |
 | `relay git-sync service enable\|disable\|status` | Управление пользовательским автозапуском на текущей ОС                                            |
@@ -1180,26 +1180,28 @@ CLI проверяет сочетание аргументов до запрос
 
 ### JSON статуса v1
 
-JSON MUST иметь версию формата и стабильную форму списка проектов, включая один
-проект и частично недоступный workspace. Ошибка одной регистрации не скрывает
-статусы доступных БД. Для каждой БД обязательны следующие смысловые поля:
+CLI JSON MUST иметь стабильную форму `data: {version: 1, scope, items}`, включая
+один проект (`scope: "project"`) и частично недоступный workspace (`scope: "workspace"`).
+Элемент `items` содержит `name`, `path`, `ok` и статус в `data` либо причину в `error`.
+Ошибка одной регистрации не скрывает статусы доступных БД. В успешном статусе проекта
+смысловые поля отображаются на следующие фактические пути:
 
-| Поле                                                     | Контракт                                                                                                       |
-| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `projectId`, `replicaId`, `databaseIdentity`             | Проверенная идентичность либо `null`, если проверить её невозможно                                             |
-| `autoEnabled`                                            | Сохранённый автоматический режим                                                                               |
-| `desiredWorkerState`                                     | `running` / `stopped`                                                                                          |
-| `actualWorkerState`                                      | `starting` / `running` / `stopping` / `stopped` / `failed` / `unknown`                                         |
-| `responsive`                                             | Результат актуальной проверки конкретного экземпляра: `true`, `false` либо `null`                              |
-| `instanceId`, `pid`, `binaryVersion`, `protocolVersion`  | Наблюдаемые сведения о процессе, по отдельности `null` при неизвестности                                       |
-| `phase`, `attemptId`                                     | Фактическая фаза/попытка, а не последняя фаза погибшего процесса                                               |
-| `localHead`, `remoteHead`, `ahead`, `behind`             | Проверенные Git-ссылки и числа коммитов между ними; неизвестное — `null`                                       |
-| `pendingChangesets`, `oldestPendingAge`                  | Неподтверждённые пакеты и возраст самого старого, включая blocked; возраст `null` при отсутствии/неизвестности |
-| `unexported`                                             | Число пакетов без сохранённого пригодного экспортного checkpoint; не равно ahead                               |
-| `lastSuccessfulFetchAt`, `remoteObservedAt`, `freshness` | Время и основание знаний о remote, даже если текущий fetch не удался                                           |
-| `conflicts`                                              | Число/ID открытых конфликтов, отдельные причины блокировки                                                     |
-| `lastError`                                              | Структурированные code, operation, время и полезная причина либо `null`                                        |
-| `nextAttempt`                                            | Время, владелец и причина действительно назначенной попытки либо `null`                                        |
+| Поле                                                                                                       | Контракт                                                                                                               |
+| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `projectId`, `replicaId`, `databaseIdentity`                                                               | Идентичность проекта, реплики и физической БД; `projectId` может быть `null` до подключения                            |
+| `mode`                                                                                                     | Сохранённый режим `auto` / `manual`                                                                                    |
+| `worker.desired`                                                                                           | `running` / `stopped`                                                                                                  |
+| `worker.actual`, `worker.responsive`                                                                       | Наблюдаемое `running` / `stopped` / `unknown` и результат health-проверки                                              |
+| `worker.instance`, `worker.pid`, `worker.binaryVersion`, `worker.protocolVersion`                          | Сведения об экземпляре, по отдельности `null` при неизвестности                                                        |
+| `phase`, `attemptId`                                                                                       | Фактическая фаза/попытка живого владельца; без него `idle` / `null`                                                    |
+| `git.localHead`, `git.remoteHead`, `git.ahead`, `git.behind`                                               | Проверенные Git-ссылки и числа коммитов между ними; неизвестное — `null`                                               |
+| `pending.changesets`, `pending.oldest`, `pending.oldestAgeMs`                                              | Полный неподтверждённый остаток, время и возраст старейшего пакета; blocked входит в pending                           |
+| `pending.unexported`                                                                                       | Число пакетов без пригодного экспортного checkpoint либо `null`; не равно Git ahead                                    |
+| `publication.afterSequence`, `publication.window`                                                          | Durable cursor и сведения последнего ограниченного окна по STATUS-06                                                   |
+| `lastFetch`, `lastSuccess`, `lastAttempt`, `freshness`                                                     | Времена fetch/обмена/попытки и основание знаний о remote                                                               |
+| `conflicts.count`, `conflicts.freshness`, `conflicts.asOf`, `conflicts.remoteHead`, `conflicts.generation` | Число сохранённых реальных конфликтов и контекст их проверки; полные conflicts/blocked читаются отдельной диагностикой |
+| `error`                                                                                                    | Сохранённая структурированная причина последнего отказа либо `null`                                                    |
+| `nextRetry`, `nextAttempt`                                                                                 | Время и `{at, instance, reason}` действительно назначенной попытки либо `null`                                         |
 
 **STATUS-01.** Неизвестное MUST быть `null`, а не ноль, успех или вычисленное
 предположение. Ahead/behind MUST считать реальные коммиты между известными refs;
