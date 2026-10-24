@@ -1,10 +1,12 @@
 import { RelayError, validateActor, type EntityRecord, type WriteOptions } from "@relay/contracts";
 import { entityMessages } from "./entity.messages";
 import type { EntityAddressField, EntityJsonObject, EntityJsonValue } from "./entity.types";
+import { isWellFormedAddressText } from "./entity-text";
 
 /**
  * Проверяет непустой адрес без краевых пробелов и управляющих символов.
  * Ключи и генерирующие их префиксы дополнительно запрещают пробелы и двоеточия.
+ * Некорректный UTF-16 отклоняется, чтобы SQL bind не направил ссылку на replacement-character ключ.
  */
 export function validateEntityAddress(
   value: unknown,
@@ -12,6 +14,7 @@ export function validateEntityAddress(
 ): asserts value is string {
   if (
     typeof value !== "string" ||
+    !isWellFormedAddressText(value) ||
     !value.trim() ||
     value !== value.trim() ||
     /\p{Cc}/u.test(value) ||

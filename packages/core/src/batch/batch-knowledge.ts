@@ -1,5 +1,50 @@
-import { DOCUMENT_TARGET_KINDS, KNOWLEDGE_KINDS, type KnowledgeKind } from "@relay/contracts";
+import {
+  DOCUMENT_TARGET_KINDS,
+  KNOWLEDGE_KINDS,
+  RelayError,
+  type KnowledgeKind,
+} from "@relay/contracts";
 import { KNOWLEDGE_WRITABLE_FIELDS } from "../knowledge/knowledge-constants";
+import { parseDocumentSectionChange } from "../knowledge/document-section-input";
+import { validateDocumentSection } from "../knowledge/document-sections";
+import {
+  calculateApplicationBoard,
+  calculateApplicationCreation,
+} from "../knowledge/knowledge-applications";
+import {
+  calculateDocumentCreation,
+  calculateDocumentLink,
+  calculateDocumentSections,
+  calculateDocumentUpdate,
+  calculateFeatureCreation,
+  calculateKnowledgeRename,
+  calculateKnowledgeUpdate,
+  calculateProductCreation,
+  calculateScenarioCreation,
+} from "../knowledge/knowledge-calculations";
+import {
+  loadKnowledgeAddresses,
+  loadKnowledgeAllocation,
+  loadKnowledgeParticipation,
+  loadKnowledgeReference,
+  loadKnowledgeRelations,
+  loadKnowledgeSections,
+  loadParticipationSelection,
+} from "../knowledge/knowledge-command-loaders";
+import type { KnowledgeDelta } from "../knowledge/knowledge-command.types";
+import { decodeKnowledge } from "../knowledge/knowledge-data";
+import {
+  parseKnowledgeCreation,
+  parseKnowledgeLink,
+  parseKnowledgeUpdate,
+  parseParticipationTargets,
+} from "../knowledge/knowledge-input";
+import {
+  calculateImplementationCreation,
+  calculateParticipationReplacement,
+} from "../knowledge/knowledge-participation";
+import { invalidKnowledge, knowledgeText } from "../knowledge/knowledge-validation";
+import { knowledgeMessages } from "../knowledge/knowledge.messages";
 import { batchAction } from "./batch-action";
 import { batchIdentity, type BatchStepContext } from "./batch-context";
 import { batchMessages } from "./batch.messages";
@@ -71,31 +116,132 @@ function creationOptions(kind: KnowledgeKind): BatchActionOptions {
 }
 
 /**
+ * Сохраняет явный адрес legacy singleton; без ref выбирает постоянного проектного владельца.
+ */
+async function knowledgeWriteRef(context: BatchStepContext, kind: KnowledgeKind): Promise<string> {
+  if (context.step.ref !== undefined) {
+    return context.ref(kind);
+  }
+  if (kind === "project") {
+    return context.commands.projectId;
+  }
+  if (kind === "product") {
+    return "PRODUCT";
+  }
+  return context.ref(kind);
+}
+
+/**
  * Создаёт знания через владельца; зависимые приложение/доска явно входят в итоговую выдачу.
  * Первое заполнение продукта и создание FI/SI требуют явный CAS существующего владельца.
  */
-function createKnowledge(context: BatchStepContext, kind: KnowledgeKind): BatchOutcome {
-  if (kind === "product") {
-    context.write(context.knowledge.get("product"));
+async function createKnowledge(
+  context: BatchStepContext,
+  kind: KnowledgeKind,
+): Promise<BatchOutcome> {
+  const commands = context.commands;
+  const command = parseKnowledgeCreation(kind, context.input);
+  let delta: KnowledgeDelta;
+  switch (command.kind) {
+    case "product": {
+      const current = decodeKnowledge(await commands.get("PRODUCT", "product"), "product");
+      delta = calculateProductCreation(
+        current,
+        command.data,
+        context.write(current),
+        commands.timestamp,
+      );
+      break;
+    }
+    case "application": {
+      const virtual = [command.data.slug, command.data.prefix];
+      const application = await loadKnowledgeAllocation(
+        commands,
+        "application",
+        "APP",
+        undefined,
+        virtual,
+      );
+      const board = await loadKnowledgeAllocation(
+        commands,
+        "board",
+        "BOARD",
+        `BOARD-${command.data.prefix}`,
+        virtual,
+      );
+      delta = calculateApplicationCreation(command.data, application, board);
+      break;
+    }
+    case "implementation": {
+      const application = decodeKnowledge(
+        await commands.get(command.application, "application"),
+        "application",
+      );
+      const write = context.write(application);
+      const loaded = await loadKnowledgeParticipation(commands, application);
+      const target = await loadKnowledgeReference(commands, command.target);
+      const allocation = await loadKnowledgeAllocation(
+        commands,
+        "implementation",
+        `${application.data.prefix}-${target.kind === "scenario" ? "SI" : "FI"}`,
+      );
+      delta = calculateImplementationCreation(loaded, target, command.data, allocation, write);
+      break;
+    }
+    case "feature":
+      delta = calculateFeatureCreation(
+        command.data,
+        await loadKnowledgeAllocation(commands, "feature", "FEATURE"),
+      );
+      break;
+    case "scenario": {
+      const feature = decodeKnowledge(await commands.get(command.feature, "feature"), "feature");
+      delta = calculateScenarioCreation(
+        command.data,
+        feature,
+        await loadKnowledgeAllocation(commands, "scenario", "SCENARIO"),
+      );
+      break;
+    }
+    case "document": {
+      const sections = await loadKnowledgeSections(commands);
+      const targets = await loadKnowledgeRelations(commands, command.relations);
+      delta = calculateDocumentCreation(
+        command,
+        sections,
+        targets,
+        await loadKnowledgeAllocation(commands, "document", "DOC"),
+      );
+      break;
+    }
   }
-  if (kind === "implementation") {
-    const applicationRef =
-      context.input.application === undefined
-        ? context.text("applicationId")
-        : context.text("application");
-    context.write(context.knowledge.get("application", applicationRef));
+  commands.apply(delta.effects);
+  for (const effect of delta.effects) {
+    if (effect.kind === "entity" && effect.before === null) {
+      context.created(effect.after);
+    }
   }
-  const created = context.knowledge.create(kind, context.input, context.actor);
-  context.created(created);
+  const created = delta.record;
   if (created.kind === "application") {
-    const board = context.knowledge.get("board", created.data.boardId);
-    context.created(board);
-    context.touch(board);
-    return context.result(created, created, [{ name: "board", ...batchIdentity(board) }]);
+    const boardEffect = delta.effects.find(
+      (effect) => effect.kind === "entity" && effect.after.kind === "board",
+    );
+    if (boardEffect?.kind !== "entity") {
+      throw new RelayError("CORRUPT_DATA", batchMessages.missingOutput);
+    }
+    context.touch(boardEffect.after);
+    return context.result(created, created, [
+      { name: "board", ...batchIdentity(boardEffect.after) },
+    ]);
   }
   if (created.kind === "implementation") {
-    const application = context.knowledge.get("application", created.data.applicationId);
-    return context.result(created, application);
+    const owner = delta.effects.find(
+      (effect) => effect.kind === "entity" && effect.after.id === created.data.applicationId,
+    );
+    if (owner?.kind !== "entity") {
+      throw new RelayError("CORRUPT_DATA", batchMessages.missingOutput);
+    }
+    return context.result(created, owner.after);
   }
   return context.result(created);
 }
@@ -103,46 +249,84 @@ function createKnowledge(context: BatchStepContext, kind: KnowledgeKind): BatchO
 /**
  * Изменяет содержание знаний под CAS и явно учитывает синхронизированную доску приложения.
  */
-function updateKnowledge(context: BatchStepContext, kind: KnowledgeKind): BatchOutcome {
-  const ref = kind === "project" || kind === "product" ? undefined : context.ref(kind);
-  const current = context.knowledge.get(kind, ref);
-  const updated = context.knowledge.update(kind, ref, context.input, context.write(current));
-  if (updated.kind === "application" && context.input.name !== undefined) {
-    const board = context.knowledge.get("board", updated.data.boardId);
-    context.touch(board);
-    return context.result(updated, updated, [{ name: "board", ...batchIdentity(board) }]);
+async function updateKnowledge(
+  context: BatchStepContext,
+  kind: KnowledgeKind,
+): Promise<BatchOutcome> {
+  if (kind === "board") {
+    invalidKnowledge(knowledgeMessages.boardUpdate);
   }
-  return context.result(updated);
+  const commands = context.commands;
+  const ref = await knowledgeWriteRef(context, kind);
+  const current = decodeKnowledge(await commands.get(ref, kind), kind);
+  const write = context.write(current);
+  const command = parseKnowledgeUpdate(kind, context.input);
+  if (command.kind === "document") {
+    const sections = await loadKnowledgeSections(commands);
+    const targets =
+      command.relations === undefined
+        ? undefined
+        : await loadKnowledgeRelations(commands, command.relations);
+    const delta = calculateDocumentUpdate(
+      decodeKnowledge(current, "document"),
+      command,
+      sections,
+      targets,
+      write,
+      commands.timestamp,
+    );
+    commands.apply(delta.effects);
+    return context.result(delta.record);
+  }
+  const board =
+    current.kind === "application" &&
+    command.kind === "application" &&
+    command.data.name !== undefined
+      ? decodeKnowledge(await commands.get(current.data.boardId, "board"), "board")
+      : undefined;
+  const delta = calculateKnowledgeUpdate(current, command, write, commands.timestamp);
+  if (delta.record.kind === "application" && board !== undefined) {
+    const related = calculateApplicationBoard(delta.record, board, write, commands.timestamp);
+    commands.apply([...delta.effects, ...related.effects]);
+    context.touch(related.record);
+    return context.result(delta.record, delta.record, [
+      { name: "board", ...batchIdentity(related.record) },
+    ]);
+  }
+  commands.apply(delta.effects);
+  return context.result(delta.record);
 }
 
 /**
- * Заменяет участие через сервис, сравнивая адресные проекции ID/ревизий выбранного приложения.
- * Полную историю для предметной проверки читает только KnowledgeService; адаптер не получает её тексты.
- * Изменённые ID декодируются владельцами в общей итоговой выборке пакета; no-op их туда не добавляет.
+ * Загружает только историю выбранного приложения и получает изменённые реализации из pure delta.
  */
-function replaceParticipation(context: BatchStepContext): BatchOutcome {
-  const ref = context.ref("application");
-  const current = context.knowledge.get("application", ref);
+async function replaceParticipation(context: BatchStepContext): Promise<BatchOutcome> {
+  const ref = await context.ref("application");
+  const current = decodeKnowledge(await context.commands.get(ref, "application"), "application");
   const write = context.write(current);
-  const before = new Map(
-    context.db
-      .listIdentitiesByField("implementation", "applicationId", current.id)
-      .map((record) => [record.id, record.revision]),
+  const loaded = await loadKnowledgeParticipation(context.commands, current);
+  const selected = await loadParticipationSelection(
+    context.commands,
+    loaded,
+    parseParticipationTargets(context.input.targets),
   );
-  const updated = context.knowledge.replaceParticipation(ref, context.strings("targets"), write);
-  const changed = context.db
-    .listIdentitiesByField("implementation", "applicationId", current.id)
-    .filter((record) => record.revision !== before.get(record.id));
-  for (const record of changed) {
-    if (!before.has(record.id)) {
-      context.created(record);
+  const delta = calculateParticipationReplacement(
+    loaded,
+    selected,
+    write,
+    context.commands.timestamp,
+  );
+  context.commands.apply(delta.effects);
+  for (const effect of delta.effects) {
+    if (effect.kind === "entity" && effect.before === null) {
+      context.created(effect.after);
     }
   }
-  context.touch(...changed);
+  context.touch(...delta.changed);
   return context.result(
-    updated,
-    updated,
-    changed.map((record) => ({ name: "implementation", ...batchIdentity(record) })),
+    delta.record,
+    delta.record,
+    delta.changed.map((record) => ({ name: "implementation", ...batchIdentity(record) })),
   );
 }
 
@@ -191,12 +375,32 @@ export function knowledgeBatchActions(): BatchAction<BatchStepContext>[] {
           ref: !singleton,
           revisionOwner: kind,
         },
-        (context) => {
-          const ref = singleton ? undefined : context.ref(kind);
-          const current = context.knowledge.get(kind, ref);
-          return context.result(
-            context.knowledge.rename(kind, ref, context.text("key"), context.write(current)),
+        async (context) => {
+          const commands = context.commands;
+          const ref = await knowledgeWriteRef(context, kind);
+          const current = decodeKnowledge(await commands.get(ref, kind), kind);
+          const write = context.write(current);
+          const key = knowledgeText(context.input.key, "key", true);
+          const virtual =
+            current.kind === "application" || current.kind === "board"
+              ? [current.data.slug, current.data.prefix]
+              : [];
+          const addresses =
+            key === current.key ? [] : await loadKnowledgeAddresses(commands, kind, [key], virtual);
+          const sections =
+            current.kind === "document" ? await loadKnowledgeSections(commands) : undefined;
+          const delta = calculateKnowledgeRename(
+            current,
+            key,
+            addresses,
+            write,
+            commands.timestamp,
           );
+          if (delta.record.kind === "document" && sections !== undefined) {
+            validateDocumentSection(delta.record, sections);
+          }
+          commands.apply(delta.effects);
+          return context.result(delta.record);
         },
       ),
     );
@@ -230,21 +434,21 @@ export function knowledgeBatchActions(): BatchAction<BatchStepContext>[] {
                   { path: "before", kinds: ["document-section"] },
                 ],
         },
-        (context) => {
-          const current = context.knowledge.get("project");
-          const previous = new Set(
-            (current.data.documentSections ?? []).map((section) => section.id),
+        async (context) => {
+          const commands = context.commands;
+          const current = decodeKnowledge(
+            await commands.get(commands.projectId, "project"),
+            "project",
           );
-          const updated = context.knowledge.changeSection(
-            action,
-            context.input,
-            context.write(current),
-          );
-          const id =
-            action === "create"
-              ? updated.data.documentSections?.find((section) => !previous.has(section.id))?.id
-              : context.text("id");
-          return context.nested(id, "document-section", updated);
+          const write = context.write(current);
+          const allocatedId =
+            action === "create" && context.input.id === undefined
+              ? commands.allocateId()
+              : undefined;
+          const change = parseDocumentSectionChange(action, context.input, allocatedId);
+          const delta = calculateDocumentSections(current, change, write, commands.timestamp);
+          commands.apply(delta.effects);
+          return context.nested(change.id, "document-section", delta.record);
         },
       ),
     );
@@ -260,19 +464,31 @@ export function knowledgeBatchActions(): BatchAction<BatchStepContext>[] {
           revisionOwner: "document",
           addresses: [{ path: "target", kinds: DOCUMENT_TARGET_KINDS }],
         },
-        (context) => {
-          const ref = context.ref("document");
-          const write = context.write(context.knowledge.get("document", ref));
-          return context.result(
-            context.knowledge.linkDocument(ref, context.text("target"), {
-              ...write,
-              remove,
-              ...(context.input.type === undefined ? {} : { type: context.text("type") }),
-              ...(context.input.description === undefined
-                ? {}
-                : { description: context.string("description") }),
-            }),
+        async (context) => {
+          const commands = context.commands;
+          const ref = await context.ref("document");
+          const current = decodeKnowledge(await commands.get(ref, "document"), "document");
+          const write = context.write(current);
+          const change = parseKnowledgeLink({
+            ...write,
+            remove,
+            ...(context.input.type === undefined ? {} : { type: context.text("type") }),
+            ...(context.input.description === undefined
+              ? {}
+              : { description: context.string("description") }),
+          });
+          const target = await loadKnowledgeReference(commands, context.text("target"));
+          const sections = await loadKnowledgeSections(commands);
+          const delta = calculateDocumentLink(
+            current,
+            target,
+            change,
+            sections,
+            write,
+            commands.timestamp,
           );
+          commands.apply(delta.effects);
+          return context.result(delta.record);
         },
       ),
     );

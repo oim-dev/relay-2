@@ -6,8 +6,8 @@ describe("Передача Markdown с начальным дефисом", () =>
   test("отказ не меняет документ, а рекомендованная форма с равенством сохраняет точный текст", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const before = cli.withDatabase(project, (db) => ({
-        document: new KnowledgeService(db).create(
+      const before = await cli.withDatabase(project, async (db) => ({
+        document: await new KnowledgeService(db).create(
           "document",
           { name: "Список", body: "До изменения" },
           "agent",

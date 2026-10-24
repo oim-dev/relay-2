@@ -1,9 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contracts";
-import { KnowledgeService, PlanningService, TasksService } from "@relay/core";
+import type { EntityRecord, WriteOptions } from "@relay/contracts";
+import { BatchService, KnowledgeService, PlanningService, TasksService } from "@relay/core";
 import { ProjectDatabase } from "@relay/storage";
+import { CommandContext } from "../../src/commands/command-context";
+import { expectAsyncRelayError } from "./helpers/entity-fixture";
+import { workflowCommands } from "./helpers/workflow-fixture";
 import type { Workflow, WorkflowFixture, WorkflowSnapshot } from "./helpers/workflow-fixture.types";
 
 const actor = "workflow-qa";
@@ -21,10 +24,12 @@ function workflowServices(db: ProjectDatabase): WorkflowFixture {
 }
 
 /**
- * Создаёт пустой проект в файловой SQLite и удаляет его после синхронного сценария,
+ * Создаёт пустой проект в файловой SQLite и удаляет его после завершения async сценария,
  * включая отказ. Дополнительными соединениями владеет вызывающий код.
  */
-function withWorkflowProject(run: (fixture: WorkflowFixture) => void): void {
+async function withWorkflowProject(
+  run: (fixture: WorkflowFixture) => Promise<void>,
+): Promise<void> {
   const date = new Date().toISOString().slice(0, 10);
   const root = resolve(import.meta.dir, "../../../..", ".artifacts", date);
   mkdirSync(root, { recursive: true });
@@ -36,7 +41,7 @@ function withWorkflowProject(run: (fixture: WorkflowFixture) => void): void {
       name: "Сквозной рабочий цикл",
       slug: "workflow",
     });
-    run(workflowServices(db));
+    await run(workflowServices(db));
   } finally {
     try {
       db?.close();
@@ -74,19 +79,13 @@ function snapshot(db: ProjectDatabase): WorkflowSnapshot {
 /**
  * Проверяет предметный код отказа и полную сохранность записей и поколения проекта.
  */
-function expectAtomicFailure(db: ProjectDatabase, operation: () => unknown, code: string): void {
+async function expectAtomicFailure(
+  db: ProjectDatabase,
+  operation: () => Promise<unknown>,
+  code: string,
+): Promise<void> {
   const before = snapshot(db);
-  let failure: unknown;
-  try {
-    operation();
-  } catch (error) {
-    failure = error;
-  }
-  expect(failure).toBeInstanceOf(RelayError);
-  if (!(failure instanceof RelayError)) {
-    throw new Error("Ожидалась предметная ошибка Relay", { cause: failure });
-  }
-  expect(failure.code).toBe(code);
+  await expectAsyncRelayError(operation, code);
   expect(snapshot(db)).toEqual(before);
 }
 
@@ -94,33 +93,33 @@ function expectAtomicFailure(db: ProjectDatabase, operation: () => unknown, code
  * Создаёт связный маршрут знаний, задач и планирования. Подготовка остаётся внешним
  * обязательством, а план содержит только реализацию и приёмку; все задачи открыты.
  */
-function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workflow {
-  const feature = knowledge.create("feature", { name: "Локальный экспорт" }, actor);
-  const scenario = knowledge.create(
+async function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Promise<Workflow> {
+  const feature = await knowledge.create("feature", { name: "Локальный экспорт" }, actor);
+  const scenario = await knowledge.create(
     "scenario",
     { name: "Сохранить выбранные данные", feature: feature.key },
     actor,
   );
-  const application = knowledge.create(
+  const application = await knowledge.create(
     "application",
     { name: "Консольный клиент", slug: "console", prefix: "CONSOLE", type: "internal" },
     actor,
   );
-  const featureImplementation = knowledge.create(
+  const featureImplementation = await knowledge.create(
     "implementation",
     { application: application.key, target: feature.key, title: "Команды экспорта" },
     actor,
   );
-  const scenarioImplementation = knowledge.create(
+  const scenarioImplementation = await knowledge.create(
     "implementation",
     { application: application.id, target: scenario.key, title: "Запись выбранных данных" },
     actor,
   );
-  const preparation = tasks.create(
+  const preparation = await tasks.create(
     { board: "console", title: "Подготовить файловый адаптер" },
     actor,
   );
-  let implementation = tasks.create(
+  let implementation = await tasks.create(
     {
       board: "console",
       title: "Реализовать команду экспорта",
@@ -129,13 +128,13 @@ function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workfl
     },
     actor,
   );
-  implementation = tasks.dependency(
+  implementation = await tasks.dependency(
     implementation.key,
     preparation.key,
     false,
     write(implementation),
   );
-  const acceptance = tasks.create(
+  const acceptance = await tasks.create(
     {
       title: "Принять пользовательский сценарий",
       targets: [scenario.key],
@@ -143,7 +142,7 @@ function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workfl
     },
     actor,
   );
-  let plan = planning.create(
+  let plan = await planning.create(
     "work-plan",
     {
       title: "Локальный экспорт через CLI",
@@ -156,11 +155,11 @@ function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workfl
     },
     actor,
   );
-  plan = planning.stage(plan.key, "create", { title: "Реализация и приёмка" }, write(plan));
+  plan = await planning.stage(plan.key, "create", { title: "Реализация и приёмка" }, write(plan));
   const stageId = firstId(plan.data.stages);
-  plan = planning.stageTask(plan.key, stageId, implementation.key, false, write(plan));
-  plan = planning.stageTask(plan.id, stageId, acceptance.id, false, write(plan));
-  const release = planning.create(
+  plan = await planning.stageTask(plan.key, stageId, implementation.key, false, write(plan));
+  plan = await planning.stageTask(plan.id, stageId, acceptance.id, false, write(plan));
+  const release = await planning.create(
     "release",
     { title: "Первый локальный экспорт", version: "1.0.0", planIds: [plan.key] },
     actor,
@@ -184,17 +183,17 @@ function createWorkflow({ knowledge, tasks, planning }: WorkflowFixture): Workfl
  * Завершает неизменённый после подготовки маршрут по его исходным ревизиям.
  * Критерий выполняется перед закрытием реализации; план и релиз не изменяются.
  */
-function finishWorkflowTasks({ tasks }: WorkflowFixture, workflow: Workflow): void {
-  tasks.move(workflow.preparation.id, { column: "done" }, write(workflow.preparation));
+async function finishWorkflowTasks({ tasks }: WorkflowFixture, workflow: Workflow): Promise<void> {
+  await tasks.move(workflow.preparation.id, { column: "done" }, write(workflow.preparation));
   let implementation = workflow.implementation;
-  implementation = tasks.criterion(
+  implementation = await tasks.criterion(
     implementation.id,
     "complete",
     { id: firstId(implementation.data.acceptanceCriteria) },
     write(implementation),
   );
-  tasks.move(implementation.id, { column: "done" }, write(implementation));
-  tasks.move(workflow.acceptance.id, { column: "done" }, write(workflow.acceptance));
+  await tasks.move(implementation.id, { column: "done" }, write(implementation));
+  await tasks.move(workflow.acceptance.id, { column: "done" }, write(workflow.acceptance));
 }
 
 /**
@@ -208,10 +207,10 @@ function productTaskIds(tasks: TasksService, reference: string): string[] {
 }
 
 describe("Связный рабочий цикл знаний, задач, планов и релизов", () => {
-  test("требования и реализации проходят через критерии и внешнюю зависимость до выпуска", () => {
-    withWorkflowProject((fixture) => {
+  test("требования и реализации проходят через критерии и внешнюю зависимость до выпуска", async () => {
+    await withWorkflowProject(async (fixture) => {
       const { db, knowledge, tasks, planning } = fixture;
-      const workflow = createWorkflow(fixture);
+      const workflow = await createWorkflow(fixture);
       const {
         feature,
         scenario,
@@ -262,22 +261,22 @@ describe("Связный рабочий цикл знаний, задач, пл�
         counts: { total: 2, completed: 0, percent: 0 },
       });
 
-      plan = planning.transition("work-plan", plan.id, "start", {}, write(plan));
+      plan = await planning.transition("work-plan", plan.id, "start", {}, write(plan));
 
       expect(tasks.get(implementation.id)).toEqual(implementation);
-      expectAtomicFailure(
+      await expectAtomicFailure(
         db,
         () =>
           planning.transition("work-plan", plan.id, "complete", { result: "Готово" }, write(plan)),
         "NOT_READY",
       );
-      expectAtomicFailure(
+      await expectAtomicFailure(
         db,
         () => tasks.move(implementation.id, { column: "done" }, write(implementation)),
         "TASK_INCOMPLETE",
       );
 
-      implementation = tasks.criterion(
+      implementation = await tasks.criterion(
         implementation.id,
         "complete",
         { id: firstId(implementation.data.acceptanceCriteria) },
@@ -290,7 +289,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
         blockers: [preparation.id],
       });
 
-      tasks.move(preparation.id, { column: "done" }, write(preparation));
+      await tasks.move(preparation.id, { column: "done" }, write(preparation));
 
       expect(tasks.progress(implementation.id)).toEqual({
         completed: false,
@@ -298,13 +297,17 @@ describe("Связный рабочий цикл знаний, задач, пл�
         blockers: [],
       });
 
-      implementation = tasks.move(implementation.id, { column: "done" }, write(implementation));
+      implementation = await tasks.move(
+        implementation.id,
+        { column: "done" },
+        write(implementation),
+      );
 
       expect(planning.progress("work-plan", plan.id)).toMatchObject({
         counts: { total: 2, completed: 1, percent: 50 },
       });
 
-      tasks.move(acceptance.id, { column: "done" }, write(acceptance));
+      await tasks.move(acceptance.id, { column: "done" }, write(acceptance));
 
       expect(planning.progress("work-plan", plan.id)).toMatchObject({
         completed: true,
@@ -313,12 +316,12 @@ describe("Связный рабочий цикл знаний, задач, пл�
       });
       // Выполненный состав ещё не означает явно завершённый план.
       expect(planning.progress("release", release.id).canRelease).toBe(false);
-      expectAtomicFailure(
+      await expectAtomicFailure(
         db,
         () => planning.transition("release", release.id, "publish", {}, write(release)),
         "NOT_READY",
       );
-      plan = planning.transition(
+      plan = await planning.transition(
         "work-plan",
         plan.id,
         "complete",
@@ -330,7 +333,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
       expect(planning.progress("release", release.id).canRelease).toBe(true);
       expect(planning.get("release", release.id)).toEqual(release);
 
-      release = planning.transition("release", release.id, "publish", {}, write(release));
+      release = await planning.transition("release", release.id, "publish", {}, write(release));
 
       expect(release.data).toMatchObject({ status: "released", releasedBy: actor });
       expect(typeof release.data.releasedAt).toBe("string");
@@ -350,12 +353,12 @@ describe("Связный рабочий цикл знаний, задач, пл�
     });
   });
 
-  test("публикация перечитывает обязательства из другой SQLite-сессии даже у закрытого плана", () => {
-    withWorkflowProject((fixture) => {
+  test("публикация перечитывает обязательства из другой SQLite-сессии даже у закрытого плана", async () => {
+    await withWorkflowProject(async (fixture) => {
       const { db, tasks, planning } = fixture;
-      const workflow = createWorkflow(fixture);
-      finishWorkflowTasks(fixture, workflow);
-      const plan = planning.transition(
+      const workflow = await createWorkflow(fixture);
+      await finishWorkflowTasks(fixture, workflow);
+      const plan = await planning.transition(
         "work-plan",
         workflow.plan.id,
         "complete",
@@ -369,7 +372,11 @@ describe("Связный рабочий цикл знаний, задач, пл�
       try {
         const otherTasks = new TasksService(otherDb);
         let preparation = otherTasks.get(workflow.preparation.id);
-        preparation = otherTasks.move(preparation.id, { column: "review" }, write(preparation));
+        preparation = await otherTasks.move(
+          preparation.id,
+          { column: "review" },
+          write(preparation),
+        );
 
         expect(tasks.get(workflow.implementation.id).data.column).toBe("done");
         expect(tasks.get(workflow.acceptance.id).data.column).toBe("done");
@@ -388,19 +395,19 @@ describe("Связный рабочий цикл знаний, задач, пл�
         });
         expect(planning.get("release", release.id)).toEqual(release);
         expect(planning.progress("release", release.id).canRelease).toBe(false);
-        expectAtomicFailure(
+        await expectAtomicFailure(
           db,
           () => planning.transition("release", release.id, "publish", {}, write(release)),
           "NOT_READY",
         );
 
-        preparation = otherTasks.move(preparation.id, { column: "done" }, write(preparation));
-        release = planning.transition("release", release.id, "publish", {}, write(release));
+        preparation = await otherTasks.move(preparation.id, { column: "done" }, write(preparation));
+        release = await planning.transition("release", release.id, "publish", {}, write(release));
 
         expect(planning.progress("release", release.id).completed).toBe(true);
 
         // После выпуска меняется только текущая готовность, а факт выпуска сохраняется.
-        otherTasks.move(preparation.id, { column: "review" }, write(preparation));
+        await otherTasks.move(preparation.id, { column: "review" }, write(preparation));
 
         expect(planning.progress("release", release.id)).toMatchObject({
           completed: false,
@@ -415,10 +422,10 @@ describe("Связный рабочий цикл знаний, задач, пл�
     });
   });
 
-  test("снятие участия и перенос доски сохраняют цели, зависимости и явное включение задачи", () => {
-    withWorkflowProject((fixture) => {
+  test("снятие участия и перенос доски сохраняют цели, зависимости и явное включение задачи", async () => {
+    await withWorkflowProject(async (fixture) => {
       const { db, knowledge, tasks, planning } = fixture;
-      const workflow = createWorkflow(fixture);
+      const workflow = await createWorkflow(fixture);
       const {
         feature,
         scenario,
@@ -433,12 +440,12 @@ describe("Связный рабочий цикл знаний, задач, пл�
       const progress = planning.progress("work-plan", plan.id);
       expect(productTaskIds(tasks, feature.key)).toEqual([implementation.id, acceptance.id].sort());
 
-      expectAtomicFailure(
+      await expectAtomicFailure(
         db,
         () => tasks.move(implementation.id, { board: "product" }, write(implementation)),
         "INVALID_ARGUMENT",
       );
-      application = knowledge.replaceParticipation(application.id, [], write(application));
+      application = await knowledge.replaceParticipation(application.id, [], write(application));
 
       expect(knowledge.get("implementation", featureImplementation.key).data.active).toBe(false);
       expect(knowledge.get("implementation", scenarioImplementation.key).data.active).toBe(false);
@@ -449,7 +456,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
       ]);
       expect(planning.get("work-plan", plan.id)).toEqual(plan);
       expect(planning.progress("work-plan", plan.id)).toEqual(progress);
-      expectAtomicFailure(
+      await expectAtomicFailure(
         db,
         () =>
           tasks.create(
@@ -458,7 +465,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
           ),
         "INVALID_ARGUMENT",
       );
-      implementation = tasks.update(
+      implementation = await tasks.update(
         implementation.id,
         { description: "Существующая ссылка сохраняется после снятия участия." },
         write(implementation),
@@ -469,7 +476,7 @@ describe("Связный рабочий цикл знаний, задач, пл�
         scenarioImplementation.id,
       ]);
 
-      knowledge.replaceParticipation(
+      await knowledge.replaceParticipation(
         application.id,
         [featureImplementation.key, scenarioImplementation.key],
         write(application),
@@ -487,9 +494,17 @@ describe("Связный рабочий цикл знаний, задач, пл�
       expect(productTaskIds(tasks, feature.key)).toEqual([implementation.id, acceptance.id].sort());
 
       const oldKey = implementation.key;
-      implementation = tasks.update(implementation.id, { targets: [] }, write(implementation));
-      implementation = tasks.move(implementation.id, { board: "product" }, write(implementation));
-      implementation = tasks.update(
+      implementation = await tasks.update(
+        implementation.id,
+        { targets: [] },
+        write(implementation),
+      );
+      implementation = await tasks.move(
+        implementation.id,
+        { board: "product" },
+        write(implementation),
+      );
+      implementation = await tasks.update(
         implementation.id,
         { targets: [scenario.key] },
         write(implementation),
@@ -507,50 +522,73 @@ describe("Связный рабочий цикл знаний, задач, пл�
       expect(planning.progress("work-plan", plan.id)).toEqual(progress);
       const before = snapshot(db);
 
-      const unchangedPlan = planning.stageTask(plan.id, stageId, oldKey, false, write(plan));
+      const unchangedPlan = await planning.stageTask(plan.id, stageId, oldKey, false, write(plan));
 
       expect(unchangedPlan).toEqual(plan);
       expect(snapshot(db)).toEqual(before);
     });
   });
 
-  test("поздний отказ завершения плана откатывает весь пакет знаний и задач вместе с адресами", () => {
-    withWorkflowProject((fixture) => {
-      const { db, knowledge, tasks, planning } = fixture;
-      const initialIds = new Set(db.list().map((entity) => entity.id));
+  test("поздний отказ завершения плана откатывает весь пакет знаний и задач вместе с адресами", async () => {
+    await withWorkflowProject(async (fixture) => {
+      const { db } = fixture;
+      const initial = db.list();
       const attempted: EntityRecord[] = [];
-      let allocatedKeys: string[] = [];
-
-      expectAtomicFailure(
-        db,
-        () =>
-          db.transaction(() => {
-            const workflow = createWorkflow(fixture);
-            allocatedKeys = db.list().map((entity) => entity.key);
-            attempted.push(...db.list().filter((entity) => !initialIds.has(entity.id)));
-            knowledge.rename(
-              "feature",
-              workflow.feature.id,
-              "FEATURE-EXPORT",
-              write(workflow.feature),
-            );
-            tasks.move(workflow.preparation.id, { column: "done" }, write(workflow.preparation));
-            tasks.criterion(
-              workflow.implementation.id,
-              "complete",
-              { id: firstId(workflow.implementation.data.acceptanceCriteria) },
-              write(workflow.implementation),
-            );
-            planning.transition(
-              "work-plan",
-              workflow.plan.id,
-              "complete",
-              { result: "Недостаточно: задачи ещё не переведены в done." },
-              write(workflow.plan),
-            );
-          }),
-        "NOT_READY",
-      );
+      const apply = CommandContext.prototype.apply;
+      // Сохраняем реальные allocations неудавшегося исполнения, не подменяя overlay или SQLite.
+      const effects = spyOn(CommandContext.prototype, "apply").mockImplementation(function (
+        this: CommandContext,
+        changes,
+      ) {
+        apply.call(this, changes);
+        for (const change of changes) {
+          if (change.kind === "entity" && change.before === null) {
+            attempted.push(change.after);
+          }
+        }
+      });
+      try {
+        await expectAtomicFailure(
+          db,
+          () =>
+            new BatchService(db).execute(
+              {
+                version: 1,
+                operations: [
+                  ...workflowCommands(),
+                  {
+                    op: "feature.rename",
+                    ref: { $ref: "feature" },
+                    ifRevision: { $revision: "feature" },
+                    input: { key: "FEATURE-EXPORT" },
+                  },
+                  {
+                    op: "task.move",
+                    ref: { $ref: "preparation" },
+                    ifRevision: { $revision: "preparation" },
+                    input: { column: "done" },
+                  },
+                  {
+                    op: "task.criterion.complete",
+                    ref: { $ref: "implementation" },
+                    ifRevision: { $revision: "criterion" },
+                    input: { id: { $ref: "criterion" } },
+                  },
+                  {
+                    op: "plan.complete",
+                    ref: { $ref: "plan" },
+                    ifRevision: { $revision: "acceptance-membership" },
+                    input: { result: "Недостаточно: задачи ещё не переведены в done." },
+                  },
+                ],
+              },
+              { actor, operationKey: "workflow-rollback" },
+            ),
+          "NOT_READY",
+        );
+      } finally {
+        effects.mockRestore();
+      }
 
       expect(attempted.length).toBeGreaterThan(0);
       for (const entity of attempted) {
@@ -558,9 +596,12 @@ describe("Связный рабочий цикл знаний, задач, пл�
         expect(db.get(entity.key)).toBeUndefined();
       }
       expect(db.get("FEATURE-EXPORT")).toBeUndefined();
+      expect(db.getBatchReceipt("workflow-rollback")).toBeUndefined();
       // Проверяем и счётчики: откат не расходует ключи приложений, задач, планов и релизов.
-      createWorkflow(fixture);
-      expect(db.list().map((entity) => entity.key)).toEqual(allocatedKeys);
+      await createWorkflow(fixture);
+      expect(db.list().map((entity) => entity.key)).toEqual(
+        [...initial, ...attempted].map((entity) => entity.key).sort(),
+      );
     });
   });
 });

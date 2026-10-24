@@ -7,7 +7,7 @@ import {
   type EntitySummary,
   type ProjectEntity,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { resolveEntityIdentity } from "../entities/entity-addresses";
 import { entityMessages } from "../entities/entity.messages";
 import { validateEntityAddress } from "../entities/entity-validation";
@@ -18,7 +18,7 @@ import { decodeEntitySummary } from "../projections/entity-summary";
  * Сохраняет известный отказ одного адреса; ошибки соединения и неожиданные исключения пробрасывает.
  * Список кодов ограничен разрешением адреса и декодированием выбранного содержания.
  */
-function readAddressItem<T>(ref: string, read: () => T): EntityReadItem<T> {
+export function readAddressItem<T>(ref: string, read: () => T): EntityReadItem<T> {
   try {
     return { ref, ok: true, entity: read() };
   } catch (error) {
@@ -47,7 +47,7 @@ function readAddressItem<T>(ref: string, read: () => T): EntityReadItem<T> {
  * Повторный адрес использует результат текущего снимка; ошибки сохраняют позиции аргументов.
  */
 function resolveReadAddresses(
-  db: ProjectDatabase,
+  db: ProjectStore,
   refs: readonly string[],
 ): EntityReadItem<EntityIdentity>[] {
   const ordinary = [...new Set(refs.filter((ref) => !ref.includes(":")))];
@@ -78,7 +78,7 @@ function resolveReadAddresses(
 /**
  * Выбирает уникальные постоянные ID успешных адресов, исключая повторную загрузку алиасов.
  */
-function selectedIds(addresses: readonly EntityReadItem<EntityIdentity>[]): string[] {
+export function selectedIds(addresses: readonly EntityReadItem<EntityIdentity>[]): string[] {
   return [...new Set(addresses.flatMap((item) => (item.ok ? [item.entity.id] : [])))];
 }
 
@@ -86,7 +86,7 @@ function selectedIds(addresses: readonly EntityReadItem<EntityIdentity>[]): stri
  * Декодирует каждую найденную сущность один раз и восстанавливает исходные адреса и повторы.
  * Исчезновение уже разрешённого ID в одном снимке считается CORRUPT_DATA, а не пропуском.
  */
-function assembleReadItems<Stored, Entity>(
+export function assembleReadItems<Stored, Entity>(
   addresses: readonly EntityReadItem<EntityIdentity>[],
   records: ReadonlyMap<string, Stored>,
   decode: (record: Stored) => Entity,
@@ -117,7 +117,7 @@ function assembleReadItems<Stored, Entity>(
  * Reader разделяется всеми записями, поэтому каталог разделов строится один раз на снимок.
  */
 function readFullSelection(
-  db: ProjectDatabase,
+  db: ProjectStore,
   addresses: readonly EntityReadItem<EntityIdentity>[],
 ): EntityReadItem<ProjectEntity>[] {
   const ids = new Set(selectedIds(addresses));
@@ -133,7 +133,7 @@ function readFullSelection(
  * Читает краткие SQL-проекции выбранных ID; полные записи, проект и журналы не загружаются.
  */
 function readSummarySelection(
-  db: ProjectDatabase,
+  db: ProjectStore,
   addresses: readonly EntityReadItem<EntityIdentity>[],
 ): EntityReadItem<EntitySummary>[] {
   const rows = db.getManySummaries(selectedIds(addresses));
@@ -146,7 +146,7 @@ function readSummarySelection(
  * Поколение, разрешение ссылок, содержание и зависимый каталог относятся к одному состоянию БД.
  */
 export function readEntitySelection(
-  db: ProjectDatabase,
+  db: ProjectStore,
   refs: readonly string[],
   options: EntityReadOptions,
 ): EntityReadResult {

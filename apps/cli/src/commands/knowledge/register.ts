@@ -20,6 +20,7 @@ import {
   repeated,
   string,
   textArgs,
+  expectedVersionArgs,
 } from "../../input/arguments";
 import { onlyFields } from "../../input/input";
 import type { InputFields } from "../../input/arguments.types";
@@ -178,7 +179,7 @@ function readParticipationTargets(input: Readonly<Record<string, unknown>>): str
 
 /**
  * Добавляет команды знаний и вложенных составов в реестр без чтения проекта.
- * Обработчики передают мутации Core; реестр охватывает запись транзакцией, а чтение — снимком.
+ * Writers ожидают commit Core без внешней транзакции; синхронные чтения остаются в снимке реестра.
  */
 export function registerKnowledgeCommands(registry: CommandRegistry): void {
   for (const kind of KNOWLEDGE_KINDS) {
@@ -215,11 +216,12 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
       registry.add(`${kind} create`, {
         ...messages.create[kind],
         mode: "create",
+        args: kind === "product" || kind === "implementation" ? expectedVersionArgs : {},
         fields: inputArgs(fields[kind], createInputAliases[kind] ?? []),
         /**
          * Возвращает запись, созданную Core атомарно вместе с её обязательными связанными данными.
          */
-        run: (i): Result => result(i.knowledge.create(kind, i.input, i.actor)),
+        run: async (i): Promise<Result> => result(await i.knowledge.create(kind, i.input, i.actor)),
       });
     }
     if (kind !== "board") {
@@ -231,8 +233,10 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
         /**
          * Возвращает запись после изменения полей; Core проверяет её ревизию до no-op.
          */
-        run: (i): Result =>
-          result(i.knowledge.update(kind, singleton ? undefined : i.text("ref"), i.input, i.write)),
+        run: async (i): Promise<Result> =>
+          result(
+            await i.knowledge.update(kind, singleton ? undefined : i.text("ref"), i.input, i.write),
+          ),
       });
     }
     registry.add(`${kind} rename`, {
@@ -243,9 +247,14 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
        * Возвращает запись с изменённым ключом; Core сохраняет ID и алиасы под CAS записи.
        * Поиск единственного паспорта остаётся в общей транзакции переименования.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.knowledge.rename(kind, singleton ? undefined : i.text("ref"), i.text("key"), i.write),
+          await i.knowledge.rename(
+            kind,
+            singleton ? undefined : i.text("ref"),
+            i.text("key"),
+            i.write,
+          ),
         ),
     });
   }
@@ -272,11 +281,13 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
        * Возвращает проект после изменения раздела; ревизия принадлежит проекту.
        * CLI проверяет выбор --before/--last, а Core — атомарность, CAS и no-op.
        */
-      run: (i): Result => {
+      run: async (i): Promise<Result> => {
         if (action === "move" && Boolean(i.input.before) === Boolean(i.input.last)) {
           throw new CliUsageError(messages.sectionDestinationRequired);
         }
-        return result(i.knowledge.changeSection(action, { ...i.input, id: i.text("id") }, i.write));
+        return result(
+          await i.knowledge.changeSection(action, { ...i.input, id: i.text("id") }, i.write),
+        );
       },
     });
   }
@@ -294,9 +305,9 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
        * Возвращает документ после изменения связи под его исходной ревизией.
        * Core разрешает цель, проверяет её допустимость и обрабатывает no-op атомарно.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.knowledge.linkDocument(i.text("ref"), i.text("target"), {
+          await i.knowledge.linkDocument(i.text("ref"), i.text("target"), {
             ...i.write,
             remove,
             type: i.text("relation"),
@@ -340,9 +351,9 @@ export function registerKnowledgeCommands(registry: CommandRegistry): void {
      * Возвращает приложение после полной замены участия, включая явное опустошение состава.
      * Core атомарно меняет реализации и состав под CAS приложения, проверяемым до no-op.
      */
-    run: (i): Result => {
+    run: async (i): Promise<Result> => {
       const targets = readParticipationTargets(i.input);
-      return result(i.knowledge.replaceParticipation(i.text("ref"), targets, i.write));
+      return result(await i.knowledge.replaceParticipation(i.text("ref"), targets, i.write));
     },
   });
 }

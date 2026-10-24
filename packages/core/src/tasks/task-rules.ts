@@ -1,6 +1,6 @@
 /**
  * Чистые ограничения задачи: допустимость целей, обязательств и направленных связей.
- * Вызывающий сервис получает согласованный снимок и сохраняет результат под CAS задачи.
+ * Loader получает согласованный контекст, executor сохраняет результат под исходным CAS и guards.
  */
 import { RelayError, type KnowledgeRecord, type TaskData, type TaskRecord } from "@relay/contracts";
 import { TASK_LIMITS } from "./task-constants";
@@ -27,6 +27,9 @@ export function ensureTaskTargets(
   board: KnowledgeRecord<"board">,
   retained: readonly string[],
 ): void {
+  if (targets.length > TASK_LIMITS.targets) {
+    throw new RelayError("INVALID_ARGUMENT", taskMessages.targetsLimit(TASK_LIMITS.targets), 2);
+  }
   const ids = targets.map((target) => target.id);
   if (new Set(ids).size !== ids.length) {
     throw new RelayError("INVALID_ARGUMENT", taskMessages.duplicateTargets, 2);
@@ -52,7 +55,7 @@ export function ensureTaskTargets(
 
 /**
  * Отклоняет сохранение done при невыполненных собственных критериях или обязательствах.
- * Граф должен уже содержать кандидат задачи и принадлежать той же транзакции записи.
+ * Граф должен уже содержать кандидат задачи и соответствовать проверяемой границе перехода.
  */
 export function ensureTaskDone(record: TaskRecord, graph: TaskGraph): void {
   if (record.data.column !== "done") {
@@ -108,12 +111,4 @@ export function changeTaskLink(
     throw new RelayError("INVALID_ARGUMENT", taskMessages.linksLimit(TASK_LIMITS.links), 2);
   }
   return { ...record.data, [change.field]: next };
-}
-
-/**
- * Сравнивает декодированное содержание для no-op; порядок критериев, связей и комментариев значим.
- * Ожидаемая ревизия должна быть проверена вызывающим сценарием до этого сравнения.
- */
-export function sameTaskData(left: TaskData, right: TaskData): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }

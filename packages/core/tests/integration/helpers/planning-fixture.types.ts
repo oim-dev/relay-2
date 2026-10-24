@@ -5,6 +5,7 @@ import type {
   ReleaseRecord,
   TaskRecord,
   WorkPlanRecord,
+  TaskProgress,
 } from "@relay/contracts";
 
 /**
@@ -38,3 +39,13 @@ export type PlanningPageOwner = PlanOwner | Omit<ReleasePlans, "items">;
  * Общая форма результата страницы для сравнения карточек и метаданных в табличных тестах.
  */
 export type PlanningPageResult = PlanningPageOwner & EntityPage<TaskRecord | WorkPlanRecord>;
+
+/**
+ * Материал наблюдённого графа: проверка переиспользования и смены логического состояния.
+ */
+export interface PlanningObservedGraph {
+  /* Идентичность рассчитанного экземпляра, не глобальный кеш. */
+  readonly instance: object;
+  /* Готовность выбранной задачи в этом состоянии. */
+  readonly progress: TaskProgress;
+}

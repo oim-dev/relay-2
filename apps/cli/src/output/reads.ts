@@ -2,6 +2,7 @@ import { readOutputMessages as messages } from "../locales/reads";
 import { outputMessages } from "../locales/output";
 import { isObject, renderFullValue } from "./values";
 import { terminalText } from "./terminal";
+import type { CommandEntityVersions } from "@relay/contracts";
 
 /**
  * Представляет только поля краткой проекции Core; полное содержание здесь не запрашивается.
@@ -52,12 +53,35 @@ function renderReadContent(item: Readonly<Record<string, unknown>>, summary: boo
 }
 
 /**
+ * Форматирует отдельную metadata выбранного ID без изменения самой сущности и без чтения хранилища.
+ */
+function renderReadVersions(
+  item: Readonly<Record<string, unknown>>,
+  versions?: Readonly<Record<string, CommandEntityVersions>>,
+): string {
+  if (
+    item.ok !== true ||
+    !isObject(item.entity) ||
+    typeof item.entity.id !== "string" ||
+    !versions ||
+    !Object.hasOwn(versions, item.entity.id)
+  ) {
+    return "";
+  }
+  const value = versions[item.entity.id];
+  return value ? messages.versions(value.recordVersion, value.aggregateVersion) : "";
+}
+
+/**
  * Форматирует полный либо краткий адресный набор без повторного чтения и без скрытия ошибок.
  * Проверяется только оболочка для представления; предметные данные уже проверены Core.
  * Содержание всех элементов очищается до выбора заголовков; общий индекс строится за один проход.
  * Суммарная стоимость линейна по содержанию и заголовкам, включая межэлементные коллизии.
  */
-export function renderEntityRead(data: unknown): string {
+export function renderEntityRead(
+  data: unknown,
+  versions?: Readonly<Record<string, CommandEntityVersions>>,
+): string {
   if (!isObject(data) || !Array.isArray(data.items)) {
     return renderFullValue(data);
   }
@@ -65,9 +89,11 @@ export function renderEntityRead(data: unknown): string {
     if (!isObject(item) || typeof item.ref !== "string") {
       return { ref: undefined, content: terminalText(renderFullValue(item)) };
     }
+    const metadata = renderReadVersions(item, versions);
+    const content = renderReadContent(item, data.view === "summary");
     return {
       ref: item.ref,
-      content: terminalText(renderReadContent(item, data.view === "summary")),
+      content: terminalText(metadata ? `${content}\n${metadata}` : content),
     };
   });
   const lines = new Set<string>();

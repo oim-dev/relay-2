@@ -7,6 +7,7 @@ import {
 } from "./identity.constants";
 import { identityMessages } from "./identity.messages";
 import type { EntityKind } from "./identity.types";
+import { isPortableIdentityText } from "../replication/portable-identity";
 
 /**
  * Проверяет принадлежность внешнего значения перечню видов локальных сущностей.
@@ -47,7 +48,8 @@ export function isEntitySlug(value: unknown): value is string {
 /**
  * Проверяет идентичность автора и возвращает исходную строку без нормализации.
  * Краевые пробелы, управляющие символы и разделители строк запрещены;
- * длина ограничена ACTOR_LENGTH. Исправление текста изменило бы владельца участия.
+ * длина ограничена ACTOR_LENGTH. Непарный UTF-16 отклоняется до SQL TEXT binding.
+ * Исправление текста изменило бы владельца участия.
  *
  * @throws RelayError с кодом INVALID_ARGUMENT и полем actor при неверном значении.
  */
@@ -56,6 +58,7 @@ export function validateActor(value: unknown): string {
     typeof value !== "string" ||
     value.length < ACTOR_LENGTH.min ||
     value.length > ACTOR_LENGTH.max ||
+    !isPortableIdentityText(value) ||
     value !== value.trim() ||
     /[\p{Cc}\u2028\u2029]/u.test(value)
   ) {

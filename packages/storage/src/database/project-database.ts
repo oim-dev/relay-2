@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
+import { statSync } from "node:fs";
 import {
   RelayError,
   validateEntityPageRequest,
@@ -8,7 +9,50 @@ import {
   type EntityRecord,
   type EntityPage,
   type EntityPageRequest,
+  type PortableProjectSnapshot,
+  type ReplicationChangeset,
+  type ReplicationConflict,
+  type ExpectedEntityAddress,
+  type ReplicationStatus,
+  type ReplicationReadGuard,
+  type CommandStore,
 } from "@relay/contracts";
+import {
+  captureStoredProject,
+  flushReplicationQueue,
+  readOutbox,
+  readReplicationState,
+  readReplicationConflicts,
+  readReplicationDecisions,
+  writeReplicationState,
+  readReplicationGuard,
+  readReplicationStatus,
+} from "../replication/replication-store";
+import { importStoredProject } from "../replication/replication-import";
+import { storageReplicationMessages } from "../replication/replication.messages";
+import { observeReplicationReads } from "../replication/replication-reads";
+import {
+  readOutboxDependencies,
+  readOutboxDigests,
+  readOutboxWindow,
+} from "../replication/replication-outbox";
+import type {
+  ReplicationOutboxRequest,
+  ReplicationOutboxWindow,
+  ReplicationSourceDigest,
+  ReplicationDependencySource,
+} from "../replication/replication-outbox.types";
+import { flushComponentVersions, readComponents } from "../components/component-store";
+import { SqliteCommandStore } from "../commands/sqlite-command-store";
+import type { PortableComponent } from "@relay/contracts";
+import type {
+  ReplicationState,
+  ReplicationStateUpdate,
+  StoredReplicationDecision,
+  ReplicationGuard,
+  ReplicationImportPlan,
+} from "../replication/replication.types";
+import type { ReplicationStore, ProjectStorageInfo } from "./project-store.types";
 import { insertBatchReceipt, readBatchReceipt } from "../batch/batch-receipts";
 import type { StoredBatchReceipt } from "../batch/batch-receipt.types";
 import {
@@ -41,6 +85,7 @@ import {
   updateEntity,
 } from "../entities/entity-writes";
 import { entityMessages } from "../entities/entity.messages";
+import { assertSqlText } from "../entities/entity-sql-text";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
 import { isAsyncFunction, isPromiseLike } from "../sqlite/transaction-callback";
 import type { SynchronousOperation, TransactionMode } from "../sqlite/transaction.types";
@@ -61,11 +106,13 @@ import { projectDatabaseMessages } from "./project-database.messages";
  * Предметную форму содержания проверяет Core; Storage обеспечивает CAS, ссылки и атомарность.
  * Создавший или открывший базу обязан закрыть её после завершения сценария.
  */
-export class ProjectDatabase {
+export class ProjectDatabase implements ReplicationStore {
   /* Абсолютный путь файловой базы; WAL и SHM располагаются рядом. */
   readonly path: string;
   /* Постоянный ID корневой сущности проекта. */
   readonly projectId: string;
+  /* Порт команд того же соединения; все сетевые/async ожидания находятся вне SQLite callback. */
+  readonly commands: CommandStore;
   /* Единственное принадлежащее экземпляру соединение SQLite. */
   private readonly connection: Database;
   /* Число активных внешних транзакций и вложенных savepoint в текущем стеке. */
@@ -74,6 +121,12 @@ export class ProjectDatabase {
   private savepoint = 0;
   /* Признак завершённого владения соединением; повторное close допустимо. */
   private closed = false;
+  /* Глубина предметных transaction, отличаемая от чтений snapshot для защиты адресного ввода. */
+  private writeDepth = 0;
+  /* Явные ожидаемые привязки лишь текущего синхронного сценария, не разрешения будущих команд. */
+  private referenceGuards: ReadonlyMap<string, string> = new Map();
+  /* Счётчик явных write-UOW, отличающий обычный snapshot от legacy записи через вложенный transaction. */
+  private writeIntent = 0;
 
   /**
    * Принимает владение настроенным соединением, уже связанным с проверенным ID проекта.
@@ -82,6 +135,17 @@ export class ProjectDatabase {
     this.path = path;
     this.connection = connection;
     this.projectId = projectId;
+    this.commands = new SqliteCommandStore(connection, {
+      projectId,
+      /**
+       * Удерживает строго синхронный снимок выбранного соединения.
+       */
+      snapshot: (operation) => this.snapshot(operation),
+      /**
+       * Фиксирует exact effects вместе с durable outbox после синхронного callback.
+       */
+      transaction: (operation) => this.transaction(operation),
+    });
   }
 
   /**
@@ -113,7 +177,7 @@ export class ProjectDatabase {
 
   /**
    * Открывает существующую совместимую базу, проверяя приложение, версию и корневую сущность.
-   * Техническая схема v1 атомарно обновляется до v2 с сохранением предметных данных и поколения.
+   * Технические схемы v1/v2/v3 атомарно обновляются до v4 с сохранением данных и исходной очереди.
    * Не создаёт отсутствующий файл; при отказе освобождает временно открытое соединение.
    */
   static open(path: string): ProjectDatabase {
@@ -143,6 +207,35 @@ export class ProjectDatabase {
   }
 
   /**
+   * Создаёт специальную пустую реплику для последующего bootstrap в Core.
+   * Файл эксклюзивен; до bootstrap содержит лишь техническую корневую карточку.
+   */
+  static createReplica(path: string, projectId: string): ProjectDatabase {
+    const db = ProjectDatabase.create(path, { id: projectId, name: "Replica", slug: "replica" });
+    try {
+      db.transaction(() => {
+        db.connection.exec(
+          "UPDATE replication_state SET importing=1 WHERE singleton=1; DELETE FROM entity_refs;",
+        );
+        db.connection.query("DELETE FROM entities WHERE id!=?").run(projectId);
+        db.connection.query("INSERT INTO entity_refs VALUES(?,?)").run(projectId, projectId);
+        db.connection
+          .query("INSERT INTO entity_refs SELECT 'PROJECT',? WHERE ?!='PROJECT'")
+          .run(projectId, projectId);
+        flushComponentVersions(db.connection);
+        db.connection.exec(
+          "DELETE FROM replication_outbox; DELETE FROM replication_owner_heads; DELETE FROM replication_entity_queue; DELETE FROM replication_address_queue; DELETE FROM replication_comment_queue; DELETE FROM replication_receipt_queue; DELETE FROM replication_read_queue; DELETE FROM replication_transition_queue; DELETE FROM component_changes; DELETE FROM component_events; UPDATE replication_state SET sequence=0,importing=0 WHERE singleton=1;",
+        );
+      });
+      return db;
+    } catch (error) {
+      db.close();
+      discardProjectFile(db.path);
+      throw error;
+    }
+  }
+
+  /**
    * Освобождает соединение; повторный вызов ничего не меняет.
    * Внутри transaction/snapshot запрещён, чтобы не разорвать атомарность вызывающего.
    */
@@ -155,6 +248,16 @@ export class ProjectDatabase {
     }
     this.connection.close();
     this.closed = true;
+  }
+
+  /**
+   * Возвращает путь и размер основного SQLite-файла без WAL/SHM; предметный снимок не открывает.
+   */
+  storageInfo(): ProjectStorageInfo {
+    return this.withOpenConnection(() => ({
+      databasePath: this.path,
+      bytes: statSync(this.path).size,
+    }));
   }
 
   /**
@@ -178,7 +281,77 @@ export class ProjectDatabase {
    * Async-функция не запускается; возвращённый thenable вызывает rollback и ASYNC_TRANSACTION.
    */
   transaction<T>(operation: SynchronousOperation<T>): T {
-    return this.runTransaction<T>("IMMEDIATE", operation);
+    const previousIntent = this.writeIntent;
+    this.writeDepth++;
+    try {
+      const result = this.runTransaction<T>("IMMEDIATE", operation);
+      this.writeIntent++;
+      return result;
+    } catch (error) {
+      this.writeIntent = previousIntent;
+      throw error;
+    } finally {
+      this.writeDepth--;
+    }
+  }
+
+  /**
+   * Запрещает использовать переназначенный ключ в записи/новой ссылке без явного expectedId.
+   * Числовая ревизия другой новой карточки не является достаточной защитой от stale key→ID.
+   */
+  assertWritableReference(ref: string): void {
+    assertSqlText(ref, "ref");
+    if (this.writeDepth === 0) {
+      return;
+    }
+    this.withOpenConnection(() => {
+      const remapped = this.connection
+        .query<{ current_id: string; previous_id: string }, [string]>(
+          "SELECT current_id,previous_id FROM replication_remapped_refs WHERE ref=?",
+        )
+        .get(ref);
+      if (remapped !== null && this.referenceGuards.get(ref) !== remapped.current_id) {
+        throw new RelayError("ADDRESS_GUARD_REQUIRED", storageReplicationMessages.addressGuard, 4, {
+          ref,
+          previousId: remapped.previous_id,
+          currentId: remapped.current_id,
+        });
+      }
+    });
+  }
+
+  /**
+   * Удерживает проверенные адресные привязки только до завершения одной атомарной команды.
+   * Вложенные guards наследуют внешние; finally возвращает контекст даже при rollback.
+   */
+  withReferenceGuards<T>(
+    guards: readonly ExpectedEntityAddress[],
+    operation: SynchronousOperation<T>,
+  ): T {
+    if (isAsyncFunction(operation)) {
+      throw new RelayError("ASYNC_TRANSACTION", projectDatabaseMessages.asyncCallback);
+    }
+    return this.transaction(() => {
+      const previous = this.referenceGuards;
+      const current = new Map(previous);
+      for (const guard of guards) {
+        const actual = this.getIdentity(guard.ref);
+        if (actual !== undefined && actual.id !== guard.expectedId) {
+          throw new RelayError("ADDRESS_CHANGED", storageReplicationMessages.addressChanged, 4, {
+            ref: guard.ref,
+            expectedId: guard.expectedId,
+            actualId: actual.id,
+          });
+        }
+        current.set(guard.ref, guard.expectedId);
+      }
+      this.referenceGuards = current;
+      try {
+        return operation();
+      } finally {
+        this.referenceGuards = previous;
+      }
+    });
   }
 
   /**
@@ -200,6 +373,7 @@ export class ProjectDatabase {
     }
     return this.withOpenConnection(() => {
       const nested = this.depth > 0;
+      const writeIntent = this.writeIntent;
       if (nested && !this.connection.inTransaction) {
         throw new RelayError("TRANSACTION_ABORTED", projectDatabaseMessages.transactionAborted);
       }
@@ -214,9 +388,14 @@ export class ProjectDatabase {
           void Promise.resolve(result).catch(() => {});
           throw new RelayError("ASYNC_TRANSACTION", projectDatabaseMessages.asyncResult);
         }
+        if (!nested && (mode === "IMMEDIATE" || this.writeIntent !== writeIntent)) {
+          flushComponentVersions(this.connection);
+          flushReplicationQueue(this.connection);
+        }
         this.connection.exec(nested ? `RELEASE SAVEPOINT ${point}` : "COMMIT");
         return result;
       } catch (error) {
+        this.writeIntent = writeIntent;
         if (this.connection.inTransaction) {
           if (nested) {
             this.connection.exec(`ROLLBACK TO SAVEPOINT ${point}; RELEASE SAVEPOINT ${point}`);
@@ -232,27 +411,42 @@ export class ProjectDatabase {
   }
 
   /**
-   * Читает полную карточку и журнал по ID, ключу или алиасу одним SQL-запросом.
+   * Читает карточку и журнал по адресу, гидратируя parts отдельным пакетом в том же snapshot.
    * Несуществующая ссылка и несовпадение вида возвращают undefined.
    */
   get(ref: string, kind?: EntityKind): EntityRecord | undefined {
-    return this.withOpenConnection(() => getEntity(this.connection, ref, kind));
+    return this.snapshot(() => {
+      const record = getEntity(this.connection, ref, kind);
+      this.observeReads(record === undefined ? [] : [record.id], "content");
+      return record;
+    });
   }
 
   /**
    * Разрешает ID, ключ или алиас без чтения JSON и журнала; отсутствие возвращает undefined.
    */
   getIdentity(ref: string, kind?: EntityKind): EntityIdentity | undefined {
-    return this.withOpenConnection(() => getEntityIdentity(this.connection, ref, kind));
+    return this.withOpenConnection(() => {
+      const record = getEntityIdentity(this.connection, ref, kind);
+      this.observeReads(record === undefined ? [] : [record.id], "existence");
+      return record;
+    });
   }
 
   /**
-   * Читает полные карточки и журналы только запрошенных постоянных ID одним SQL-запросом.
+   * Читает карточки/журналы запрошенных ID и их parts одним пакетом из того же snapshot.
    * Сохраняет порядок и повторы ID, пропуская отсутствующие записи и несовпадающий вид.
    * Ключи и алиасы не разрешаются; пустой пакет возвращает пустой массив без SQL.
    */
   getMany(ids: readonly string[], kind?: EntityKind): EntityRecord[] {
-    return this.withOpenConnection(() => getEntities(this.connection, ids, kind));
+    return this.snapshot(() => {
+      const records = getEntities(this.connection, ids, kind);
+      this.observeReads(
+        records.map((record) => record.id),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
@@ -261,7 +455,14 @@ export class ProjectDatabase {
    * Пустой пакет возвращает пустой массив без SQL; отсутствующие и чужие ссылки проверяет Core.
    */
   getManyIdentities(ids: readonly string[], kind?: EntityKind): EntityIdentity[] {
-    return this.withOpenConnection(() => getEntityIdentities(this.connection, ids, kind));
+    return this.withOpenConnection(() => {
+      const records = getEntityIdentities(this.connection, ids, kind);
+      this.observeReads(
+        records.map((record) => record.id),
+        "existence",
+      );
+      return records;
+    });
   }
 
   /**
@@ -270,7 +471,14 @@ export class ProjectDatabase {
    * Типизированные и виртуальные адреса разрешает Core; общий снимок удерживает вызывающий.
    */
   resolveMany(refs: readonly string[]): (EntityIdentity | null)[] {
-    return this.withOpenConnection(() => resolveEntityReferences(this.connection, refs));
+    return this.withOpenConnection(() => {
+      const records = resolveEntityReferences(this.connection, refs);
+      this.observeReads(
+        records.flatMap((record) => (record === null ? [] : [record.id])),
+        "existence",
+      );
+      return records;
+    });
   }
 
   /**
@@ -279,7 +487,14 @@ export class ProjectDatabase {
    * Предметные поля проверяет Core, согласованность с адресацией удерживает внешний snapshot.
    */
   getManySummaries(ids: readonly string[]): (EntitySummaryProjection | null)[] {
-    return this.withOpenConnection(() => getEntitySummaries(this.connection, ids));
+    return this.withOpenConnection(() => {
+      const records = getEntitySummaries(this.connection, ids);
+      this.observeReads(
+        records.flatMap((record) => (record === null ? [] : [record.id])),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
@@ -287,24 +502,45 @@ export class ProjectDatabase {
    * Приоритет адресов, допустимые виды виртуальных ссылок и неоднозначность проверяет Core.
    */
   findAddressIdentities(ref: string, kind: EntityKind): EntityIdentity[] {
-    return this.withOpenConnection(() => findAddressIdentities(this.connection, ref, kind));
+    return this.withOpenConnection(() => {
+      const records = findAddressIdentities(this.connection, ref, kind);
+      this.observeReads(
+        records.map((record) => record.id),
+        "existence",
+      );
+      return records;
+    });
   }
 
   /**
-   * Загружает все карточки выбранного вида с комментариями по ключу и ID одним запросом.
+   * Загружает карточки выбранного вида с комментариями и пакетной гидратацией parts по ключу/ID.
    * Отсутствие вида означает все сущности проекта; для ограниченной выдачи предназначен listPage.
    */
   list(kind?: EntityKind): EntityRecord[] {
-    return this.withOpenConnection(() => listEntities(this.connection, kind));
+    return this.snapshot(() => {
+      const records = listEntities(this.connection, kind);
+      this.observeReads(
+        records.map((record) => record.id),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
-   * Читает карточки вида с точным строковым полем верхнего уровня JSON одним SQL-запросом.
+   * Читает карточки по строковому полю JSON и гидратирует parts только отобранных owners.
    * Имя поля сравнивается буквально, не как JSON-путь; порядок — по ключу и ID.
    * Фильтрация выполняется в SQLite; в TypeScript передаются только выбранные карточки и журналы.
    */
   listByField(kind: EntityKind, field: string, value: string): EntityRecord[] {
-    return this.withOpenConnection(() => listEntitiesByField(this.connection, kind, field, value));
+    return this.snapshot(() => {
+      const records = listEntitiesByField(this.connection, kind, field, value);
+      this.observeReads(
+        records.map((record) => record.id),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
@@ -317,9 +553,14 @@ export class ProjectDatabase {
     field: string,
     value: string,
   ): EntityIdentityWithRevision[] {
-    return this.withOpenConnection(() =>
-      listEntityIdentitiesByField(this.connection, kind, field, value),
-    );
+    return this.withOpenConnection(() => {
+      const records = listEntityIdentitiesByField(this.connection, kind, field, value);
+      this.observeReads(
+        records.map((record) => record.id),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
@@ -364,7 +605,14 @@ export class ProjectDatabase {
    * Отсутствующие и неверные обязательства сохраняются для предметного декодера Core.
    */
   listTaskGraph(): EntityRecord[] {
-    return this.withOpenConnection(() => taskGraphRecords(this.connection));
+    return this.withOpenConnection(() => {
+      const records = taskGraphRecords(this.connection);
+      this.observeReads(
+        records.map((record) => record.id),
+        "content",
+      );
+      return records;
+    });
   }
 
   /**
@@ -415,12 +663,13 @@ export class ProjectDatabase {
   appendTaskComment(ref: string, comment: Record<string, unknown>): EntityRecord {
     const entry = decodeTaskComment(comment);
     return this.transaction(() => {
-      const task = this.get(ref, "task");
+      const task = getEntity(this.connection, ref, "task");
       if (!task) {
         throw new RelayError("NOT_FOUND", entityMessages.taskMissing, 3, { ref });
       }
+      this.observeReads([task.id], "existence");
       appendComment(this.connection, task.id, entry);
-      const appended = this.get(task.id, "task");
+      const appended = getEntity(this.connection, task.id, "task");
       if (!appended) {
         throw new RelayError("STORAGE_ERROR", entityMessages.commentTaskMissing, 1, {
           id: task.id,
@@ -488,6 +737,7 @@ export class ProjectDatabase {
    * Возвращает первоначальную квитанцию либо undefined; текущие сущности не читаются.
    */
   getBatchReceipt(operationKey: string): StoredBatchReceipt | undefined {
+    assertSqlText(operationKey, "operationKey");
     return this.withOpenConnection(() => readBatchReceipt(this.connection, operationKey));
   }
 
@@ -496,6 +746,134 @@ export class ProjectDatabase {
    * Повтор ключа даёт CONFLICT; поколение данных не меняется.
    */
   insertBatchReceipt(receipt: StoredBatchReceipt): void {
+    assertSqlText(receipt.operationKey, "operationKey");
+    assertSqlText(receipt.requestJson, "requestJson");
+    assertSqlText(receipt.resultJson, "resultJson");
     this.transaction(() => insertBatchReceipt(this.connection, receipt));
+  }
+
+  /**
+   * Возвращает полный сохраняемый переносимый снимок из одной транзакции чтения.
+   */
+  captureReplication(): PortableProjectSnapshot {
+    return this.snapshot(() => captureStoredProject(this.connection, this.projectId));
+  }
+
+  /**
+   * Читает первичные части выбранных owners либо полный переносимый компонентный снимок.
+   * Tombstones включены; пустой ownerIds не загружает данных. Обычные карточки гидратируются отдельно.
+   */
+  getComponents(ownerIds?: readonly string[]): PortableComponent[] {
+    return this.snapshot(() => readComponents(this.connection, ownerIds));
+  }
+
+  /**
+   * Читает технический курсор и последний принятый remote без сетевых обращений.
+   */
+  getReplicationState(): ReplicationState {
+    return this.withOpenConnection(() => readReplicationState(this.connection));
+  }
+
+  /**
+   * Возвращает скалярный guard данных, очереди и решений без чтения JSON полного snapshot.
+   */
+  getReplicationGuard(): ReplicationGuard {
+    return this.withOpenConnection(() => readReplicationGuard(this.connection));
+  }
+
+  /**
+   * Возвращает status одним снимком узких счётчиков, не загружая outbox payload.
+   */
+  getReplicationStatus(): ReplicationStatus {
+    return this.snapshot(() => readReplicationStatus(this.connection));
+  }
+
+  /**
+   * Декодирует всю очередь для явного полного local overlay; выбор публикации использует отдельное окно.
+   */
+  getReplicationOutbox(): ReplicationChangeset[] {
+    return this.withOpenConnection(() => readOutbox(this.connection));
+  }
+
+  /**
+   * Читает согласованное ограниченное окно до декодирования payload и точный счётчик остатка.
+   */
+  getReplicationOutboxWindow(request: ReplicationOutboxRequest): ReplicationOutboxWindow {
+    return this.snapshot(() => readOutboxWindow(this.connection, request));
+  }
+
+  /**
+   * Читает metadata выбранных source ID без JSON-декодирования всей очереди.
+   */
+  getReplicationOutboxDigests(ids: readonly string[]): ReplicationSourceDigest[] {
+    return this.withOpenConnection(() => readOutboxDigests(this.connection, ids));
+  }
+
+  /**
+   * Явно сканирует dependencies всей очереди для диагностики ожидания, не декодируя source effects.
+   */
+  getReplicationOutboxDependencies(): ReplicationDependencySource[] {
+    return this.withOpenConnection(() => readOutboxDependencies(this.connection));
+  }
+
+  /**
+   * Читает сохранённые конфликты целых изменений.
+   */
+  getReplicationConflicts(): ReplicationConflict[] {
+    return this.withOpenConnection(() => readReplicationConflicts(this.connection));
+  }
+
+  /**
+   * Читает решения пользователя, проверяемые Core относительно актуального fingerprint.
+   */
+  getReplicationDecisions(ids?: readonly string[]): StoredReplicationDecision[] {
+    return this.withOpenConnection(() => readReplicationDecisions(this.connection, ids));
+  }
+
+  /**
+   * Атомарно записывает подтверждения, конфликты и решения без предметного echo-outbox.
+   */
+  updateReplicationState(update: ReplicationStateUpdate): void {
+    this.transaction(() => writeReplicationState(this.connection, update));
+  }
+
+  /**
+   * Применяет предметно проверенный снимок, не заменяя файл БД и не создавая echo-outbox.
+   */
+  importReplication(snapshot: PortableProjectSnapshot, plan?: ReplicationImportPlan): void {
+    this.transaction(() => importStoredProject(this.connection, snapshot, plan));
+  }
+
+  /**
+   * Восстанавливает лишь пустую createReplica-базу; рабочие данные заменять запрещено.
+   */
+  bootstrapReplication(snapshot: PortableProjectSnapshot): void {
+    this.transaction(() => {
+      const state = this.getReplicationState();
+      if (
+        state.sequence !== 0 ||
+        state.base !== null ||
+        this.count() !== 1 ||
+        snapshot.projectId !== this.projectId
+      ) {
+        throw new RelayError("REPLICATION_NOT_EMPTY", storageReplicationMessages.bootstrap, 4);
+      }
+      this.connection.exec(
+        "UPDATE replication_state SET importing=1 WHERE singleton=1; DELETE FROM entity_refs;",
+      );
+      // Отложенный FK project_state допускает замену технической корневой карточки внутри транзакции.
+      this.connection.exec("DELETE FROM entities");
+      importStoredProject(this.connection, snapshot);
+      writeReplicationState(this.connection, { base: snapshot, conflicts: [] });
+    });
+  }
+
+  /**
+   * Добавляет семантические основания лишь активной записи; обычные чтения не создают SQL-очередей.
+   */
+  private observeReads(ids: readonly string[], kind: ReplicationReadGuard["kind"]): void {
+    if (this.writeDepth > 0 && ids.length > 0) {
+      observeReplicationReads(this.connection, ids, kind);
+    }
   }
 }

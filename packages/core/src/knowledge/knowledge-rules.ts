@@ -76,3 +76,25 @@ export function requireFeatureParticipation(
     invalidKnowledge(knowledgeMessages.missingActiveFeature);
   }
 }
+
+/**
+ * Сверяет полную историю выбранного приложения с активными ID владельца.
+ * Пустая выборка тоже проверяется; повреждённая обратная ссылка не скрывает пропавшее участие.
+ */
+export function requireApplicationImplementations(
+  application: Readonly<KnowledgeRecord<"application">>,
+  records: readonly KnowledgeRecord<"implementation">[],
+): void {
+  const activeIds = new Set(
+    records.filter((record) => record.data.active).map((record) => record.id),
+  );
+  if (
+    records.some((record) => record.data.applicationId !== application.id) ||
+    activeIds.size !== application.data.implementationIds.length ||
+    application.data.implementationIds.some((id) => !activeIds.has(id))
+  ) {
+    throw new RelayError("CORRUPT_DATA", knowledgeMessages.participationMismatch, 1, {
+      id: application.id,
+    });
+  }
+}

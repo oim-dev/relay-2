@@ -44,6 +44,7 @@ const envelopeContracts = [
   { op: "product.create", ref: false, owner: "product" },
   { op: "feature.create", ref: false, owner: null },
   { op: "task.comment.add", ref: true, owner: null },
+  { op: "checkpoint.complete", ref: true, owner: "work-session" },
 ] as const;
 
 /**
@@ -77,8 +78,18 @@ describe("Навигация по справке batch", () => {
       expect(response.stdout).toContain(
         owner === null
           ? "  ifRevision: не принимается"
-          : `  ifRevision: positive integer | {"$revision":string} — обязательно; владелец: ${owner}`,
+          : `  ifRevision: positive integer | {"$revision":string} — обязательно, если expectedVersion не передан; владелец: ${owner}`,
       );
+      expect(response.stdout).toContain(
+        owner === null
+          ? "  expectedVersion: не принимается"
+          : `  expectedVersion: string — обязательно, если ifRevision не передан; владелец: ${owner}`,
+      );
+      if (owner !== null) {
+        expect(response.stdout).toContain("Если переданы оба предусловия, проверяются оба");
+        expect(response.stdout).toContain("versions.aggregateVersion");
+        expect(response.stdout).toContain("versioned read владельца");
+      }
       expect(response.stdout).not.toContain("ifRevision: не требуется");
     },
   );

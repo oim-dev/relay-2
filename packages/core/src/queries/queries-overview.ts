@@ -6,7 +6,7 @@ import {
   type TaskColumn,
   type TaskRecord,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityReader } from "../projections/entity-reader";
 import { taskGraphNode } from "../tasks/task-data";
 import { TaskGraph } from "../tasks/task-graph";
@@ -53,7 +53,7 @@ function summarizeTasks(tasks: readonly TaskRecord[]): ProjectTaskOverview {
  * Полный список читается один раз; проект, разделы, счётчики и граф используют загруженные карточки.
  * Повреждённые карточки и неверный граф отклоняются предметными декодерами без записи в БД.
  */
-export function readProjectOverview(db: ProjectDatabase): ProjectOverview {
+export function readProjectOverview(db: ProjectStore): ProjectOverview {
   const records = db.list();
   const reader = new EntityReader(
     db,

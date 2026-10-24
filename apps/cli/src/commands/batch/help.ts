@@ -93,6 +93,9 @@ function batchSpecificField(
   op: string,
   name: string,
 ): Omit<BatchFieldHelp, "contract"> | undefined {
+  if (op === "plan.stage.task.transfer" && name === "targetVersion") {
+    return { name, format: "string", description: messages.fieldDescriptions.targetVersion };
+  }
   if ((op === "plan.create" || op === "plan.update") && name === "scope") {
     return {
       name,
@@ -285,6 +288,7 @@ function renderOperation({ operation, fields, referenceDescription }: BatchOpera
     messages.operationCode(operation.op),
     messages.reference(referenceDescription),
     messages.revision(operation.revisionOwner),
+    messages.expectedVersion(operation.revisionOwner),
     ...(fields.length
       ? [messages.inputHeading, ...fields.map(renderField)]
       : [messages.emptyInput]),

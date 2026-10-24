@@ -1,16 +1,16 @@
 /**
  * Граница внешнего ввода задач: проверяет форму и возвращает предметные команды.
- * Разрешение ссылок и проверки текущего состояния выполняются внутри транзакции сервиса.
+ * Разрешение ссылок выполняет loader, проверки состояния — чистый calculator перед guarded commit.
  */
-import { randomUUID } from "node:crypto";
 import {
   RelayError,
   TASK_COLUMNS,
   validateActor,
+  type CommandWriteOptions,
   type TaskColumn,
   type TaskCriterion,
-  type WriteOptions,
 } from "@relay/contracts";
+import { expectedCommandVersion } from "../commands/command-write";
 import {
   TASK_CRITERION_FIELDS,
   TASK_CRITERION_TEXT_RULES,
@@ -169,11 +169,11 @@ export function criterionContent(input: unknown): TaskCriterionContent {
 }
 
 /**
- * Подготавливает невыполненный критерий с новым UUID, не записывая его в проект.
+ * Подготавливает невыполненный критерий с заранее выделенным ID без I/O и генерации значений.
  */
-export function newCriterion(input: unknown): TaskCriterion {
+export function newCriterion(input: unknown, id: string): TaskCriterion {
   return {
-    id: randomUUID(),
+    id,
     ...criterionContent(input),
     completed: false,
     completedAt: null,
@@ -221,7 +221,7 @@ export function parseCreateTask(input: unknown): CreateTaskInput {
       value.acceptanceCriteria ?? [],
       taskLabels.criteria,
       TASK_LIMITS.criteria,
-    ).map(newCriterion),
+    ).map(criterionContent),
   };
 }
 
@@ -264,14 +264,29 @@ export function parseMoveTask(input: unknown): MoveTaskInput {
 }
 
 /**
- * Проверяет автора и ожидаемую ревизию содержания без обращения к хранилищу.
+ * Проверяет форму публичных условий записи и автора без обращения к хранилищу.
+ * Возвращает только переданные условия и явный либо унаследованный переносимый token.
+ * Если token отсутствует, числовая ревизия обязательна; переданная ревизия проверяется
+ * независимо от token. Отсутствующие поля не создаются и не подменяются значениями.
  */
-export function validateTaskWriteOptions(options: WriteOptions): void {
-  object(options, ["actor", "ifRevision"], taskLabels.writeOptions);
+export function validateTaskWriteOptions(
+  options: CommandWriteOptions,
+  inheritedVersion?: unknown,
+): Pick<CommandWriteOptions, "ifRevision" | "expectedVersion"> {
+  object(options, ["actor", "ifRevision", "expectedVersion"], taskLabels.writeOptions);
   validateActor(options.actor);
-  if (!Number.isSafeInteger(options.ifRevision) || options.ifRevision < 1) {
+  const expectedVersion = expectedCommandVersion(options.expectedVersion, inheritedVersion);
+  if (options.ifRevision === undefined) {
+    if (expectedVersion === undefined) {
+      invalid(taskMessages.revisionRequired);
+    }
+  } else if (!Number.isSafeInteger(options.ifRevision) || options.ifRevision < 1) {
     invalid(taskMessages.revisionRequired);
   }
+  return {
+    ...(options.ifRevision === undefined ? {} : { ifRevision: options.ifRevision }),
+    ...(expectedVersion === undefined ? {} : { expectedVersion }),
+  };
 }
 
 /**

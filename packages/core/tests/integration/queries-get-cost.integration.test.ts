@@ -13,21 +13,21 @@ const views = [
 ] as const;
 
 describe("Ограниченная стоимость группового чтения", () => {
-  test("200 адресов читают уникальные выбранные карточки одним пакетом и строят один индекс разделов", () => {
-    withEntityDatabase((db) => {
+  test("200 адресов читают уникальные выбранные карточки одним пакетом и строят один индекс разделов", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const first = knowledge.create(
+      const first = await knowledge.create(
         "document",
         { name: "Первый", body: "Первый текст" },
         "tester",
       );
-      const second = knowledge.create(
+      const second = await knowledge.create(
         "document",
         { name: "Второй", body: "Второй текст" },
         "tester",
       );
-      const renamed = knowledge.rename("document", second.id, "SECOND", write(second));
-      const unrelated = knowledge.create(
+      const renamed = await knowledge.rename("document", second.id, "SECOND", write(second));
+      const unrelated = await knowledge.create(
         "document",
         { name: "Посторонний", body: "НЕЗАПРОШЕННОЕ-СОДЕРЖАНИЕ" },
         "tester",
@@ -67,16 +67,16 @@ describe("Ограниченная стоимость группового чт�
     });
   });
 
-  test("summary не читает полные карточки, тела, критерии, комментарии и паспорт проекта", () => {
-    withEntityDatabase((db) => {
+  test("summary не читает полные карточки, тела, критерии, комментарии и паспорт проекта", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const document = knowledge.create(
+      const document = await knowledge.create(
         "document",
         { name: "Правила", body: "НЕ-ЧИТАТЬ-ТЕЛО", summary: "НЕ-ЧИТАТЬ-АННОТАЦИЮ" },
         "tester",
       );
       const tasks = new TasksService(db);
-      const task = tasks.create(
+      const task = await tasks.create(
         {
           title: "Задача",
           description: "НЕ-ЧИТАТЬ-ОПИСАНИЕ",
@@ -84,7 +84,7 @@ describe("Ограниченная стоимость группового чт�
         },
         "tester",
       );
-      tasks.comment(task.id, "НЕ-ЧИТАТЬ-КОММЕНТАРИЙ", "tester");
+      await tasks.comment(task.id, "НЕ-ЧИТАТЬ-КОММЕНТАРИЙ", "tester");
       const generation = db.getGeneration();
       const lists = spyOn(db, "list");
       const single = spyOn(db, "get");
@@ -151,15 +151,15 @@ describe("Ограниченная стоимость группового чт�
 describe("Единый снимок группового чтения", () => {
   test.each(views)(
     "$name чтение удерживает адреса, каталог, ревизии и поколение при конкурентном commit",
-    ({ summary }) => {
-      withEntityDatabase((db) => {
+    async ({ summary }) => {
+      await withEntityDatabase(async (db) => {
         const knowledge = new KnowledgeService(db);
-        const project = knowledge.changeSection(
+        const project = await knowledge.changeSection(
           "create",
           { id: "guides", name: "Руководства" },
           write(knowledge.get("project")),
         );
-        const document = knowledge.create(
+        const document = await knowledge.create(
           "document",
           { name: "Прежнее имя", body: "Прежний текст", sectionId: "guides" },
           "tester",
@@ -167,24 +167,37 @@ describe("Единый снимок группового чтения", () => {
         const generation = db.getGeneration();
         const queries = new QueryService(db);
         const writer = ProjectDatabase.open(db.path);
-        let updated: KnowledgeRecord<"document"> | undefined;
+        const updated: KnowledgeRecord<"document"> = {
+          ...document,
+          key: "RENAMED",
+          revision: document.revision + 1,
+          data: { ...document.data, name: "Новое имя", body: "Новый текст" },
+        };
+        let committed = false;
         /**
          * Сохраняет настоящее пакетное разрешение перед точным барьером конкурентного commit.
          */
         const original: ProjectDatabase["resolveMany"] = db.resolveMany.bind(db);
         const addresses = spyOn(db, "resolveMany").mockImplementationOnce((refs) => {
           const identities = original(refs);
+          // Синхронный технический commit помещён строго между частями чтения;
+          // async предметная подготовка внутри snapshot недопустима.
           writer.transaction(() => {
-            const writing = new KnowledgeService(writer);
-            writing.changeSection("remove", { id: "guides" }, write(project));
-            const changed = writing.update(
-              "document",
-              document.id,
-              { name: "Новое имя", body: "Новый текст" },
-              write(document),
+            writer.update(
+              {
+                ...project,
+                revision: project.revision + 1,
+                data: {
+                  ...project.data,
+                  documentSections: [],
+                  retiredDocumentSectionIds: ["guides"],
+                },
+              },
+              project.revision,
             );
-            updated = writing.rename("document", changed.id, "RENAMED", write(changed));
+            writer.update(updated, document.revision);
           });
+          committed = true;
           return identities;
         });
         try {
@@ -211,9 +224,7 @@ describe("Единый снимок группового чтения", () => {
           addresses.mockRestore();
           writer.close();
         }
-        if (!updated) {
-          throw new Error("Конкурентный писатель не обновил документ");
-        }
+        expect(committed).toBe(true);
 
         const next = queries.getMany([document.key], { summary });
 

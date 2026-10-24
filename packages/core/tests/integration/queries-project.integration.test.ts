@@ -70,15 +70,15 @@ describe("Проект из полного снимка общих запрос�
 
   test.each(sectionStates)(
     "обзор сохраняет содержание и проекцию $name раздела без повторного чтения проекта",
-    ({ retired }) => {
-      withEntityDatabase((db) => {
+    async ({ retired }) => {
+      await withEntityDatabase(async (db) => {
         const knowledge = new KnowledgeService(db);
-        let project = knowledge.changeSection(
+        let project = await knowledge.changeSection(
           "create",
           { id: "guides", name: "Руководства" },
           entityWriteOptions(knowledge.get("project")),
         );
-        const first = knowledge.create(
+        const first = await knowledge.create(
           "document",
           {
             name: "Первый Ω",
@@ -87,13 +87,13 @@ describe("Проект из полного снимка общих запрос�
           },
           actor,
         );
-        const second = knowledge.create(
+        const second = await knowledge.create(
           "document",
           { name: "Второй", body: "Другое руководство", sectionId: "guides" },
           actor,
         );
         if (retired) {
-          project = knowledge.changeSection(
+          project = await knowledge.changeSection(
             "remove",
             { id: "guides" },
             entityWriteOptions(project),
@@ -125,9 +125,9 @@ describe("Проект из полного снимка общих запрос�
     },
   );
 
-  test("обзор отклоняет неизвестный раздел по уже прочитанному проекту", () => {
-    withEntityDatabase((db) => {
-      const document = new KnowledgeService(db).create(
+  test("обзор отклоняет неизвестный раздел по уже прочитанному проекту", async () => {
+    await withEntityDatabase(async (db) => {
+      const document = await new KnowledgeService(db).create(
         "document",
         { name: "Документ", body: "Содержание" },
         actor,
@@ -152,11 +152,11 @@ describe("Проект из полного снимка общих запрос�
     });
   });
 
-  test("повреждённый каталог проекта остаётся CORRUPT_DATA обзора", () => {
-    withEntityDatabase((db) => {
+  test("повреждённый каталог проекта остаётся CORRUPT_DATA обзора", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const project = knowledge.get("project");
-      knowledge.create("document", { name: "Документ", body: "Содержание" }, actor);
+      await knowledge.create("document", { name: "Документ", body: "Содержание" }, actor);
       // null нельзя трактовать как пустой каталог даже у документа без раздела.
       const corruptedProject = {
         ...project,
@@ -177,12 +177,20 @@ describe("Проект из полного снимка общих запрос�
     });
   });
 
-  test("doctor собирает повреждения каталога для проекта и всех документов без перечитывания", () => {
-    withEntityDatabase((db) => {
+  test("doctor собирает повреждения каталога для проекта и всех документов без перечитывания", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const project = knowledge.get("project");
-      const first = knowledge.create("document", { name: "Первый", body: "Содержание" }, actor);
-      const second = knowledge.create("document", { name: "Второй", body: "Содержание" }, actor);
+      const first = await knowledge.create(
+        "document",
+        { name: "Первый", body: "Содержание" },
+        actor,
+      );
+      const second = await knowledge.create(
+        "document",
+        { name: "Второй", body: "Содержание" },
+        actor,
+      );
       // Повреждение проекта не должно прервать сбор диагностик до обхода карточек.
       db.update(
         {
@@ -214,18 +222,18 @@ describe("Проект из полного снимка общих запрос�
     });
   });
 
-  test("doctor заново строит каталог после добавления раздела между операциями", () => {
-    withEntityDatabase((db) => {
+  test("doctor заново строит каталог после добавления раздела между операциями", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      knowledge.create("document", { name: "Первый", body: "Содержание" }, actor);
+      await knowledge.create("document", { name: "Первый", body: "Содержание" }, actor);
       const queries = new QueryService(db);
       const before = queries.check();
-      knowledge.changeSection(
+      await knowledge.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         entityWriteOptions(knowledge.get("project")),
       );
-      knowledge.create(
+      await knowledge.create(
         "document",
         { name: "Новый", body: "Руководство", sectionId: "guides" },
         actor,
@@ -245,33 +253,46 @@ describe("Проект из полного снимка общих запрос�
     });
   });
 
-  test("обзор удерживает каталог и поколение снимка, следующий вызов видит новый раздел", () => {
-    withEntityDatabase((db) => {
+  test("обзор удерживает каталог и поколение снимка, следующий вызов видит новый раздел", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const project = knowledge.get("project");
-      const first = knowledge.create("document", { name: "Первый", body: "Содержание" }, actor);
+      const first = await knowledge.create(
+        "document",
+        { name: "Первый", body: "Содержание" },
+        actor,
+      );
       const generation = db.getGeneration();
       const queries = new QueryService(db);
       const writer = ProjectDatabase.open(db.path);
-      let updatedProject: KnowledgeRecord<"project"> | undefined;
-      let addedDocument: KnowledgeRecord<"document"> | undefined;
+      const updatedProject: KnowledgeRecord<"project"> = {
+        ...project,
+        revision: project.revision + 1,
+        data: {
+          ...project.data,
+          documentSections: [{ id: "guides", name: "Руководства" }],
+        },
+      };
+      const addedDocument: KnowledgeRecord<"document"> = {
+        ...first,
+        id: crypto.randomUUID(),
+        key: "DOC-2",
+        revision: 1,
+        data: { ...first.data, name: "Новый", body: "Руководство", sectionId: "guides" },
+      };
+      let committed = false;
       /**
        * Сохраняет настоящее чтение, чтобы commit писателя происходил после фиксации снимка.
        */
       const originalList: (kind?: EntityKind) => EntityRecord[] = db.list.bind(db);
       const list = spyOn(db, "list").mockImplementationOnce((kind) => {
         const records = originalList(kind);
-        const writing = new KnowledgeService(writer);
-        updatedProject = writing.changeSection(
-          "create",
-          { id: "guides", name: "Руководства" },
-          entityWriteOptions(project),
-        );
-        addedDocument = writing.create(
-          "document",
-          { name: "Новый", body: "Руководство", sectionId: "guides" },
-          actor,
-        );
+        // Техническая запись сохраняет точный барьер внутри синхронного чтения обзора.
+        writer.transaction(() => {
+          writer.update(updatedProject, project.revision);
+          writer.insert(addedDocument);
+        });
+        committed = true;
         return records;
       });
       try {
@@ -284,9 +305,7 @@ describe("Проект из полного снимка общих запрос�
         list.mockRestore();
         writer.close();
       }
-      if (updatedProject === undefined || addedDocument === undefined) {
-        throw new Error("Писатель не создал раздел и документ между чтениями обзора");
-      }
+      expect(committed).toBe(true);
 
       const next = expectFullSnapshotRead(db, () => queries.overview());
 

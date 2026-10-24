@@ -9,6 +9,7 @@ import {
   repeated,
   string,
   textArgs,
+  versionToken,
 } from "../../input/arguments";
 import { remapInput } from "../../input/input";
 import { planningCommandMessages as messages } from "../../locales/commands/planning";
@@ -16,25 +17,21 @@ import { result } from "../../output/output";
 import type { Result } from "../../output/output.types";
 import type { CommandRegistry } from "../../execution/registry";
 import type { Invocation } from "../../execution/invocation";
+import { readVersionPrecondition } from "../../input/version-precondition";
+import type { VersionFlagPair } from "../../input/version-precondition.types";
+
+const targetVersionFlags: VersionFlagPair = {
+  revision: "target-revision",
+  version: "target-version",
+};
 
 /**
- * Возвращает копию внешнего ввода с именами полей Core и развёрнутыми ссылками scope.
- * Строковый синтаксис ссылок разрешается через общий QueryService в транзакции команды;
- * JSON-объекты и неверные формы передаются предметному валидатору Core без подмены.
- * Конфликт алиасов и ошибка разрешения ссылки прерывают команду до записи.
+ * Возвращает копию внешнего ввода с именами полей Core; строки scope передаются дословно.
+ * Разрешение адресов, guards и проверка состава происходят в async command loader Core.
+ * CLI проверяет только конфликт собственных алиасов до записи.
  */
 function planningInput(i: Invocation): Record<string, unknown> {
-  const input = remapInput(i.input, { plans: "planIds", releaseVersion: "version" });
-  if (Array.isArray(input.scope)) {
-    input.scope = input.scope.map((ref: unknown) => {
-      if (typeof ref !== "string") {
-        return ref;
-      }
-      const entity = i.queries.get(ref);
-      return { kind: entity.kind, id: entity.id };
-    });
-  }
-  return input;
+  return remapInput(i.input, { plans: "planIds", releaseVersion: "version" });
 }
 
 /**
@@ -61,8 +58,8 @@ function planStageFields(action: StageChange["action"]): Args {
 
 /**
  * Добавляет команды планирования в реестр без чтения проекта.
- * Предметные проверки, ревизии и запись принадлежат Core; реестр обеспечивает общую
- * транзакцию изменения либо согласованный снимок составного чтения.
+ * Предметные проверки, ревизии и async commit принадлежат Core; реестр обеспечивает
+ * согласованный синхронный снимок чтения и ожидает writers без внешней транзакции.
  */
 export function registerPlanningCommands(registry: CommandRegistry): void {
   for (const [command, kind] of [
@@ -120,7 +117,8 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       /**
        * Возвращает атомарно созданную запись после преобразования синтаксиса полей CLI.
        */
-      run: (i): Result => result(i.planning.create(kind, planningInput(i), i.actor)),
+      run: async (i): Promise<Result> =>
+        result(await i.planning.create(kind, planningInput(i), i.actor)),
     });
     registry.add(`${command} update`, {
       ...help.update,
@@ -130,7 +128,8 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
       /**
        * Возвращает изменённую запись; Core проверяет ревизию плана или релиза до no-op.
        */
-      run: (i): Result => result(i.planning.update(kind, i.text("ref"), planningInput(i), i.write)),
+      run: async (i): Promise<Result> =>
+        result(await i.planning.update(kind, i.text("ref"), planningInput(i), i.write)),
     });
     registry.add(`${command} progress`, {
       ...help.progress,
@@ -165,8 +164,8 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
          * Возвращает запись после перехода; Core атомарно проверяет её ревизию и готовность.
          * Возможность no-op определяется предметным переходом, а не обработчиком CLI.
          */
-        run: (i): Result =>
-          result(i.planning.transition(kind, i.text("ref"), action, i.input, i.write)),
+        run: async (i): Promise<Result> =>
+          result(await i.planning.transition(kind, i.text("ref"), action, i.input, i.write)),
       });
     }
   }
@@ -203,9 +202,9 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
        * Возвращает план после изменения этапа под ревизией плана, включая проверку до no-op.
        * Для move отсутствие --before преобразуется в явный конец списка для Core.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.planning.stage(
+          await i.planning.stage(
             i.text("ref"),
             action,
             {
@@ -248,30 +247,39 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
        * Возвращает план после изменения состава; Core проверяет CAS плана даже при no-op.
        * Содержание и ревизия самой задачи не меняются.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.planning.stageTask(i.text("ref"), i.text("stage"), i.text("task"), remove, i.write),
+          await i.planning.stageTask(
+            i.text("ref"),
+            i.text("stage"),
+            i.text("task"),
+            remove,
+            i.write,
+          ),
         ),
     });
   }
   registry.add("plan stage task transfer", {
     ...messages.stageTaskTransfer,
     mode: "update",
+    versionPairs: [targetVersionFlags],
     args: {
       ...refArgs,
       task: positional(messages.fields.transferredTask),
       stage: positional(messages.fields.targetStageId),
       "target-plan": string(messages.fields.targetPlan, true),
-      "target-revision": { ...integer(messages.fields.targetRevision, 1), required: true },
+      "target-revision": integer(messages.fields.targetRevision, 1),
+      "target-version": versionToken(messages.fields.targetVersion, "target-version"),
     },
     fields: textArgs({ reason: messages.fields.reason }),
     /**
      * Возвращает исходный и целевой планы после атомарного переноса включения задачи.
      * Обе переданные ревизии проверяются Core, в том числе для одного плана и no-op.
      */
-    run: (i): Result =>
-      result(
-        i.planning.transfer(
+    run: async (i): Promise<Result> => {
+      const target = readVersionPrecondition(i.values, targetVersionFlags);
+      return result(
+        await i.planning.transfer(
           i.text("ref"),
           {
             ...i.input,
@@ -279,9 +287,16 @@ export function registerPlanningCommands(registry: CommandRegistry): void {
             targetPlan: i.text("target-plan"),
             targetStage: i.text("stage"),
           },
-          { ...i.write, targetRevision: Number(i.values["target-revision"]) },
+          {
+            ...i.write,
+            ...(target.ifRevision === undefined ? {} : { targetRevision: target.ifRevision }),
+            ...(target.expectedVersion === undefined
+              ? {}
+              : { targetVersion: target.expectedVersion }),
+          },
         ),
-      ),
+      );
+    },
   });
   registry.group("plan task", messages.task);
   registry.add("plan task memberships", {

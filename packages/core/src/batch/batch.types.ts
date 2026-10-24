@@ -47,6 +47,8 @@ export interface BatchStep {
   readonly ref?: string | BatchReference;
   /* Явный CAS либо ссылка на правильного владельца предыдущего результата. */
   readonly ifRevision?: number | BatchRevisionReference;
+  /* Первоначальный переносимый токен агрегата; не заменяется после изменения overlay. */
+  readonly expectedVersion?: string;
   /* Изолированное JSON-содержание без нормализации пользовательских строк. */
   readonly input: BatchObject;
 }
@@ -84,11 +86,11 @@ export interface BatchActionDescriptor {
 }
 
 /**
- * Синхронный адаптер предметного сервиса; тип контекста передаёт сборка исполнителя.
+ * Адаптер явной async загрузки и чистого предметного расчёта.
  */
 export interface BatchAction<Context> extends BatchActionDescriptor {
-  /* Исполнитель одного предметного действия внутри внешней транзакции. */
-  readonly execute: (context: Context) => BatchOutcome;
+  /* Подготовка одного действия без write-транзакции и непосредственной записи. */
+  readonly execute: (context: Context) => Promise<BatchOutcome>;
 }
 
 /**

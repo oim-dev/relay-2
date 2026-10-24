@@ -35,9 +35,9 @@ const rejectedDatabases = [
   },
   {
     name: "более новая версия схемы",
-    corrupt: "PRAGMA user_version = 3",
+    corrupt: "PRAGMA user_version = 5",
     expectedCode: "SCHEMA_VERSION_UNSUPPORTED",
-    expectedVersion: 3,
+    expectedVersion: 5,
   },
   {
     name: "отсутствующая обязательная строка project_state",
@@ -91,8 +91,12 @@ afterEach(() => {
 });
 
 describe("Обновление исторической файловой схемы v1 для batch-квитанций", () => {
-  test("open и reopen сохраняют исторические данные и добавляют работающий журнал v2", () => {
+  test("open и reopen сохраняют исторические данные и добавляют квитанции и нормализованную очередь v4", () => {
     fixture.createV1();
+    const legacyComments = fixture.withRaw((raw) => ({
+      columns: raw.query<Record<string, unknown>, []>("PRAGMA table_info(task_comments)").all(),
+      foreignKeys: raw.query("PRAGMA foreign_key_list(task_comments)").all(),
+    }));
     const legacyStructure = fixture.withRaw((raw) => {
       expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
       expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -105,7 +109,11 @@ describe("Обновление исторической файловой схе�
         { name: "project_state" },
         { name: "task_comments" },
       ]);
-      return raw.query("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name").all();
+      return raw
+        .query(
+          "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name != 'entity_refs' AND NOT(type='table' AND name='task_comments') ORDER BY type, name",
+        )
+        .all();
     });
 
     const migrated = fixture.open();
@@ -119,16 +127,28 @@ describe("Обновление исторической файловой схе�
     expectLegacyRecords(reopened);
     expect(reopened.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
     fixture.withRaw((raw) => {
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 2 });
+      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
       expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
       expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
       expect(
         raw
           .query(
-            "SELECT type, name, sql FROM sqlite_schema WHERE tbl_name != 'batch_receipts' ORDER BY type, name",
+            "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name NOT IN ('batch_receipts','entity_refs','entity_components') AND NOT(type='table' AND name='task_comments') AND tbl_name NOT LIKE 'replication_%' AND tbl_name NOT LIKE 'component_%' AND tbl_name NOT LIKE 'command_%' ORDER BY type, name",
           )
           .all(),
       ).toEqual(legacyStructure);
+      expect(
+        raw
+          .query<Record<string, unknown>, []>("PRAGMA table_info(task_comments)")
+          .all()
+          .filter((column) => column.name !== "text_encoding"),
+      ).toEqual(legacyComments.columns);
+      expect(raw.query("PRAGMA foreign_key_list(task_comments)").all()).toEqual(
+        legacyComments.foreignKeys,
+      );
+      expect(raw.query("SELECT DISTINCT text_encoding FROM task_comments").all()).toEqual([
+        { text_encoding: 0 },
+      ]);
       expect(raw.query("SELECT prefix, value FROM key_counters ORDER BY prefix").all()).toEqual(
         counters,
       );

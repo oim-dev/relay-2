@@ -27,5 +27,7 @@ export const programMessages = {
   config: "Файл проекта или workspace; приоритет над RELAY_CONFIG",
   project: "Имя регистрации из workspace project list",
   actor: "Автор предметной записи (обязателен для записи); иначе RELAY_ACTOR",
+  expectedAddresses:
+    "Привязки адресов для предметных команд и batch: JSON-массив {ref, expectedId}; проверяются Core при записи",
   format: "Вывод: text для чтения, json для скриптов",
 } as const;

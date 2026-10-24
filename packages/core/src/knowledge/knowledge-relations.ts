@@ -1,5 +1,5 @@
 /**
- * Разрешение целей и расчёт отношений документов. Транзакцией и записью владеет KnowledgeService.
+ * Чистые правила отношений документов и совместимый адаптер синхронного resolver.
  */
 import {
   DOCUMENT_TARGET_KINDS,
@@ -13,6 +13,7 @@ import type {
   KnowledgeReference,
   KnowledgeRelationInput,
   KnowledgeResolver,
+  PreparedKnowledgeRelation,
 } from "./knowledge.types";
 import { invalidKnowledge } from "./knowledge-validation";
 
@@ -20,7 +21,7 @@ import { invalidKnowledge } from "./knowledge-validation";
  * Проверяет допустимость цели и возвращает постоянную типизированную ссылку.
  * Снятая реализация допустима для снятия пары либо изменения уже существующего отношения.
  */
-function relationTarget(
+export function relationTarget(
   target: KnowledgeReference,
   documentId: string | undefined,
   existing: boolean,
@@ -47,15 +48,32 @@ export function resolveKnowledgeRelations(
   reader: KnowledgeResolver,
   current?: KnowledgeRecord<"document">,
 ): DocumentRelation[] {
+  return resolvePreparedKnowledgeRelations(
+    input.map((item) => ({
+      ...item,
+      target:
+        typeof item.target === "string"
+          ? reader.resolve(item.target)
+          : reader.resolve(item.target.id, item.target.kind),
+    })),
+    current,
+  );
+}
+
+/**
+ * Рассчитывает отношения по уже загруженным целям без resolver и I/O.
+ * Сохраняет порядок, проверяет дубликаты разрешённых пар и допустимость новой связи.
+ */
+export function resolvePreparedKnowledgeRelations(
+  input: readonly PreparedKnowledgeRelation[],
+  current?: KnowledgeRecord<"document">,
+): DocumentRelation[] {
   const previous = new Set(
     (current?.data.relations ?? []).map((relation) => `${relation.target.id}:${relation.type}`),
   );
   const seen = new Set<string>();
   return input.map((item) => {
-    const target =
-      typeof item.target === "string"
-        ? reader.resolve(item.target)
-        : reader.resolve(item.target.id, item.target.kind);
+    const target = item.target;
     const pair = `${target.id}:${item.type}`;
     const reference = relationTarget(target, current?.id, previous.has(pair));
     if (seen.has(pair)) {

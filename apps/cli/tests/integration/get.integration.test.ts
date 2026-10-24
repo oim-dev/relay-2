@@ -36,15 +36,15 @@ describe("Групповое чтение через CLI", () => {
   test("ключи с дефисом и флаги после -- остаются адресами с исходным порядком и повторами", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) => {
+      const document = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        let document = knowledge.create(
+        let document = await knowledge.create(
           "document",
           { name: "Буквальные адреса", body: "# Полное содержание\n" },
           "fixture",
         );
         for (const key of ["-RULES", "--summary", "--format=json"]) {
-          document = knowledge.rename("document", document.id, key, {
+          document = await knowledge.rename("document", document.id, key, {
             actor: "fixture",
             ifRevision: document.revision,
           });
@@ -104,17 +104,20 @@ describe("Групповое чтение через CLI", () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const markdown = "\n# Правила\n\n    пример\n\n";
-      const records = cli.withDatabase(
+      const records = await cli.withDatabase(
         project,
-        (db) =>
+        async (db) =>
           [
-            new KnowledgeService(db).create(
+            await new KnowledgeService(db).create(
               "document",
               { name: "Документ", body: markdown },
               "fixture",
             ),
-            new TasksService(db).create({ title: "Задача", description: markdown }, "fixture"),
-            new PlanningService(db).create(
+            await new TasksService(db).create(
+              { title: "Задача", description: markdown },
+              "fixture",
+            ),
+            await new PlanningService(db).create(
               "work-plan",
               { title: "План", summary: markdown },
               "fixture",
@@ -137,9 +140,9 @@ describe("Групповое чтение через CLI", () => {
   test("--summary передаётся Core и исключает тела, критерии и журналы из text и JSON", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const task = cli.withDatabase(project, (db) => {
+      const task = await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
-        const task = tasks.create(
+        const task = await tasks.create(
           {
             title: "Краткая задача",
             description: "НЕ_ВЫВОДИТЬ_ОПИСАНИЕ",
@@ -147,7 +150,7 @@ describe("Групповое чтение через CLI", () => {
           },
           "fixture",
         );
-        tasks.comment(task.id, "НЕ_ВЫВОДИТЬ_КОММЕНТАРИЙ", "fixture");
+        await tasks.comment(task.id, "НЕ_ВЫВОДИТЬ_КОММЕНТАРИЙ", "fixture");
         return task;
       });
 
@@ -185,12 +188,14 @@ describe("Групповое чтение через CLI", () => {
     async ({ first, second }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const document = cli.withDatabase(project, (db) =>
-          new KnowledgeService(db).create(
-            "document",
-            { name: "Найденный", body: "Полный текст" },
-            "fixture",
-          ),
+        const document = await cli.withDatabase(
+          project,
+          async (db) =>
+            await new KnowledgeService(db).create(
+              "document",
+              { name: "Найденный", body: "Полный текст" },
+              "fixture",
+            ),
         );
 
         const response = await cli.invoke([
@@ -240,12 +245,14 @@ describe("Групповое чтение через CLI", () => {
   test("частичный текст показывает успешную запись и ошибочный блок без сокрытия", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create(
-          "document",
-          { name: "Найденный", body: "# Сохранённый текст\n" },
-          "fixture",
-        ),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Найденный", body: "# Сохранённый текст\n" },
+            "fixture",
+          ),
       );
 
       const response = await cli.invoke(["get", document.key, "missing"]);
@@ -298,8 +305,14 @@ describe("Групповое чтение через CLI", () => {
   test("параллельный успешный get не стирает частичный отказ соседнего runCli", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("document", { name: "Документ", body: "Текст" }, "fixture"),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Документ", body: "Текст" },
+            "fixture",
+          ),
       );
 
       const [partial, successful] = await Promise.all([

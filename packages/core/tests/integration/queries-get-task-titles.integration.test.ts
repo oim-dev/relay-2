@@ -19,9 +19,9 @@ const corruptedTitles = [
 describe("Заголовок задачи в групповом чтении", () => {
   test.each(validTitles)(
     "$name заголовок задачи сохраняется дословно в full и summary",
-    ({ input, expected }) => {
-      withEntityDatabase((db) => {
-        const task = new TasksService(db).create(input, "tester");
+    async ({ input, expected }) => {
+      await withEntityDatabase(async (db) => {
+        const task = await new TasksService(db).create(input, "tester");
         const generation = db.getGeneration();
         const queries = new QueryService(db);
 
@@ -63,9 +63,9 @@ describe("Заголовок задачи в групповом чтении", (
 
   test.each(corruptedTitles)(
     "$name вместо сохранённого заголовка остаётся CORRUPT_DATA в обоих представлениях",
-    ({ value }) => {
-      withEntityDatabase((db) => {
-        const task = new TasksService(db).create({}, "tester");
+    async ({ value }) => {
+      await withEntityDatabase(async (db) => {
+        const task = await new TasksService(db).create({}, "tester");
         // Storage намеренно обходит предметный ввод: null и число не означают безымянную задачу.
         const corrupted = {
           ...task,

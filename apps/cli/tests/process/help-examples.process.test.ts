@@ -8,6 +8,8 @@ import type { CommandRoute } from "../helpers/run-fixture.types";
 import { withCliFixture } from "../integration/helpers/cli-fixture";
 import { invokeBinary } from "./cli-process";
 import type { HelpExampleCall, ValidatedHelpExample } from "./help-examples.types";
+import { literalExampleCalls } from "./literal-examples";
+import { CliUsageError } from "../../src/errors/errors";
 
 const routes: readonly CommandRoute[] = [
   { name: "relay", argv: [], group: true },
@@ -20,13 +22,23 @@ const invalidExamples = [
   {
     name: "опечатка во флаге",
     argv: ["task", "create", "--titel", "Заголовок", "--actor", "human"],
+    errorType: AggregateError,
   },
-  { name: "нет обязательной ревизии", argv: ["plan", "start", "PLN-1", "--actor", "human"] },
+  {
+    name: "нет ни локального, ни переносимого предусловия",
+    argv: ["plan", "start", "PLN-1", "--actor", "human"],
+    errorType: CliUsageError,
+  },
   {
     name: "неизвестное значение enum",
     argv: ["task", "create", "--column", "wrong", "--actor", "human"],
+    errorType: AggregateError,
   },
-  { name: "неизвестный флаг вместе со справкой", argv: ["task", "create", "--help", "--unknown"] },
+  {
+    name: "неизвестный флаг вместе со справкой",
+    argv: ["task", "create", "--help", "--unknown"],
+    errorType: AggregateError,
+  },
 ] as const;
 const informationalExamples = [
   {
@@ -116,6 +128,7 @@ describe("Копируемые примеры справки", () => {
   beforeAll(async () => {
     // Один Bash для всего неизменяемого каталога. PATH пуст: выполняется только функция-заглушка.
     const script = ["set -e", "PATH=", 'relay() { printf \'%s\\0\' "$route" "$#" "$@"; }'];
+    const literalCalls: HelpExampleCall[] = [];
     for (const [index, route] of routes.entries()) {
       const help =
         route.name === "complete"
@@ -124,6 +137,14 @@ describe("Копируемые примеры справки", () => {
       expect(help.exitCode).toBe(0);
       expect(help.stderr).toBe("");
       script.push(`route=${index}`, helpExamples(help.stdout));
+      literalCalls.push(...literalExampleCalls(helpExamples(help.stdout), index));
+    }
+
+    // Windows сохраняет проверки каждого примера через Gunshi и реальные предметные сценарии.
+    // Только дополнительная сверка POSIX shell-семантики требует настоящего Bash на POSIX.
+    if (process.platform === "win32") {
+      calls = literalCalls;
+      return;
     }
 
     const parsed = await invokeBinary([], {
@@ -134,11 +155,15 @@ describe("Копируемые примеры справки", () => {
     expect(parsed.stderr).toBe("");
     expect(parsed.files).toEqual([]);
     calls = parseCalls(parsed.stdout);
+    expect(calls).toEqual(literalCalls);
   });
 
-  test.each(invalidExamples)("$name отклоняется проверкой примеров", async ({ argv }) => {
-    await expect(validateExample(argv)).rejects.toBeInstanceOf(AggregateError);
-  });
+  test.each(invalidExamples)(
+    "$name отклоняется проверкой примеров",
+    async ({ argv, errorType }) => {
+      await expect(validateExample(argv)).rejects.toBeInstanceOf(errorType);
+    },
+  );
 
   test.each(informationalExamples)(
     "$name проходит штатную информационную ветку",
@@ -191,8 +216,14 @@ describe("Копируемые примеры справки", () => {
   test("пример выпуска использует release-version и включает подготовленный план", async () => {
     await withCliFixture(async (fixture) => {
       const project = fixture.createProject();
-      const plan = fixture.withDatabase(project, (db) =>
-        new PlanningService(db).create("work-plan", { title: "План для выпуска" }, "fixture"),
+      const plan = await fixture.withDatabase(
+        project,
+        async (db) =>
+          await new PlanningService(db).create(
+            "work-plan",
+            { title: "План для выпуска" },
+            "fixture",
+          ),
       );
       const argv = exampleArguments("release create").map((arg) =>
         arg === "PLN-1" ? plan.key : arg,
@@ -212,8 +243,9 @@ describe("Копируемые примеры справки", () => {
   test("пример открытия намерения передаёт активный run и ревизию сессии", async () => {
     await withCliFixture(async (fixture) => {
       const project = fixture.createProject();
-      const session = fixture.withDatabase(project, (db) =>
-        new HistoryService(db).start({ title: "Проверка примера" }, "human"),
+      const session = await fixture.withDatabase(
+        project,
+        async (db) => await new HistoryService(db).start({ title: "Проверка примера" }, "human"),
       );
       const argv = exampleArguments("checkpoint open").map((arg) => {
         if (arg === "S-session") {

@@ -4,28 +4,36 @@ import { revisionArgs } from "../input/arguments";
 import { readInput } from "../input/input";
 import { CliUsageError } from "../errors/errors";
 import { Invocation } from "./invocation";
+import { LocalInvocation } from "./local-invocation";
 import { registryMessages } from "../locales/registry";
 import { renderResult } from "../output/output";
 import { createHelpRenderer } from "../output/help";
 import type { CommandHelp, HelpRenderer } from "../output/help.types";
 import type { Result } from "../output/output.types";
-import type { Action, CommandOutcome, RegistryCommand } from "./registry.types";
+import type { Action, CommandOutcome, RegistryCommand, ProcessAction } from "./registry.types";
 import type { CliRuntime } from "./runtime.types";
+import { expectedAddressValues } from "../input/expected-addresses";
+import {
+  ownerVersionFlags,
+  readVersionPrecondition,
+  requireVersionPrecondition,
+} from "../input/version-precondition";
+import type { VersionFlagPair } from "../input/version-precondition.types";
 
 /**
- * Выполняет синхронный сценарий в общей транзакции записи либо согласованном снимке чтения.
- * Локальные действия сами владеют ресурсами; service оставляет транзакцию сервису Core.
- * Проверка автора предшествует открытию БД в любом режиме записи.
+ * Ожидает async writer Core без внешней транзакции; чтение выполняет строго синхронно в снимке.
+ * Проверка автора предшествует открытию БД. Исполнение, CAS и commit записи принадлежат executor.
  */
-function runAction(action: Action<Invocation>, invocation: Invocation): Result {
-  if (action.mode) {
+async function runAction(action: Action<Invocation>, invocation: Invocation): Promise<Result> {
+  if (action.mode !== undefined) {
     void invocation.actor;
+    return await action.run(invocation);
+  }
+  if (action.execution === "service-read") {
+    return await action.run(invocation);
   }
   if (action.local || action.execution === "service") {
     return action.run(invocation);
-  }
-  if (action.mode) {
-    return invocation.db.transaction(() => action.run(invocation));
   }
   // Снимок связывает страницу с поколением, не резервируя блокировку писателя для чтения.
   return invocation.db.snapshot(() => action.run(invocation));
@@ -42,6 +50,8 @@ export class CommandRegistry {
   readonly outcome: CommandOutcome = {};
   /* Явное окружение, используемое всеми обработчиками данного дерева. */
   private readonly runtime: CliRuntime;
+  /* Условия достаточности write-аргументов; проверяются до любого чтения источника input. */
+  private readonly writePreconditions = new Map<string, readonly VersionFlagPair[]>();
 
   /**
    * Создаёт пустой реестр без доступа к проекту и стандартному вводу.
@@ -79,10 +89,100 @@ export class CommandRegistry {
   }
 
   /**
-   * Регистрирует обработчик один раз, добавляя обязательную ревизию только update-действиям.
+   * Регистрирует обработчик и пару локального/переносимого предусловий у update-действий.
    * Ввод читается до открытия БД; любое завершение обработчика закрывает соединение в finally.
    */
   add(path: string, action: Action<Invocation>): void {
+    const node = this.node(path);
+    if (node.args) {
+      throw new Error(registryMessages.duplicateRegistration(path));
+    }
+    if (action.mode !== undefined) {
+      this.writePreconditions.set(path, [
+        ...(action.mode === "update" ? [ownerVersionFlags] : []),
+        ...(action.versionPairs ?? []),
+      ]);
+    }
+    let help: CommandHelp = action;
+    if (action.mode === "update") {
+      help = {
+        ...action,
+        details: `${action.details}\n\n${registryMessages.writePreconditionHelp}`,
+      };
+    } else if (action.mode === "create" && action.args?.["expected-version"]) {
+      help = { ...action, details: `${action.details}\n\n${registryMessages.createVersionHelp}` };
+    }
+    Object.assign(
+      node,
+      define({
+        name: node.name,
+        description: action.description,
+        rendering: { usage: createHelpRenderer(help) },
+        args: {
+          ...action.args,
+          ...action.fields,
+          ...(action.mode === "update" ? revisionArgs : {}),
+        },
+        /**
+         * Читает ввод, выполняет сценарий и форматирует ответ, гарантируя освобождение БД при отказе.
+         */
+        run: async (context: Readonly<CommandContext>): Promise<string> => {
+          this.checkWritePreconditions(context);
+          const input = action.readInput
+            ? await action.readInput(context.values, this.runtime)
+            : await readInput(context.values, action.fields ?? {}, this.runtime);
+          const guards = context.values["expected-addresses"];
+          const version =
+            action.mode === undefined
+              ? undefined
+              : readVersionPrecondition(context.values).expectedVersion;
+          const execution =
+            action.mode === undefined
+              ? undefined
+              : {
+                  ...(guards === undefined
+                    ? {}
+                    : { expectedAddresses: expectedAddressValues(guards) }),
+                  ...(version === undefined ? {} : { expectedVersion: version }),
+                };
+          const invocation = new Invocation(context, this.runtime, input, execution);
+          try {
+            const result = await runAction(action, invocation);
+            if (result.failure) {
+              this.outcome.failure = result.failure;
+            } else {
+              delete this.outcome.failure;
+            }
+            return renderResult(result, invocation.text("format") || "text", action.presentation);
+          } finally {
+            invocation.close();
+          }
+        },
+      }),
+    );
+  }
+
+  /**
+   * Проверяет обязательные пары до handler/stdin. Help/version и ошибки самого parser имеют приоритет.
+   */
+  checkWritePreconditions(context: Readonly<CommandContext>): void {
+    if (
+      context.validationError ||
+      context.values.help === true ||
+      context.values.version === true
+    ) {
+      return;
+    }
+    for (const flags of this.writePreconditions.get(context.commandPath.join(" ")) ?? []) {
+      requireVersionPrecondition(context.values, flags);
+    }
+  }
+
+  /**
+   * Регистрирует async process/local сценарий отдельно от синхронных SQLite actions.
+   * LocalInvocation не имеет db/location; Promise ожидается до общего вывода и обработки ошибок.
+   */
+  addProcess(path: string, action: ProcessAction<LocalInvocation>): void {
     const node = this.node(path);
     if (node.args) {
       throw new Error(registryMessages.duplicateRegistration(path));
@@ -93,30 +193,31 @@ export class CommandRegistry {
         name: node.name,
         description: action.description,
         rendering: { usage: createHelpRenderer(action) },
-        args: {
-          ...action.args,
-          ...action.fields,
-          ...(action.mode === "update" ? revisionArgs : {}),
-        },
+        args: action.args ?? {},
         /**
-         * Читает ввод, выполняет сценарий и форматирует ответ, гарантируя освобождение БД при отказе.
+         * Читает process-ввод после разбора команды; ни один callback БД здесь не участвует.
          */
         run: async (context: Readonly<CommandContext>): Promise<string> => {
           const input = action.readInput
             ? await action.readInput(context.values, this.runtime)
-            : await readInput(context.values, action.fields ?? {}, this.runtime);
-          const invocation = new Invocation(context, this.runtime, input);
-          try {
-            const result = runAction(action, invocation);
+            : {};
+          /**
+           * Ограничивает обработку сигналов реальным async-сценарием после завершения stdin.
+           */
+          const execute = async (signal?: AbortSignal): Promise<string> => {
+            const runtime = signal ? { ...this.runtime, signal } : this.runtime;
+            const invocation = new LocalInvocation(context, runtime, input);
+            const result = await action.run(invocation);
             if (result.failure) {
               this.outcome.failure = result.failure;
             } else {
               delete this.outcome.failure;
             }
             return renderResult(result, invocation.text("format") || "text", action.presentation);
-          } finally {
-            invocation.close();
-          }
+          };
+          return this.runtime.withProcessSignals
+            ? this.runtime.withProcessSignals(execute)
+            : execute();
         },
       }),
     );

@@ -64,9 +64,9 @@ describe("Документы и разделы через CLI", () => {
   test("section-id при создании документа сохраняет его принадлежность разделу", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, (db) => {
+      await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        knowledge.changeSection(
+        await knowledge.changeSection(
           "create",
           { id: "rules", name: "Правила" },
           {
@@ -99,34 +99,34 @@ describe("Документы и разделы через CLI", () => {
   test("without-section выбирает null и удалённые разделы до пагинации, сохраняя буквальный none", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { unsectioned, retired, assigned } = cli.withDatabase(project, (db) => {
+      const { unsectioned, retired, assigned } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const firstSection = knowledge.changeSection(
+        const firstSection = await knowledge.changeSection(
           "create",
           { id: "none", name: "Буквальный ID none" },
           { actor: "fixture", ifRevision: knowledge.get("project").revision },
         );
-        const secondSection = knowledge.changeSection(
+        const secondSection = await knowledge.changeSection(
           "create",
           { id: "retired", name: "Удаляемый раздел" },
           { actor: "fixture", ifRevision: firstSection.revision },
         );
-        const unsectioned = knowledge.create(
+        const unsectioned = await knowledge.create(
           "document",
           { name: "Б. Без раздела", body: "Прямой null", sectionId: null },
           "fixture",
         );
-        const assigned = knowledge.create(
+        const assigned = await knowledge.create(
           "document",
           { name: "В. Буквальный раздел", body: "ID none", sectionId: "none" },
           "fixture",
         );
-        const retired = knowledge.create(
+        const retired = await knowledge.create(
           "document",
           { name: "А. Из удалённого раздела", body: "Сохранённый документ", sectionId: "retired" },
           "fixture",
         );
-        knowledge.changeSection(
+        await knowledge.changeSection(
           "remove",
           { id: "retired" },
           { actor: "fixture", ifRevision: secondSection.revision },
@@ -187,16 +187,20 @@ describe("Документы и разделы через CLI", () => {
   test("without-section=false не ограничивает раздел и совместим с section-id", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { unsectioned, assigned } = cli.withDatabase(project, (db) => {
+      const { unsectioned, assigned } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        knowledge.changeSection(
+        await knowledge.changeSection(
           "create",
           { id: "rules", name: "Правила" },
           { actor: "fixture", ifRevision: knowledge.get("project").revision },
         );
         return {
-          unsectioned: knowledge.create("document", { name: "Общий", body: "Текст" }, "fixture"),
-          assigned: knowledge.create(
+          unsectioned: await knowledge.create(
+            "document",
+            { name: "Общий", body: "Текст" },
+            "fixture",
+          ),
+          assigned: await knowledge.create(
             "document",
             { name: "Правила", body: "Текст", sectionId: "rules" },
             "fixture",
@@ -220,14 +224,14 @@ describe("Документы и разделы через CLI", () => {
   test("without-section возвращает пустую страницу, если все документы прикреплены к разделу", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, (db) => {
+      await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        knowledge.changeSection(
+        await knowledge.changeSection(
           "create",
           { id: "rules", name: "Правила" },
           { actor: "fixture", ifRevision: knowledge.get("project").revision },
         );
-        knowledge.create(
+        await knowledge.create(
           "document",
           { name: "Правила", body: "Текст", sectionId: "rules" },
           "fixture",
@@ -259,11 +263,15 @@ describe("Документы и разделы через CLI", () => {
   test("прикрепление документа сохраняет типизированную цель и пояснение в списке связей", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { document, feature } = cli.withDatabase(project, (db) => {
+      const { document, feature } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
         return {
-          document: knowledge.create("document", { name: "Правила", body: "# Правила" }, "fixture"),
-          feature: knowledge.create("feature", { name: "Поиск" }, "fixture"),
+          document: await knowledge.create(
+            "document",
+            { name: "Правила", body: "# Правила" },
+            "fixture",
+          ),
+          feature: await knowledge.create("feature", { name: "Поиск" }, "fixture"),
         };
       });
 

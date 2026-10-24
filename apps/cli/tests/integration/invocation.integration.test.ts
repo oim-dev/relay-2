@@ -111,8 +111,9 @@ describe("Аргументы вызова CLI", () => {
   test("лишний позиционный аргумент чтения отклоняется без изменения задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const task = cli.withDatabase(project, (db) =>
-        new TasksService(db).create({ title: "Исходная" }, "agent"),
+      const task = await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({ title: "Исходная" }, "agent"),
       );
       const generation = cli.withDatabase(project, (db) => db.getGeneration());
 

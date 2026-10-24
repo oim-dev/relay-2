@@ -1,7 +1,12 @@
 import { sqliteMessages } from "./sqlite.messages";
 import { BATCH_RECEIPT_SCHEMA } from "./batch-schema";
+import { REPLICATION_SCHEMA } from "./replication-schema";
+import { PROJECT_WRITE_TRIGGERS } from "./entity-triggers";
+import { COMPONENTS_SCHEMA } from "./components-schema";
+import { COMMAND_SCHEMA } from "./command-schema";
+import { COMMENT_TEXT_GUARDS } from "../entities/comment-text";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 4;
 export const APPLICATION_ID = 0x524c5932;
 
 // ID, текущие ключи и алиасы делят одно пространство ссылок: старый адрес нельзя выдать другой записи.
@@ -51,7 +56,8 @@ export const SCHEMA =
     title TEXT NOT NULL,
     body TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    created_by TEXT NOT NULL
+    created_by TEXT NOT NULL,
+    text_encoding INTEGER NOT NULL DEFAULT 0 CHECK(text_encoding BETWEEN 0 AND 3)
   ) STRICT;
   CREATE INDEX task_comments_task_sequence ON task_comments(task_id, sequence);
 
@@ -61,37 +67,14 @@ export const SCHEMA =
     SELECT RAISE(ABORT, '${sqliteMessages.commentTargetConstraint}');
   END;
 
-  CREATE TRIGGER task_comments_no_update BEFORE UPDATE ON task_comments BEGIN
-    SELECT RAISE(ABORT, '${sqliteMessages.appendOnlyConstraint}');
-  END;
-  CREATE TRIGGER task_comments_no_delete BEFORE DELETE ON task_comments BEGIN
-    SELECT RAISE(ABORT, '${sqliteMessages.appendOnlyConstraint}');
-  END;
-
   CREATE TRIGGER task_comments_insert AFTER INSERT ON task_comments BEGIN
     UPDATE project_state SET generation = generation + 1 WHERE singleton = 1;
   END;
 
-  CREATE TRIGGER entities_insert AFTER INSERT ON entities BEGIN
-    INSERT INTO entity_refs(ref, entity_id) VALUES (NEW.id, NEW.id);
-    INSERT INTO entity_refs(ref, entity_id)
-      SELECT NEW.key, NEW.id WHERE NEW.key != NEW.id;
-    UPDATE project_state SET generation = generation + 1 WHERE singleton = 1;
-  END;
-
-  CREATE TRIGGER entities_immutable BEFORE UPDATE ON entities
-  WHEN NEW.id != OLD.id OR NEW.kind != OLD.kind
-    OR NEW.created_at != OLD.created_at OR NEW.created_by != OLD.created_by
-    OR NEW.revision != OLD.revision + 1
-  BEGIN
-    SELECT RAISE(ABORT, '${sqliteMessages.immutableEntityConstraint}');
-  END;
-
-  CREATE TRIGGER entities_update AFTER UPDATE ON entities BEGIN
-    INSERT INTO entity_refs(ref, entity_id)
-      SELECT NEW.key, NEW.id WHERE NOT EXISTS (
-        SELECT 1 FROM entity_refs WHERE ref = NEW.key AND entity_id = NEW.id
-      );
-    UPDATE project_state SET generation = generation + 1 WHERE singleton = 1;
-  END;
-`;
+` +
+  Object.values(PROJECT_WRITE_TRIGGERS).join("\n") +
+  REPLICATION_SCHEMA +
+  "DROP TABLE entity_refs;\n" +
+  COMPONENTS_SCHEMA +
+  COMMENT_TEXT_GUARDS +
+  COMMAND_SCHEMA;

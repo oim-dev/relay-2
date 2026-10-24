@@ -3,29 +3,42 @@
  * SQL-операции требуют активной транзакции владельца ProjectDatabase и не делают commit.
  */
 import type { Database } from "bun:sqlite";
-import { RelayError, type EntityRecord, type TaskComment } from "@relay/contracts";
+import {
+  RelayError,
+  isPortableIdentityText,
+  splitComponentRecord,
+  type EntityRecord,
+  type TaskComment,
+} from "@relay/contracts";
 import { getEntityIdentity } from "./entity-queries";
 import type { EntityRevision, KeyCounterRow } from "./entity-queries.types";
 import { entityMessages } from "./entity.messages";
+import { synchronizeComponents } from "../components/component-store";
+import { withComponentAllocation } from "../components/component-allocation";
+import type { ComponentWriteOptions } from "../components/component-store.types";
+import { assertEntitySqlText, assertSqlText } from "./entity-sql-text";
 
 /**
- * Сериализует содержание без проекции комментариев задачи.
- * Снимок редактора может быть старше журнала: CAS содержания никогда не заменяет комментарии.
+ * Проверяет техническое suppression импорта: raw owner не должен регенерировать primary parts.
  */
-function entityPayload(entity: EntityRecord): string {
-  if (entity.kind !== "task") {
-    return JSON.stringify(entity.data);
-  }
-  const data = { ...entity.data };
-  delete data.comments;
-  return JSON.stringify(data);
+function importingComponents(connection: Database): boolean {
+  return (
+    connection
+      .query<{ importing: number }, []>("SELECT importing FROM replication_state WHERE singleton=1")
+      .get()?.importing === 1
+  );
 }
 
 /**
- * Вставляет одну сущность; алиасы и поколение создаются триггерами в той же транзакции.
+ * Вставляет raw owner и primary parts; алиасы и поколение создаются триггерами той же транзакции.
  * Начальные комментарии запрещены, кроме пустой проекции: журнал пополняется отдельной операцией.
  */
-export function insertEntity(connection: Database, entity: EntityRecord): void {
+export function insertEntity(
+  connection: Database,
+  entity: EntityRecord,
+  options: ComponentWriteOptions = {},
+): void {
+  assertEntitySqlText(entity);
   if (
     entity.kind === "task" &&
     Object.hasOwn(entity.data, "comments") &&
@@ -33,52 +46,66 @@ export function insertEntity(connection: Database, entity: EntityRecord): void {
   ) {
     throw new RelayError("VALIDATION_ERROR", entityMessages.commentRequiresAppend, 2);
   }
-  connection
-    .query(
-      `INSERT INTO entities(id, kind, key, revision, created_at, updated_at, created_by, updated_by, data)
+  const layout = splitComponentRecord(entity);
+  withComponentAllocation(connection, options, () => {
+    connection
+      .query(
+        `INSERT INTO entities(id, kind, key, revision, created_at, updated_at, created_by, updated_by, data)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      entity.id,
-      entity.kind,
-      entity.key,
-      entity.revision,
-      entity.createdAt,
-      entity.updatedAt,
-      entity.createdBy,
-      entity.updatedBy,
-      entityPayload(entity),
-    );
+      )
+      .run(
+        entity.id,
+        entity.kind,
+        entity.key,
+        entity.revision,
+        entity.createdAt,
+        entity.updatedAt,
+        entity.createdBy,
+        entity.updatedBy,
+        JSON.stringify(layout.record.data),
+      );
+    if (!importingComponents(connection)) {
+      synchronizeComponents(connection, layout, options);
+    }
+  });
 }
 
 /**
- * Выполняет CAS одной строки содержания и возвращает признак совпадения ревизии.
- * SQL проверяет неизменяемые поля и прирост ревизии на единицу; комментарии не затрагиваются.
+ * Выполняет CAS owner и синхронизирует его parts, возвращая признак совпадения ревизии.
+ * Только изменённые части меняют версии; комментарии не затрагиваются. В importing parts пишет import owner.
  */
 export function updateEntity(
   connection: Database,
   entity: EntityRecord,
   expectedRevision: number,
+  options: ComponentWriteOptions = {},
 ): boolean {
-  // run().changes учитывает триггеры; RETURNING подтверждает изменение самой строки CAS.
-  const result = connection
-    .query(
-      `UPDATE entities SET kind = ?, key = ?, revision = ?, created_at = ?, updated_at = ?,
+  assertEntitySqlText(entity);
+  const layout = splitComponentRecord(entity);
+  return withComponentAllocation(connection, options, () => {
+    // run().changes учитывает триггеры; RETURNING подтверждает изменение самой строки CAS.
+    const result = connection
+      .query(
+        `UPDATE entities SET kind = ?, key = ?, revision = ?, created_at = ?, updated_at = ?,
          created_by = ?, updated_by = ?, data = ? WHERE id = ? AND revision = ? RETURNING id`,
-    )
-    .get(
-      entity.kind,
-      entity.key,
-      entity.revision,
-      entity.createdAt,
-      entity.updatedAt,
-      entity.createdBy,
-      entity.updatedBy,
-      entityPayload(entity),
-      entity.id,
-      expectedRevision,
-    );
-  return result !== null;
+      )
+      .get(
+        entity.kind,
+        entity.key,
+        entity.revision,
+        entity.createdAt,
+        entity.updatedAt,
+        entity.createdBy,
+        entity.updatedBy,
+        JSON.stringify(layout.record.data),
+        entity.id,
+        expectedRevision,
+      );
+    if (result !== null && !importingComponents(connection)) {
+      synchronizeComponents(connection, layout, options);
+    }
+    return result !== null;
+  });
 }
 
 /**
@@ -86,6 +113,7 @@ export function updateEntity(
  * Счётчик и проверка общего пространства ссылок должны удерживать одну блокировку писателя.
  */
 export function nextAvailableKey(connection: Database, prefix: string): string {
+  assertSqlText(prefix, "prefix");
   while (true) {
     const counter = connection
       .query<KeyCounterRow, [string]>(
@@ -133,12 +161,34 @@ export function decodeTaskComment(comment: Record<string, unknown>): TaskComment
  * Уникальность ID, вид владельца и прирост поколения обеспечиваются SQL, ревизия задачи не меняется.
  */
 export function appendComment(connection: Database, taskId: string, comment: TaskComment): void {
+  assertSqlText(taskId, "taskId");
+  for (const field of ["id", "createdAt", "createdBy"] as const) {
+    assertSqlText(comment[field], `comment.${field}`);
+  }
+  const title = commentField(comment, "title");
+  const body = commentField(comment, "body");
+  const titleJson = isPortableIdentityText(title) ? null : JSON.stringify(title);
+  const bodyJson = isPortableIdentityText(body) ? null : JSON.stringify(body);
+  const encoding = (titleJson === null ? 0 : 1) | (bodyJson === null ? 0 : 2);
   connection
     .query(
-      `INSERT INTO task_comments(id, task_id, title, body, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO task_comments(id, task_id, title, body, created_at, created_by, text_encoding)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(comment.id, taskId, comment.title, comment.body, comment.createdAt, comment.createdBy);
+    .run(
+      comment.id,
+      taskId,
+      titleJson === null ? title : "",
+      bodyJson === null ? body : "",
+      comment.createdAt,
+      comment.createdBy,
+      encoding,
+    );
+  if (titleJson !== null || bodyJson !== null) {
+    connection
+      .query("INSERT INTO replication_comment_text(comment_id,title_json,body_json) VALUES(?,?,?)")
+      .run(comment.id, titleJson, bodyJson);
+  }
 }
 
 /**

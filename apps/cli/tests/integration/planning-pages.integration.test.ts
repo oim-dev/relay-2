@@ -18,15 +18,18 @@ const rejectedCursors = [
 /**
  * Создаёт этап и две задачи в обратном порядке включения; соединением владеет CLI fixture.
  */
-function seedStageTasks(db: ProjectDatabase): PlanningPageScenario {
+async function seedStageTasks(db: ProjectDatabase): Promise<PlanningPageScenario> {
   const tasks = new TasksService(db);
-  const first = tasks.create({ title: "Первая задача", description: "Полное описание" }, "agent");
-  const second = tasks.create({ title: "Вторая задача" }, "agent");
-  const commented = tasks.comment(second.id, "Комментарий выбранной карточки", "agent");
+  const first = await tasks.create(
+    { title: "Первая задача", description: "Полное описание" },
+    "agent",
+  );
+  const second = await tasks.create({ title: "Вторая задача" }, "agent");
+  const commented = await tasks.comment(second.id, "Комментарий выбранной карточки", "agent");
   const items = [commented, first] as const;
   const planning = new PlanningService(db);
-  let plan = planning.create("work-plan", { title: "План" }, "agent");
-  plan = planning.stage(
+  let plan = await planning.create("work-plan", { title: "План" }, "agent");
+  plan = await planning.stage(
     plan.id,
     "create",
     { title: "Этап" },
@@ -37,7 +40,7 @@ function seedStageTasks(db: ProjectDatabase): PlanningPageScenario {
     throw new Error("Подготовка должна создать этап");
   }
   for (const task of items) {
-    plan = planning.stageTask(plan.id, stage.id, task.id, false, {
+    plan = await planning.stageTask(plan.id, stage.id, task.id, false, {
       actor: "agent",
       ifRevision: plan.revision,
     });
@@ -52,11 +55,15 @@ function seedStageTasks(db: ProjectDatabase): PlanningPageScenario {
 /**
  * Создаёт два плана и релиз с обратным порядком включения; не изменяет жизненный цикл соединения.
  */
-function seedReleasePlans(db: ProjectDatabase): PlanningPageScenario {
+async function seedReleasePlans(db: ProjectDatabase): Promise<PlanningPageScenario> {
   const planning = new PlanningService(db);
-  const first = planning.create("work-plan", { title: "Первый", goal: "Полная цель" }, "agent");
-  const second = planning.create("work-plan", { title: "Второй" }, "agent");
-  const release = planning.create(
+  const first = await planning.create(
+    "work-plan",
+    { title: "Первый", goal: "Полная цель" },
+    "agent",
+  );
+  const second = await planning.create("work-plan", { title: "Второй" }, "agent");
+  const release = await planning.create(
     "release",
     { title: "Релиз", version: "1", planIds: [second.id, first.id] },
     "agent",
@@ -74,7 +81,7 @@ describe("Страницы составов планирования через 
     async ({ seed, kind }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const { command, owner, items } = cli.withDatabase(project, seed);
+        const { command, owner, items } = await cli.withDatabase(project, seed);
         const read = spyOn(ProjectDatabase.prototype, "getMany");
         try {
           const first = await cli.page([...command, "--limit", "1"], entityValue);
@@ -110,12 +117,14 @@ describe("Страницы составов планирования через 
       async ({ stale, exitCode, errorCode }) => {
         await withCliFixture(async (cli) => {
           const project = cli.createProject();
-          const { command } = cli.withDatabase(project, seed);
+          const { command } = await cli.withDatabase(project, seed);
           const first = await cli.page([...command, "--limit", "1"], entityValue);
           let cursor = stringValue(first.meta.page.nextCursor);
           if (stale) {
-            cli.withDatabase(project, (db) =>
-              new TasksService(db).create({ title: "Новое поколение" }, "agent"),
+            await cli.withDatabase(
+              project,
+              async (db) =>
+                await new TasksService(db).create({ title: "Новое поколение" }, "agent"),
             );
           } else {
             cursor += "x";

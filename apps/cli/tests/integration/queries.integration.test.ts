@@ -19,15 +19,15 @@ const validDoctorContexts = [
  * Создаёт согласованные участие приложения и документ раздела со ссылкой на фичу.
  * Соединение принадлежит вызывающей fixture и здесь не закрывается.
  */
-function seedKnowledgeLinks(db: ProjectDatabase): void {
+async function seedKnowledgeLinks(db: ProjectDatabase): Promise<void> {
   const knowledge = new KnowledgeService(db);
-  const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-  const app = knowledge.create("application", { name: "Web", slug: "web" }, "agent");
-  knowledge.replaceParticipation(app.id, [feature.id], {
+  const feature = await knowledge.create("feature", { name: "Фича" }, "agent");
+  const app = await knowledge.create("application", { name: "Web", slug: "web" }, "agent");
+  await knowledge.replaceParticipation(app.id, [feature.id], {
     actor: "agent",
     ifRevision: app.revision,
   });
-  knowledge.changeSection(
+  await knowledge.changeSection(
     "create",
     { id: "rules", name: "Правила" },
     {
@@ -35,7 +35,7 @@ function seedKnowledgeLinks(db: ProjectDatabase): void {
       ifRevision: knowledge.get("project").revision,
     },
   );
-  knowledge.create(
+  await knowledge.create(
     "document",
     { name: "Материал", body: "Текст", sectionId: "rules", targets: [feature.id] },
     "agent",
@@ -46,11 +46,11 @@ function seedKnowledgeLinks(db: ProjectDatabase): void {
  * Создаёт завершённую сессию с намерением и результатом для проверки согласованности истории.
  * Все записи выполняются через Core; соединение остаётся у вызывающей fixture.
  */
-function seedCompletedHistory(db: ProjectDatabase): void {
+async function seedCompletedHistory(db: ProjectDatabase): Promise<void> {
   const history = new HistoryService(db);
-  const session = history.start({ title: "Поручение" }, "agent");
+  const session = await history.start({ title: "Поручение" }, "agent");
   const runId = stringValue(session.data.currentRunId);
-  const intent = history.checkpoint(
+  const intent = await history.checkpoint(
     session.id,
     "open",
     {
@@ -60,7 +60,7 @@ function seedCompletedHistory(db: ProjectDatabase): void {
     },
     { actor: "agent", ifRevision: session.revision },
   );
-  history.checkpoint(
+  await history.checkpoint(
     intent.id,
     "complete",
     {
@@ -70,7 +70,7 @@ function seedCompletedHistory(db: ProjectDatabase): void {
     },
     { actor: "agent", ifRevision: history.get(session.id).revision },
   );
-  history.transition(
+  await history.transition(
     session.id,
     "complete",
     { result: "Итог", runId },
@@ -85,8 +85,9 @@ describe("Поиск и обзор через CLI", () => {
   test("get разрешает типизированный постоянный ID задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const task = cli.withDatabase(project, (db) =>
-        new TasksService(db).create({ title: "Задача" }, "agent"),
+      const task = await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({ title: "Задача" }, "agent"),
       );
 
       const resolved = readEntitiesValue((await cli.success(["get", `task:${task.id}`])).data);
@@ -99,10 +100,10 @@ describe("Поиск и обзор через CLI", () => {
   test("get разрешает типизированный прежний ключ фичи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const feature = cli.withDatabase(project, (db) => {
+      const feature = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-        knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
+        const feature = await knowledge.create("feature", { name: "Фича" }, "agent");
+        await knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
           actor: "agent",
           ifRevision: feature.revision,
         });
@@ -122,10 +123,10 @@ describe("Поиск и обзор через CLI", () => {
   test("поиск по прежнему ключу находит переименованную фичу", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const feature = cli.withDatabase(project, (db) => {
+      const feature = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-        knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
+        const feature = await knowledge.create("feature", { name: "Фича" }, "agent");
+        await knowledge.rename("feature", feature.id, "FEATURE-RENAMED", {
           actor: "agent",
           ifRevision: feature.revision,
         });
@@ -141,10 +142,10 @@ describe("Поиск и обзор через CLI", () => {
   test("поиск не включает текст комментариев в содержание задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, (db) => {
+      await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
-        const task = tasks.create({ title: "Работа" }, "agent");
-        tasks.comment(task.id, "неискомый-комментарий", "agent");
+        const task = await tasks.create({ title: "Работа" }, "agent");
+        await tasks.comment(task.id, "неискомый-комментарий", "agent");
       });
 
       const found = await cli.page(["search", "--q", "неискомый-комментарий"], entityValue);
@@ -157,11 +158,15 @@ describe("Поиск и обзор через CLI", () => {
   test("поиск документов учитывает пояснение прикрепления к требованию", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) => {
+      const document = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const feature = knowledge.create("feature", { name: "Фича" }, "agent");
-        const document = knowledge.create("document", { name: "Материал", body: "Текст" }, "agent");
-        return knowledge.linkDocument(document.id, feature.id, {
+        const feature = await knowledge.create("feature", { name: "Фича" }, "agent");
+        const document = await knowledge.create(
+          "document",
+          { name: "Материал", body: "Текст" },
+          "agent",
+        );
+        return await knowledge.linkDocument(document.id, feature.id, {
           actor: "agent",
           ifRevision: document.revision,
           description: "Особое основание",
@@ -180,9 +185,9 @@ describe("Поиск и обзор через CLI", () => {
   test("overview считает полный состав независимо от размера страницы", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, (db) => {
-        new KnowledgeService(db).create("feature", { name: "Фича" }, "agent");
-        new TasksService(db).create({ title: "Работа" }, "agent");
+      await cli.withDatabase(project, async (db) => {
+        await new KnowledgeService(db).create("feature", { name: "Фича" }, "agent");
+        await new TasksService(db).create({ title: "Работа" }, "agent");
       });
 
       const overview = await cli.page(["overview", "--limit", "1"], entityValue);
@@ -213,7 +218,7 @@ describe("Диагностика целостности через CLI", () => {
     async ({ seed }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        cli.withDatabase(project, seed);
+        await cli.withDatabase(project, seed);
 
         const check = await cli.success(["doctor", "check"]);
 
@@ -229,8 +234,8 @@ describe("Диагностика целостности через CLI", () => {
   test("нарушенная ссылка возвращает INTEGRITY_ERROR в stderr без изменения данных", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { generation, damaged } = cli.withDatabase(project, (db) => {
-        const document = new KnowledgeService(db).create(
+      const { generation, damaged } = await cli.withDatabase(project, async (db) => {
+        const document = await new KnowledgeService(db).create(
           "document",
           { name: "Материал", body: "Текст" },
           "agent",

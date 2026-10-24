@@ -21,8 +21,10 @@ export interface BatchExampleOperation {
   readonly op: string;
   /* Условный адрес существующего владельца; отсутствует у singleton и создания. */
   readonly ref?: string;
-  /* Условная положительная ревизия владельца CAS; отсутствует у операций без CAS. */
+  /* Условная локальная ревизия владельца CAS; можно заменить либо дополнить expectedVersion. */
   readonly ifRevision?: number;
+  /* Непрозрачный переносимый aggregateVersion владельца; отсутствует у операций без предусловия. */
+  readonly expectedVersion?: string;
   /* Только разрешённые предметные поля input; отсутствие означает пустой объект. */
   readonly input?: BatchExampleObject;
 }

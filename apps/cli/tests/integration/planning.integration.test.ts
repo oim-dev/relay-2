@@ -45,10 +45,10 @@ function stageValue(value: unknown): StageView {
 /**
  * Создаёт минимальный план с пустым этапом через Core, не закрывая переданное соединение.
  */
-function createStagedPlan(db: ProjectDatabase): StagedPlanFixture {
+async function createStagedPlan(db: ProjectDatabase): Promise<StagedPlanFixture> {
   const planning = new PlanningService(db);
-  const created = planning.create("work-plan", { title: "План" }, "agent");
-  const plan = planning.stage(
+  const created = await planning.create("work-plan", { title: "План" }, "agent");
+  const plan = await planning.stage(
     created.id,
     "create",
     { title: "Этап" },
@@ -64,11 +64,11 @@ describe("Планы и релизы через CLI", () => {
   test("фильтр status=draft выбирает черновик и исключает отменённый план", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const plan = cli.withDatabase(project, (db) => {
+      const plan = await cli.withDatabase(project, async (db) => {
         const planning = new PlanningService(db);
-        const draft = planning.create("work-plan", { title: "Черновик" }, "agent");
-        const cancelled = planning.create("work-plan", { title: "История" }, "agent");
-        planning.transition(
+        const draft = await planning.create("work-plan", { title: "Черновик" }, "agent");
+        const cancelled = await planning.create("work-plan", { title: "История" }, "agent");
+        await planning.transition(
           "work-plan",
           cancelled.id,
           "cancel",
@@ -99,8 +99,8 @@ describe("Планы и релизы через CLI", () => {
     async ({ field, stages, command, tail }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const { plan, generation } = cli.withDatabase(project, (db) => {
-          const plan = new PlanningService(db).create(
+        const { plan, generation } = await cli.withDatabase(project, async (db) => {
+          const plan = await new PlanningService(db).create(
             "work-plan",
             { title: "Повреждённый" },
             "agent",
@@ -125,7 +125,7 @@ describe("Планы и релизы через CLI", () => {
   test("JSON stageId не подменяет позиционный этап и не изменяет план", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { plan, stage } = cli.withDatabase(project, createStagedPlan);
+      const { plan, stage } = await cli.withDatabase(project, createStagedPlan);
 
       const error = await cli.error(
         [
@@ -150,8 +150,9 @@ describe("Планы и релизы через CLI", () => {
   test("созданный CLI этап читается в составе плана", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const plan = cli.withDatabase(project, (db) =>
-        new PlanningService(db).create("work-plan", { title: "План" }, "agent"),
+      const plan = await cli.withDatabase(
+        project,
+        async (db) => await new PlanningService(db).create("work-plan", { title: "План" }, "agent"),
       );
 
       const updated = await cli.entity([
@@ -178,9 +179,9 @@ describe("Планы и релизы через CLI", () => {
   test("включение задачи по ключу сохраняет её ID в указанном этапе", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { plan, stage, task } = cli.withDatabase(project, (db) => ({
-        ...createStagedPlan(db),
-        task: new TasksService(db).create({ title: "Работа" }, "agent"),
+      const { plan, stage, task } = await cli.withDatabase(project, async (db) => ({
+        ...(await createStagedPlan(db)),
+        task: await new TasksService(db).create({ title: "Работа" }, "agent"),
       }));
 
       const updated = await cli.entity([
@@ -209,13 +210,19 @@ describe("Планы и релизы через CLI", () => {
   test("страница включений задачи указывает план и этап", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { plan, stage, task } = cli.withDatabase(project, (db) => {
-        const { plan, stage } = createStagedPlan(db);
-        const task = new TasksService(db).create({ title: "Работа" }, "agent");
-        const included = new PlanningService(db).stageTask(plan.id, stage.id, task.id, false, {
-          actor: "agent",
-          ifRevision: plan.revision,
-        });
+      const { plan, stage, task } = await cli.withDatabase(project, async (db) => {
+        const { plan, stage } = await createStagedPlan(db);
+        const task = await new TasksService(db).create({ title: "Работа" }, "agent");
+        const included = await new PlanningService(db).stageTask(
+          plan.id,
+          stage.id,
+          task.id,
+          false,
+          {
+            actor: "agent",
+            ifRevision: plan.revision,
+          },
+        );
         return { plan: included, stage, task };
       });
 
@@ -234,8 +241,9 @@ describe("Планы и релизы через CLI", () => {
   test("флаги создания релиза сохраняют версию и читаемый состав планов", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const plan = cli.withDatabase(project, (db) =>
-        new PlanningService(db).create("work-plan", { title: "План" }, "agent"),
+      const plan = await cli.withDatabase(
+        project,
+        async (db) => await new PlanningService(db).create("work-plan", { title: "План" }, "agent"),
       );
 
       const release = await cli.entity([
@@ -259,11 +267,11 @@ describe("Планы и релизы через CLI", () => {
   test("JSON обновления релиза принимает канонические version и planIds", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { release, replacement } = cli.withDatabase(project, (db) => {
+      const { release, replacement } = await cli.withDatabase(project, async (db) => {
         const planning = new PlanningService(db);
-        const original = planning.create("work-plan", { title: "Исходный" }, "agent");
-        const replacement = planning.create("work-plan", { title: "Новый" }, "agent");
-        const release = planning.create(
+        const original = await planning.create("work-plan", { title: "Исходный" }, "agent");
+        const replacement = await planning.create("work-plan", { title: "Новый" }, "agent");
+        const release = await planning.create(
           "release",
           {
             title: "Выпуск",
@@ -293,15 +301,18 @@ describe("Планы и релизы через CLI", () => {
   test("публикация подготовленного релиза сохраняет released", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const release = cli.withDatabase(project, (db) => {
+      const release = await cli.withDatabase(project, async (db) => {
         const planning = new PlanningService(db);
-        const { plan, stage } = createStagedPlan(db);
-        const task = new TasksService(db).create({ title: "Выполнено", column: "done" }, "agent");
-        const included = planning.stageTask(plan.id, stage.id, task.id, false, {
+        const { plan, stage } = await createStagedPlan(db);
+        const task = await new TasksService(db).create(
+          { title: "Выполнено", column: "done" },
+          "agent",
+        );
+        const included = await planning.stageTask(plan.id, stage.id, task.id, false, {
           actor: "agent",
           ifRevision: plan.revision,
         });
-        const completed = planning.transition(
+        const completed = await planning.transition(
           "work-plan",
           plan.id,
           "complete",
@@ -311,7 +322,7 @@ describe("Планы и релизы через CLI", () => {
             ifRevision: included.revision,
           },
         );
-        return planning.create(
+        return await planning.create(
           "release",
           { title: "Выпуск", version: "1.0.0", planIds: [completed.id] },
           "agent",

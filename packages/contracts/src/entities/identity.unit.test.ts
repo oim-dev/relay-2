@@ -5,6 +5,7 @@ import { isEntitySlug, isProjectName, validateActor } from "./identity";
 const validActors = [
   { name: "одна кириллическая буква", actor: "Я" },
   { name: "внутренний пробел", actor: "agent name" },
+  { name: "согласованная surrogate pair", actor: "agent😀" },
   { name: "предельные 256 символов", actor: "a".repeat(256) },
 ] as const;
 
@@ -22,6 +23,8 @@ const invalidActors = [
   { name: "разделитель строк Unicode", actor: "agent\u2028name" },
   { name: "разделитель абзацев Unicode", actor: "agent\u2029name" },
   { name: "превышение 256 символов", actor: "a".repeat(257) },
+  { name: "непарный высокий surrogate", actor: "agent\ud800" },
+  { name: "непарный низкий surrogate", actor: "agent\udfff" },
 ] as const;
 
 const nonStringValues = [
@@ -35,6 +38,7 @@ const validProjectNames = [
   { name: "один символ", value: "Я" },
   { name: "ровно 120 кодовых единиц UTF-16", value: "🚀".repeat(60) },
   { name: "Unicode и внутренние пробелы", value: "Проект\u00a0Relay 2" },
+  { name: "JSON имя с непарным code unit не является SQL identity", value: "Проект\ud800" },
 ] as const;
 
 const invalidProjectNames = [

@@ -4,16 +4,20 @@ import { HistoryService } from "../../src/history/history";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { PlanningService } from "../../src/planning/planning";
 import { TasksService } from "../../src/tasks/tasks";
-import { entityWriteOptions, expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import {
+  entityWriteOptions,
+  expectAsyncRelayError,
+  withEntityDatabase,
+} from "./helpers/entity-fixture";
 
 describe("Предметная адаптация действий каталога batch", () => {
-  test("parent.clear, dependency.remove и unlink снимают только выбранные связи задачи", () => {
-    withEntityDatabase((db) => {
+  test("parent.clear, dependency.remove и unlink снимают только выбранные связи задачи", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const parent = tasks.create({ title: "Родитель" }, "author");
-      const first = tasks.create({ title: "Первая цель" }, "author");
-      const second = tasks.create({ title: "Вторая цель" }, "author");
-      const task = tasks.create(
+      const parent = await tasks.create({ title: "Родитель" }, "author");
+      const first = await tasks.create({ title: "Первая цель" }, "author");
+      const second = await tasks.create({ title: "Вторая цель" }, "author");
+      const task = await tasks.create(
         {
           title: "Изменяемые связи",
           parent: parent.id,
@@ -23,7 +27,7 @@ describe("Предметная адаптация действий катало�
         "author",
       );
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -71,11 +75,11 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("document.unlink передаёт тип снимаемой связи и сохраняет другую связь с той же целью", () => {
-    withEntityDatabase((db) => {
+  test("document.unlink передаёт тип снимаемой связи и сохраняет другую связь с той же целью", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Поиск" }, "author");
-      const document = knowledge.create(
+      const feature = await knowledge.create("feature", { name: "Поиск" }, "author");
+      const document = await knowledge.create(
         "document",
         {
           name: "Договорённость",
@@ -88,7 +92,7 @@ describe("Предметная адаптация действий катало�
         "author",
       );
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -125,12 +129,12 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("stage.update, move и remove адресуют нужные этапы и возвращают ревизии плана", () => {
-    withEntityDatabase((db) => {
+  test("stage.update, move и remove адресуют нужные этапы и возвращают ревизии плана", async () => {
+    await withEntityDatabase(async (db) => {
       const planning = new PlanningService(db);
-      let plan = planning.create("work-plan", { title: "Порядок этапов" }, "author");
+      let plan = await planning.create("work-plan", { title: "Порядок этапов" }, "author");
       for (const title of ["Первый", "Удаляемый", "Перемещаемый"]) {
-        plan = planning.stage(plan.id, "create", { title }, entityWriteOptions(plan));
+        plan = await planning.stage(plan.id, "create", { title }, entityWriteOptions(plan));
       }
       const [first, removed, moved] = plan.data.stages;
       if (first === undefined || removed === undefined || moved === undefined) {
@@ -143,7 +147,7 @@ describe("Предметная адаптация действий катало�
         completionConditions: "Подтверждён порядок",
       };
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -194,10 +198,10 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("criterion.update и remove передают criterionId/id и возвращают ревизии задачи", () => {
-    withEntityDatabase((db) => {
+  test("criterion.update и remove передают criterionId/id и возвращают ревизии задачи", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const task = tasks.create(
+      const task = await tasks.create(
         {
           title: "Приёмка",
           acceptanceCriteria: [
@@ -217,7 +221,7 @@ describe("Предметная адаптация действий катало�
         description: "# Подробное описание\n\nСохранить переводы строк.",
       };
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -260,14 +264,14 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("product.create под числовым CAS заполняет существующий seed без нового ID", () => {
-    withEntityDatabase((db) => {
+  test("product.create под числовым CAS заполняет существующий seed без нового ID", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const seed = knowledge.get("product");
       const count = db.count();
       const fields = { name: "Relay", summary: "Паспорт", description: "Рабочая память проекта" };
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [{ op: "product.create", ifRevision: seed.revision, input: fields }],
@@ -297,14 +301,14 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("product.create отклоняет устаревший CAS раньше ALREADY_EXISTS заполненного продукта", () => {
-    withEntityDatabase((db) => {
+  test("product.create отклоняет устаревший CAS раньше ALREADY_EXISTS заполненного продукта", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const seed = knowledge.get("product");
-      const current = knowledge.create("product", { name: "Уже заполнен" }, "author");
+      const current = await knowledge.create("product", { name: "Уже заполнен" }, "author");
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -336,11 +340,11 @@ describe("Предметная адаптация действий катало�
     });
   });
 
-  test("session.start возвращает компактный run с ID текущего участия и ревизией сессии", () => {
-    withEntityDatabase((db) => {
+  test("session.start возвращает компактный run с ID текущего участия и ревизией сессии", async () => {
+    await withEntityDatabase(async (db) => {
       const history = new HistoryService(db);
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [

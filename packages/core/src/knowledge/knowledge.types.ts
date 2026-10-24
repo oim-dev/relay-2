@@ -10,7 +10,7 @@ import type {
   KnowledgeRecord,
   ProductData,
   ProjectData,
-  WriteOptions,
+  CommandWriteOptions,
 } from "@relay/contracts";
 
 /**
@@ -54,6 +54,14 @@ export interface KnowledgeRelationInput {
   readonly type: DocumentRelation["type"];
   /* Полный текст пояснения; пустая строка означает отсутствие пояснения. */
   readonly description: string;
+}
+
+/**
+ * Отношение с полностью загруженной целью для чистого расчёта и проверки переходов.
+ */
+export interface PreparedKnowledgeRelation extends Omit<KnowledgeRelationInput, "target"> {
+  /* Разрешённая цель одного anchor, включая признак активности реализации. */
+  readonly target: KnowledgeReference;
 }
 
 /**
@@ -150,7 +158,7 @@ export type KnowledgeUpdate = {
 /**
  * Параметры публичной операции над одной парой цель + тип отношения.
  */
-export interface KnowledgeLinkOptions extends WriteOptions {
+export interface KnowledgeLinkOptions extends CommandWriteOptions {
   /* true снимает отношение; отсутствие означает добавление или уточнение. */
   readonly remove?: boolean;
   /* Вид отношения; отсутствие выбирает documents. */

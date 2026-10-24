@@ -35,9 +35,10 @@ export function registerBatchCommands(registry: CommandRegistry): void {
     /**
      * Передаёт автора, ключ и исходные ревизии без подстановки и внешней транзакции.
      */
-    run: (i): Result =>
+    run: async (i): Promise<Result> =>
       batchResult(
-        new BatchService(i.db).execute(i.input, {
+        await new BatchService(i.db).execute(i.input, {
+          ...i.commandExecution,
           actor: i.actor,
           ...(i.values["operation-key"] !== undefined
             ? { operationKey: i.text("operation-key") }

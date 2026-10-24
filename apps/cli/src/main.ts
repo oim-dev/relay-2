@@ -3,6 +3,11 @@ import { runProcessCli } from "./app/process-run";
 import { isBrokenPipe } from "./errors/errors";
 import { terminalText } from "./output/terminal";
 import { errorMessages } from "./locales/errors";
+import { runGuardianEntry } from "@relay/project-runtime";
+
+if (process.argv.length === 3 && process.argv[2] === "--guarded-command") {
+  process.exit(await runGuardianEntry());
+}
 
 let streamExitCode: number | undefined;
 let commandExitCode = 0;

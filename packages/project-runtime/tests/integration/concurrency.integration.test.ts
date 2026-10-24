@@ -50,7 +50,12 @@ describe("Инициализация в отдельных процессах", 
       const worker = await startInitializationWorker(
         fixture,
         { cwd, expectedHome },
-        { ...process.env, HOME: expectedHome, RELAY_HOME: join(root, "ignored") },
+        {
+          ...process.env,
+          HOME: expectedHome,
+          USERPROFILE: expectedHome,
+          RELAY_HOME: join(root, "ignored"),
+        },
       );
 
       worker.child.send("go");

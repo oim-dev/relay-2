@@ -8,7 +8,7 @@ import {
   type StageChange,
   type WorkPlanRecord,
 } from "@relay/contracts";
-import { requireStage, stageIndex } from "./planning-rules";
+import { assertStageEmpty, requireStage, stageIndex } from "./planning-rules";
 import { invalid } from "./planning-validation";
 import { planningLimits } from "./planning.constants";
 import { planningMessages } from "./planning.messages";
@@ -23,20 +23,24 @@ function beforeIndex(stages: readonly PlanStage[], before: string | null): numbe
 
 /**
  * Рассчитывает создание, изменение, удаление или перемещение этапа без записи.
- * Создание выдаёт новый ID; удалить можно только пустой этап. Выход за край и перенос
+ * Создание получает заранее выделенный ID; удалить можно только пустой этап. Выход за край и перенос
  * перед самим собой сохраняют состав; проверку исходной ревизии выполняет сервис до вызова.
  */
 export function changeStages(
   current: readonly PlanStage[],
   change: Readonly<StageChange>,
+  allocatedId: string | null,
 ): PlanStage[] {
   const stages = [...current];
   if (change.action === "create") {
+    if (allocatedId === null) {
+      throw new RelayError("CORRUPT_DATA", planningMessages.missingAllocation);
+    }
     if (stages.length >= planningLimits.stages) {
       invalid(planningMessages.stageLimit(planningLimits.stages));
     }
     stages.splice(beforeIndex(stages, change.before), 0, {
-      id: crypto.randomUUID(),
+      id: allocatedId,
       ...change.fields,
       taskIds: [],
     });
@@ -47,9 +51,7 @@ export function changeStages(
   if (change.action === "update") {
     stages[index] = { ...stage, ...change.fields };
   } else if (change.action === "remove") {
-    if (stage.taskIds.length) {
-      throw new RelayError("STAGE_NOT_EMPTY", planningMessages.stageNotEmpty, 4);
-    }
+    assertStageEmpty(stage);
     stages.splice(index, 1);
   } else if ("direction" in change.destination) {
     const destination = index + (change.destination.direction === "up" ? -1 : 1);

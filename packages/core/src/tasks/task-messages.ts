@@ -53,6 +53,7 @@ export const taskMessages = {
   parentAliases: "Передайте только parent или parentId",
   targetAliases: "Передайте только target или productTarget",
   criterionAliases: "Передайте только id или criterionId",
+  criterionTransition: "Изменение критерия не соответствует допустимому переходу приёмки",
   emptyCriterionUpdate: "Передайте хотя бы одно текстовое поле критерия",
   taskDone: "Сначала верните задачу из done в работу",
   criterionNotFound: "Критерий не найден",
@@ -72,6 +73,8 @@ export const taskMessages = {
   selfReference: "Самоссылка задачи запрещена",
   brokenObligation: "В графе задач отсутствует обязательная задача",
   cycle: "Обнаружен цикл родительства и обязательных зависимостей",
+  transitionContext: "Отсутствуют необходимые основания перехода задачи",
+  allocatedIdConflict: "Выделенный ID задачи уже занят",
 
   /**
    * Описывает неверную форму объекта команды.
@@ -176,6 +179,13 @@ export const taskMessages = {
    */
   linksLimit(maximum: number): string {
     return `В задаче допускается не более ${maximum} связей каждого вида`;
+  },
+
+  /**
+   * Называет предел назначений целей одной задачи.
+   */
+  targetsLimit(maximum: number): string {
+    return `В задаче допускается не более ${maximum} целей реализации`;
   },
 
   /**

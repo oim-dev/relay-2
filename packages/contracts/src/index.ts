@@ -23,4 +23,31 @@ export { ENTITY_READ_SIZE } from "./queries/entity-read.constants";
 export { validateEntityReadRequest } from "./queries/entity-read";
 export type * from "./queries/entity-read.types";
 export type * from "./batch/batch.types";
+export type * from "./batch/command.types";
+export type * from "./commands/command-store.types";
+export type * from "./commands/command-write.types";
 export { BATCH_LIMITS, BATCH_NESTED_RESULT_KINDS } from "./batch/batch.constants";
+export type * from "./replication/replication.types";
+export { isPortableIdentityText, isPortableVersionParents } from "./replication/portable-identity";
+export type * from "./replication/git-sync.types";
+export type * from "./replication/git-sync-control.types";
+export type * from "./replication/git-sync-conflicts.types";
+export { GIT_SYNC_REQUEST_MAX_BYTES } from "./replication/git-sync.constants";
+export type * from "./components/component.types";
+export { componentAllocatedId } from "./components/component-layout";
+export { hasConsistentComponentId } from "./components/component-layout";
+export {
+  componentFields,
+  componentCollection,
+  componentIdentity,
+  componentMigrationId,
+  componentNaturalIdentity,
+  splitComponentRecord,
+  assembleComponentRecord,
+} from "./components/component-layout";
+export { isComponentValue } from "./components/component-shape";
+export {
+  isComponentPosition,
+  componentPositionBetween,
+  compareComponentPositions,
+} from "./components/component-position";

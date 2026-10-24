@@ -10,6 +10,11 @@ const NON_QUERY_OPTIONS = new Set([
   "config",
   "project",
   "actor",
+  "expected-addresses",
+  "expected-version",
+  "target-version",
+  "if-revision",
+  "target-revision",
   "format",
   "help",
   "version",
@@ -26,6 +31,7 @@ function shellQuote(value: string): string {
 
 /**
  * Выделяет и сортирует параметры, определяющие состав списка, для стабильного отпечатка запроса.
+ * Глобальные guards записи не меняют чтение и не входят в курсор либо nextCommand.
  */
 function queryEntries(invocation: InvocationPageContext): PageQueryEntries {
   return Object.entries(invocation.values)

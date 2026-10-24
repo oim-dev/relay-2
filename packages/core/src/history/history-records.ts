@@ -4,7 +4,6 @@ import type {
   HistorySession,
   HistorySessionData,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
 import type { HistoryConnection, HistorySessionContent } from "./history-input.types";
 import type {
   HistoryCheckpointCreation,
@@ -20,50 +19,24 @@ const checkpointKinds = {
 } as const;
 
 /**
- * Создаёт новые записи истории без сохранения, резервируя ID на время одной транзакции.
- * Занятость адресов и ID участий проверяется без загрузки содержания чужих сессий.
- * Фабрика не переживает операцию и не заменяет атомарную вставку и CAS в HistoryService.
+ * Чисто создаёт записи из проверенных значений и заранее выделенных метаданных.
+ * Не получает хранилище, не читает часы, не выделяет ID и не меняет входные объекты.
  */
 export class HistoryRecordFactory {
-  /* БД того же снимка операции для проверки занятых ID, ключей и алиасов. */
-  private readonly db: ProjectDatabase;
   /* Проверенный автор и единое время создания записей операции. */
   private readonly metadata: HistoryRecordMetadata;
-  /* Уже выданные ID этой операции, в том числе ещё не сохранённого первого участия. */
-  private readonly reservedIds = new Set<string>();
 
   /**
-   * Подключает фабрику к текущей транзакции с пустым локальным резервом новых ID.
+   * Фиксирует проверенные авторство и время без побочных эффектов.
    */
-  constructor(db: ProjectDatabase, metadata: HistoryRecordMetadata) {
-    this.db = db;
+  constructor(metadata: HistoryRecordMetadata) {
     this.metadata = metadata;
-  }
-
-  /**
-   * Выдаёт ID без пересечения с адресами записей, участиями и ранее созданными объектами операции.
-   */
-  private newId(): string {
-    let id: string;
-    do {
-      id = crypto.randomUUID();
-    } while (
-      this.reservedIds.has(id) ||
-      this.db.getIdentity(id) !== undefined ||
-      this.db.getIdentity(`S-${id}`) !== undefined ||
-      this.db.getIdentity(`CP-${id}`) !== undefined ||
-      this.db.getIdentity(`RUN-${id}`) !== undefined ||
-      this.db.hasArrayItemByField("work-session", "runs", "id", id)
-    );
-    this.reservedIds.add(id);
-    return id;
   }
 
   /**
    * Создаёт активное участие; наследование operator при attach выполняет сценарий подключения.
    */
-  run(input: HistoryConnection, predecessorRunId: string | null): HistoryRun {
-    const id = this.newId();
+  run(id: string, input: HistoryConnection, predecessorRunId: string | null): HistoryRun {
     return {
       id,
       key: `RUN-${id}`,
@@ -84,8 +57,11 @@ export class HistoryRecordFactory {
    * Создаёт корень с первым участием либо pending-ребёнка с полной тройкой происхождения.
    * Начальная ревизия равна 1; метод не записывает данные и не меняет входные объекты.
    */
-  session(input: HistorySessionContent, state: HistorySessionInitialization): HistorySession {
-    const id = this.newId();
+  session(
+    id: string,
+    input: HistorySessionContent,
+    state: HistorySessionInitialization,
+  ): HistorySession {
     const data: HistorySessionData = {
       title: input.title,
       description: input.description,
@@ -100,7 +76,7 @@ export class HistoryRecordFactory {
     };
     if (state.status === "open") {
       data.currentRunId = state.run.id;
-      data.runs = [state.run];
+      data.runs = [structuredClone(state.run)];
     } else {
       data.parentSessionId = state.parentSessionId;
       data.originCheckpointId = state.originCheckpointId;
@@ -123,8 +99,7 @@ export class HistoryRecordFactory {
    * Создаёт новый материал с revision=1 и следующей ревизией сессии-владельца.
    * Порядок вычисляется только по материалам этой сессии; исходный intent не изменяется.
    */
-  checkpoint(input: HistoryCheckpointCreation): HistoryCheckpoint {
-    const id = this.newId();
+  checkpoint(id: string, input: HistoryCheckpointCreation): HistoryCheckpoint {
     return {
       id,
       key: `CP-${id}`,
@@ -148,7 +123,7 @@ export class HistoryRecordFactory {
             0,
           ) + 1,
         sessionRevision: input.session.revision + 1,
-        references: [...input.references],
+        references: input.references.map((reference) => ({ ...reference })),
         acceptedSessionIds: [...input.values.acceptedSessionIds],
       },
     };

@@ -46,18 +46,22 @@ function stageId(plan: WorkPlanRecord): string {
  * Создаёт три задачи с полными текстами и комментариями и включает их в порядке 3, 2, 1.
  * Соединением владеет вызывающий fixture; подготовка завершена до перехватов чтения.
  */
-function seedStageTasks(db: ProjectDatabase): PlanningPageFixture {
+async function seedStageTasks(db: ProjectDatabase): Promise<PlanningPageFixture> {
   const tasks = new TasksService(db);
-  const records = ["Первая", "Вторая", "Третья"].map((title) => {
-    const task = tasks.create({ title, description: `# ${title}\n\nПолное описание\n` }, "tester");
-    return tasks.comment(task.id, `Комментарий: ${title}`, "tester");
-  });
+  const records = [];
+  for (const title of ["Первая", "Вторая", "Третья"]) {
+    const task = await tasks.create(
+      { title, description: `# ${title}\n\nПолное описание\n` },
+      "tester",
+    );
+    records.push(await tasks.comment(task.id, `Комментарий: ${title}`, "tester"));
+  }
   const items = records.toReversed();
   const service = new PlanningService(db);
-  let owner = service.create("work-plan", { title: "Владелец этапа" }, "tester");
-  owner = service.stage(owner.id, "create", { title: "Этап" }, write(owner));
+  let owner = await service.create("work-plan", { title: "Владелец этапа" }, "tester");
+  owner = await service.stage(owner.id, "create", { title: "Этап" }, write(owner));
   for (const task of items) {
-    owner = service.stageTask(owner.id, stageId(owner), task.id, false, write(owner));
+    owner = await service.stageTask(owner.id, stageId(owner), task.id, false, write(owner));
   }
   return { owner, items };
 }
@@ -66,13 +70,16 @@ function seedStageTasks(db: ProjectDatabase): PlanningPageFixture {
  * Создаёт три плана с полными текстами и включает их в релиз в порядке 3, 2, 1.
  * Соединение остаётся во владении вызывающего fixture.
  */
-function seedReleasePlans(db: ProjectDatabase): PlanningPageFixture {
+async function seedReleasePlans(db: ProjectDatabase): Promise<PlanningPageFixture> {
   const service = new PlanningService(db);
-  const records = ["Первый", "Второй", "Третий"].map((title) =>
-    service.create("work-plan", { title, goal: `# ${title}\n\nПолная цель\n` }, "tester"),
-  );
+  const records = [];
+  for (const title of ["Первый", "Второй", "Третий"]) {
+    records.push(
+      await service.create("work-plan", { title, goal: `# ${title}\n\nПолная цель\n` }, "tester"),
+    );
+  }
   const items = records.toReversed();
-  const owner = service.create(
+  const owner = await service.create(
     "release",
     { title: "Владелец релиза", version: "1", planIds: items.map((item) => item.id) },
     "tester",
@@ -135,9 +142,9 @@ function itemAt(fixture: PlanningPageFixture, index: number): PlanningPageFixtur
 describe("Ограниченные страницы составов планирования", () => {
   test.each(compositions)(
     "$name: страницы сохраняют порядок, total, владельца и читают только карточки окна",
-    ({ seed, kind }) => {
-      withEntityDatabase((db) => {
-        const fixture = seed(db);
+    async ({ seed, kind }) => {
+      await withEntityDatabase(async (db) => {
+        const fixture = await seed(db);
         const get = spyOn(db, "get");
         const getMany = spyOn(db, "getMany");
         const list = spyOn(db, "list");
@@ -172,11 +179,11 @@ describe("Ограниченные страницы составов плани�
     },
   );
 
-  test("пустой этап возвращает владельца и нулевой total", () => {
-    withEntityDatabase((db) => {
+  test("пустой этап возвращает владельца и нулевой total", async () => {
+    await withEntityDatabase(async (db) => {
       const service = new PlanningService(db);
-      const initial = service.create("work-plan", { title: "Пустой план" }, "tester");
-      const plan = service.stage(initial.id, "create", { title: "Этап" }, write(initial));
+      const initial = await service.create("work-plan", { title: "Пустой план" }, "tester");
+      const plan = await service.stage(initial.id, "create", { title: "Этап" }, write(initial));
 
       const page = service.stageTasksPage(plan.key, stageId(plan), { offset: 0, limit: 1 });
 
@@ -184,10 +191,10 @@ describe("Ограниченные страницы составов плани�
     });
   });
 
-  test("страница отсутствующего этапа возвращает NOT_FOUND", () => {
-    withEntityDatabase((db) => {
+  test("страница отсутствующего этапа возвращает NOT_FOUND", async () => {
+    await withEntityDatabase(async (db) => {
       const service = new PlanningService(db);
-      const plan = service.create("work-plan", { title: "План без этапов" }, "tester");
+      const plan = await service.create("work-plan", { title: "План без этапов" }, "tester");
 
       const error = expectRelayError(
         () => service.stageTasksPage(plan.key, "missing-stage", { offset: 0, limit: 1 }),
@@ -200,9 +207,9 @@ describe("Ограниченные страницы составов плани�
 
   test.each(compositions)(
     "$name: владелец, total и карточка окна принадлежат одному снимку при записи другого соединения",
-    ({ seed }) => {
-      withEntityDatabase((db) => {
-        const fixture = seed(db);
+    async ({ seed }) => {
+      await withEntityDatabase(async (db) => {
+        const fixture = await seed(db);
         const { owner } = fixture;
         const selected = itemAt(fixture, 0);
         const removed = itemAt(fixture, 2);
@@ -217,22 +224,47 @@ describe("Ограниченные страницы составов плани�
           if (record?.id === owner.id && !changed) {
             changed = true;
             writer.transaction(() => {
-              const service = new PlanningService(writer);
+              // Готовые конкурентные строки сохраняются синхронно, пока reader удерживает snapshot.
               if (owner.kind === "work-plan") {
-                service.stageTask(owner.id, stageId(owner), removed.id, true, write(owner));
-                new TasksService(writer).update(
-                  selected.id,
-                  { description: "После записи" },
-                  write(selected),
+                writer.update(
+                  {
+                    ...owner,
+                    revision: owner.revision + 1,
+                    data: {
+                      ...owner.data,
+                      stages: owner.data.stages.map((stage) => ({
+                        ...stage,
+                        taskIds: stage.taskIds.filter((id) => id !== removed.id),
+                      })),
+                    },
+                  },
+                  owner.revision,
+                );
+                writer.update(
+                  {
+                    ...selected,
+                    revision: selected.revision + 1,
+                    data: { ...selected.data, description: "После записи" },
+                  },
+                  selected.revision,
                 );
               } else {
-                service.update(
-                  "release",
-                  owner.id,
-                  { planIds: [selected.id, itemAt(fixture, 1).id] },
-                  write(owner),
+                writer.update(
+                  {
+                    ...owner,
+                    revision: owner.revision + 1,
+                    data: { ...owner.data, planIds: [selected.id, itemAt(fixture, 1).id] },
+                  },
+                  owner.revision,
                 );
-                service.update("work-plan", selected.id, { goal: "После записи" }, write(selected));
+                writer.update(
+                  {
+                    ...selected,
+                    revision: selected.revision + 1,
+                    data: { ...selected.data, goal: "После записи" },
+                  },
+                  selected.revision,
+                );
               }
             });
           }
@@ -260,9 +292,9 @@ describe("Ограниченные страницы составов плани�
   for (const { name, seed, kind } of compositions) {
     test.each(brokenReferences)(
       `${name}: $name не скрывается ограничением окна`,
-      ({ index, reference }) => {
-        withEntityDatabase((db) => {
-          const fixture = seed(db);
+      async ({ index, reference }) => {
+        await withEntityDatabase(async (db) => {
+          const fixture = await seed(db);
           const ids = fixture.items.map((item) => item.id);
           let broken = "missing-id";
           if (reference === "wrong-kind") {
@@ -283,26 +315,29 @@ describe("Ограниченные страницы составов плани�
       },
     );
 
-    test.each(invalidWindows)(`${name}: $name отклоняется до чтения владельца`, ({ request }) => {
-      withEntityDatabase((db) => {
-        const fixture = seed(db);
-        const get = spyOn(db, "get");
-        try {
-          expectRelayError(() => readPage(db, fixture, request), "INVALID_ARGUMENT");
+    test.each(invalidWindows)(
+      `${name}: $name отклоняется до чтения владельца`,
+      async ({ request }) => {
+        await withEntityDatabase(async (db) => {
+          const fixture = await seed(db);
+          const get = spyOn(db, "get");
+          try {
+            expectRelayError(() => readPage(db, fixture, request), "INVALID_ARGUMENT");
 
-          expect(get).not.toHaveBeenCalled();
-        } finally {
-          get.mockRestore();
-        }
-      });
-    });
+            expect(get).not.toHaveBeenCalled();
+          } finally {
+            get.mockRestore();
+          }
+        });
+      },
+    );
   }
 
   test.each(compositions)(
     "$name: повреждённая карточка окна возвращает CORRUPT_DATA",
-    ({ seed }) => {
-      withEntityDatabase((db) => {
-        const fixture = seed(db);
+    async ({ seed }) => {
+      await withEntityDatabase(async (db) => {
+        const fixture = await seed(db);
         const selected = itemAt(fixture, 0);
         // Повреждаем обязательный текст выбранной карточки в обход предметного декодера.
         const data =

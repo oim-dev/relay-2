@@ -88,8 +88,14 @@ describe("Знания через CLI", () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const description = "# Требования\n\n    точный текст\n";
-      const feature = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("feature", { name: "Поиск", description }, "fixture"),
+      const feature = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "feature",
+            { name: "Поиск", description },
+            "fixture",
+          ),
       );
 
       const renamed = await cli.entity([
@@ -118,10 +124,10 @@ describe("Знания через CLI", () => {
   test("обновление с устаревшей ревизией сохраняет актуальную запись и возвращает REVISION_CONFLICT", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { before, current } = cli.withDatabase(project, (db) => {
+      const { before, current } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const before = knowledge.create("feature", { name: "Поиск" }, "fixture");
-        const current = knowledge.rename("feature", before.id, "SEARCH", {
+        const before = await knowledge.create("feature", { name: "Поиск" }, "fixture");
+        const current = await knowledge.rename("feature", before.id, "SEARCH", {
           actor: "fixture",
           ifRevision: before.revision,
         });
@@ -156,8 +162,10 @@ describe("Знания через CLI", () => {
   test("обновление без ревизии отклоняется до изменения фичи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const feature = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("feature", { name: "Поиск" }, "fixture"),
+      const feature = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create("feature", { name: "Поиск" }, "fixture"),
       );
 
       const error = await cli.error(
@@ -188,11 +196,11 @@ describe("Знания через CLI", () => {
     async ({ key, exit, code, details }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const { first, second } = cli.withDatabase(project, (db) => {
+        const { first, second } = await cli.withDatabase(project, async (db) => {
           const knowledge = new KnowledgeService(db);
           return {
-            first: knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
-            second: knowledge.create(
+            first: await knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
+            second: await knowledge.create(
               "application",
               { name: "Backend", slug: "backend" },
               "fixture",
@@ -218,11 +226,11 @@ describe("Знания через CLI", () => {
   test("замена участия по ключу фичи возвращает состав с новой ревизией приложения", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { feature, app } = cli.withDatabase(project, (db) => {
+      const { feature, app } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
         return {
-          feature: knowledge.create("feature", { name: "Поиск" }, "fixture"),
-          app: knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
+          feature: await knowledge.create("feature", { name: "Поиск" }, "fixture"),
+          app: await knowledge.create("application", { name: "Web", slug: "web" }, "fixture"),
         };
       });
 
@@ -252,11 +260,15 @@ describe("Знания через CLI", () => {
   test("явный пустой targets в JSON очищает непустое участие приложения", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const app = cli.withDatabase(project, (db) => {
+      const app = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const feature = knowledge.create("feature", { name: "Поиск" }, "fixture");
-        const created = knowledge.create("application", { name: "Web", slug: "web" }, "fixture");
-        return knowledge.replaceParticipation(created.id, [feature.id], {
+        const feature = await knowledge.create("feature", { name: "Поиск" }, "fixture");
+        const created = await knowledge.create(
+          "application",
+          { name: "Web", slug: "web" },
+          "fixture",
+        );
+        return await knowledge.replaceParticipation(created.id, [feature.id], {
           actor: "fixture",
           ifRevision: created.revision,
         });

@@ -3,9 +3,15 @@ import { Database } from "bun:sqlite";
 import type { EntityKind, EntityPage, EntityPageRequest, EntityRecord } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
+import { BatchService } from "../../src/batch/batch";
+import { calculateDocumentSections } from "../../src/knowledge/knowledge-calculations";
 import { PlanningService } from "../../src/planning/planning";
 import { TasksService } from "../../src/tasks/tasks";
-import { entityWriteOptions as write, expectRelayError } from "./helpers/entity-fixture";
+import {
+  entityWriteOptions as write,
+  expectRelayError,
+  expectAsyncRelayError,
+} from "./helpers/entity-fixture";
 import {
   corruptKnowledgeRecord,
   createKnowledgeParticipation,
@@ -205,22 +211,25 @@ function expectCorruptedKnowledgeRead(
 }
 
 describe("Страницы знаний и согласованный снимок", () => {
-  test.each(pageFilters)("страница $name сохраняет total и предметный порядок", ({ filters }) => {
-    withKnowledgeFixture((service) => {
-      for (const name of ["Äther", "alpha", "Zulu"]) {
-        service.create("document", { name, body: "needle" }, "tester");
-      }
+  test.each(pageFilters)(
+    "страница $name сохраняет total и предметный порядок",
+    async ({ filters }) => {
+      await withKnowledgeFixture(async (service) => {
+        for (const name of ["Äther", "alpha", "Zulu"]) {
+          await service.create("document", { name, body: "needle" }, "tester");
+        }
 
-      const page = service.listPage("document", filters, { offset: 1, limit: 1, sort: "title" });
+        const page = service.listPage("document", filters, { offset: 1, limit: 1, sort: "title" });
 
-      expect(page.total).toBe(3);
-      expect(page.items.map((item) => item.data.name)).toEqual(["alpha"]);
-    });
-  });
+        expect(page.total).toBe(3);
+        expect(page.items.map((item) => item.data.name)).toEqual(["alpha"]);
+      });
+    },
+  );
 
-  test("пустое окно в конце списка сохраняет общее число документов", () => {
-    withKnowledgeFixture((service) => {
-      service.create("document", { name: "Документ", body: "Текст" }, "tester");
+  test("пустое окно в конце списка сохраняет общее число документов", async () => {
+    await withKnowledgeFixture(async (service) => {
+      await service.create("document", { name: "Документ", body: "Текст" }, "tester");
 
       const page = service.listPage("document", {}, { offset: 1, limit: 1, sort: "title" });
 
@@ -230,11 +239,11 @@ describe("Страницы знаний и согласованный снимо
 
   test.each(pageFilters)(
     "Unicode-страница $name сохраняет порядок непарных суррогатов",
-    ({ filters }) => {
-      withKnowledgeFixture((service) => {
+    async ({ filters }) => {
+      await withKnowledgeFixture(async (service) => {
         const names = ["\ud800", "\udc00", "\ue000", "😀"];
         for (const name of names) {
-          service.create("feature", { name, description: "needle" }, "tester");
+          await service.create("feature", { name, description: "needle" }, "tester");
         }
 
         const page = service.listPage("feature", filters, { offset: 0, limit: 4, sort: "title" });
@@ -245,40 +254,49 @@ describe("Страницы знаний и согласованный снимо
   );
 
   for (const { name, filters } of pageFilters) {
-    test.each(invalidPageRequests)(`$name в окне ${name} отклоняется до чтения`, ({ request }) => {
-      withKnowledgeFixture((service, db) => {
-        const fullRead = spyOn(db, "list");
-        const pageRead = spyOn(db, "listPage");
-        try {
-          // Намеренно неверный транспортный sort проверяет runtime-границу типизированного API.
-          expectRelayError(
-            () => service.listPage("document", filters, request as EntityPageRequest),
-            "INVALID_ARGUMENT",
-          );
+    test.each(invalidPageRequests)(
+      `$name в окне ${name} отклоняется до чтения`,
+      async ({ request }) => {
+        await withKnowledgeFixture((service, db) => {
+          const fullRead = spyOn(db, "list");
+          const pageRead = spyOn(db, "listPage");
+          try {
+            // Намеренно неверный транспортный sort проверяет runtime-границу типизированного API.
+            expectRelayError(
+              () => service.listPage("document", filters, request as EntityPageRequest),
+              "INVALID_ARGUMENT",
+            );
 
-          expect(fullRead).not.toHaveBeenCalled();
-          expect(pageRead).not.toHaveBeenCalled();
-        } finally {
-          fullRead.mockRestore();
-          pageRead.mockRestore();
-        }
-      });
-    });
+            expect(fullRead).not.toHaveBeenCalled();
+            expect(pageRead).not.toHaveBeenCalled();
+          } finally {
+            fullRead.mockRestore();
+            pageRead.mockRestore();
+          }
+        });
+      },
+    );
   }
 
-  test("удаление раздела между чтениями не меняет проекцию текущей страницы", () => {
-    withKnowledgeFixture((service, db) => {
-      const project = service.changeSection(
+  test("удаление раздела между чтениями не меняет проекцию текущей страницы", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
-      const document = service.create(
+      const document = await service.create(
         "document",
         { name: "Документ", body: "Текст", sectionId: "guides" },
         "tester",
       );
       const writer = ProjectDatabase.open(db.path);
+      const removal = calculateDocumentSections(
+        project,
+        { action: "remove", id: "guides" },
+        write(project),
+        new Date().toISOString(),
+      );
       /**
        * Читает настоящее SQL-окно без повторного входа в перехваченный метод.
        */
@@ -287,7 +305,8 @@ describe("Страницы знаний и согласованный снимо
       const intercepted = spyOn(db, "listPage").mockImplementation((kind, request) => {
         const page = original(kind, request);
         // Commit после SQL-окна, но до разделов проверяет внешний snapshot Core.
-        new KnowledgeService(writer).changeSection("remove", { id: "guides" }, write(project));
+        // Чистый расчёт подготовлен до sync snapshot; внутри перехвата только точная SQL-запись.
+        writer.update(removal.record, project.revision);
         return page;
       });
       try {
@@ -309,10 +328,10 @@ describe("Проверка сохранённых знаний", () => {
   for (const operation of corruptedRelationOperations) {
     test.each(corruptedRelations)(
       `${operation}: $name в отношениях даёт CORRUPT_DATA без записи`,
-      ({ relations }) => {
-        withKnowledgeFixture((service, db) => {
-          const feature = service.create("feature", { name: "Цель" }, "tester");
-          const document = service.create(
+      async ({ relations }) => {
+        await withKnowledgeFixture(async (service, db) => {
+          const feature = await service.create("feature", { name: "Цель" }, "tester");
+          const document = await service.create(
             "document",
             { name: "Документ", body: "Текст", targets: [feature.id] },
             "tester",
@@ -320,7 +339,7 @@ describe("Проверка сохранённых знаний", () => {
           const corruptedRecord = corruptKnowledgeRecord(db, document, { relations });
           const generation = db.getGeneration();
 
-          expectRelayError(() => {
+          await expectAsyncRelayError(async () => {
             switch (operation) {
               case "get":
                 return service.get("document", document.id);
@@ -329,14 +348,14 @@ describe("Проверка сохранённых знаний", () => {
               case "list":
                 return service.list("document", { target: feature.id });
               case "update":
-                return service.update(
+                return await service.update(
                   "document",
                   document.id,
                   { summary: "Правка" },
                   write(corruptedRecord),
                 );
               case "linkDocument":
-                return service.linkDocument(document.id, feature.id, write(corruptedRecord));
+                return await service.linkDocument(document.id, feature.id, write(corruptedRecord));
             }
           }, "CORRUPT_DATA");
 
@@ -350,19 +369,19 @@ describe("Проверка сохранённых знаний", () => {
   for (const operation of corruptedSectionOperations) {
     test.each(corruptedSectionCollections)(
       `${operation}: $name отклоняется без перезаписи проекта`,
-      ({ patch }) => {
-        withKnowledgeFixture((service, db) => {
+      async ({ patch }) => {
+        await withKnowledgeFixture(async (service, db) => {
           const corruptedRecord = corruptKnowledgeRecord(db, service.get("project"), patch);
           const generation = db.getGeneration();
 
-          expectRelayError(() => {
+          await expectAsyncRelayError(async () => {
             switch (operation) {
               case "documentSections":
                 return service.documentSections();
               case "list":
                 return service.list("document");
               case "changeSection":
-                return service.changeSection(
+                return await service.changeSection(
                   "create",
                   { id: "new", name: "Новый" },
                   write(corruptedRecord),
@@ -378,19 +397,19 @@ describe("Проверка сохранённых знаний", () => {
   }
 
   for (const operation of knowledgeReadOperations) {
-    test(`${operation}: null в summary фичи даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Фича" }, "tester");
+    test(`${operation}: null в summary фичи даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Фича" }, "tester");
         const corruptedRecord = corruptKnowledgeRecord(db, feature, { summary: null });
 
         expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
       });
     });
 
-    test(`${operation}: числовая ссылка сценария даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Фича" }, "tester");
-        const scenario = service.create(
+    test(`${operation}: числовая ссылка сценария даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Фича" }, "tester");
+        const scenario = await service.create(
           "scenario",
           { name: "Сценарий", feature: feature.id },
           "tester",
@@ -401,9 +420,13 @@ describe("Проверка сохранённых знаний", () => {
       });
     });
 
-    test(`${operation}: null в составе приложения даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
-        const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+    test(`${operation}: null в составе приложения даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture(async (service, db) => {
+        const application = await service.create(
+          "application",
+          { name: "Web", slug: "web" },
+          "tester",
+        );
         const corruptedRecord = corruptKnowledgeRecord(db, application, {
           implementationIds: null,
         });
@@ -412,11 +435,15 @@ describe("Проверка сохранённых знаний", () => {
       });
     });
 
-    test(`${operation}: строковый active реализации даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Фича" }, "tester");
-        const application = service.create("application", { name: "Web", slug: "web" }, "tester");
-        const implementation = service.create(
+    test(`${operation}: строковый active реализации даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Фича" }, "tester");
+        const application = await service.create(
+          "application",
+          { name: "Web", slug: "web" },
+          "tester",
+        );
+        const implementation = await service.create(
           "implementation",
           { application: application.id, target: feature.id, title: "Вклад" },
           "tester",
@@ -427,8 +454,8 @@ describe("Проверка сохранённых знаний", () => {
       });
     });
 
-    test(`${operation}: числовой prefix доски даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
+    test(`${operation}: числовой prefix доски даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture((service, db) => {
         const corruptedRecord = corruptKnowledgeRecord(db, service.get("board", "BOARD-PRODUCT"), {
           prefix: 42,
         });
@@ -437,17 +464,21 @@ describe("Проверка сохранённых знаний", () => {
       });
     });
 
-    test(`${operation}: null в имени продукта даёт CORRUPT_DATA`, () => {
-      withKnowledgeFixture((service, db) => {
+    test(`${operation}: null в имени продукта даёт CORRUPT_DATA`, async () => {
+      await withKnowledgeFixture((service, db) => {
         const corruptedRecord = corruptKnowledgeRecord(db, service.get("product"), { name: null });
 
         expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
       });
     });
 
-    test(`${operation}: неизвестный раздел не маскируется отсутствием раздела`, () => {
-      withKnowledgeFixture((service, db) => {
-        const document = service.create("document", { name: "Документ", body: "Текст" }, "tester");
+    test(`${operation}: неизвестный раздел не маскируется отсутствием раздела`, async () => {
+      await withKnowledgeFixture(async (service, db) => {
+        const document = await service.create(
+          "document",
+          { name: "Документ", body: "Текст" },
+          "tester",
+        );
         corruptKnowledgeRecord(db, document, { sectionId: "missing" });
 
         expectRelayError(() => {
@@ -462,25 +493,25 @@ describe("Проверка сохранённых знаний", () => {
 });
 
 describe("Паспорт продукта и реквизиты проекта", () => {
-  test("новая база возвращает пустой паспорт продукта", () => {
-    withKnowledgeFixture((service) => {
+  test("новая база возвращает пустой паспорт продукта", async () => {
+    await withKnowledgeFixture((service) => {
       const product = service.get("product");
 
       expect(product.data).toEqual({});
     });
   });
 
-  test("заполнение и переименование паспорта сохраняют singleton и полный текст после открытия БД", () => {
-    withKnowledgeFixture((service, db) => {
+  test("заполнение и переименование паспорта сохраняют singleton и полный текст после открытия БД", async () => {
+    await withKnowledgeFixture(async (service, db) => {
       const empty = service.get("product");
       const markdown = `## Назначение\n\n${"Требование 🧭\n".repeat(300)}\nПоследняя строка.\n`;
-      const product = service.create(
+      const product = await service.create(
         "product",
         { name: "Библиотека", summary: "Кратко\nВторая строка", description: markdown },
         "tester",
       );
 
-      const renamed = service.rename("product", product.key, "LIBRARY", write(product));
+      const renamed = await service.rename("product", product.key, "LIBRARY", write(product));
 
       expect(renamed.id).toBe(empty.id);
       expect(service.list("product")).toEqual([renamed]);
@@ -496,13 +527,13 @@ describe("Паспорт продукта и реквизиты проекта",
     });
   });
 
-  test("повторное создание заполненного паспорта сохраняет первую запись", () => {
-    withKnowledgeFixture((service, db) => {
-      const product = service.create("product", { name: "Библиотека" }, "tester");
+  test("повторное создание заполненного паспорта сохраняет первую запись", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const product = await service.create("product", { name: "Библиотека" }, "tester");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.create("product", { name: "Вторая копия" }, "tester"),
+      await expectAsyncRelayError(
+        async () => await service.create("product", { name: "Вторая копия" }, "tester"),
         "ALREADY_EXISTS",
       );
 
@@ -513,11 +544,11 @@ describe("Паспорт продукта и реквизиты проекта",
 
   test.each(validProjectBoundaries)(
     "имя и slug $name принимаются с trim имени",
-    ({ input, expectedName }) => {
-      withKnowledgeFixture((service) => {
+    async ({ input, expectedName }) => {
+      await withKnowledgeFixture(async (service) => {
         const project = service.get("project");
 
-        const updated = service.update("project", undefined, input, write(project));
+        const updated = await service.update("project", undefined, input, write(project));
 
         expect(updated.data.name).toBe(expectedName);
         expect(updated.data.slug).toBe(input.slug);
@@ -525,13 +556,13 @@ describe("Паспорт продукта и реквизиты проекта",
     },
   );
 
-  test.each(invalidProjectNames)("имя проекта: $name отклоняется без записи", ({ value }) => {
-    withKnowledgeFixture((service, db) => {
+  test.each(invalidProjectNames)("имя проекта: $name отклоняется без записи", async ({ value }) => {
+    await withKnowledgeFixture(async (service, db) => {
       const project = service.get("project");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("project", project.id, { name: value }, write(project)),
+      await expectAsyncRelayError(
+        async () => await service.update("project", project.id, { name: value }, write(project)),
         "INVALID_ARGUMENT",
       );
 
@@ -540,13 +571,13 @@ describe("Паспорт продукта и реквизиты проекта",
     });
   });
 
-  test.each(invalidSlugs)("slug проекта: $name отклоняется без записи", ({ value }) => {
-    withKnowledgeFixture((service, db) => {
+  test.each(invalidSlugs)("slug проекта: $name отклоняется без записи", async ({ value }) => {
+    await withKnowledgeFixture(async (service, db) => {
       const project = service.get("project");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("project", project.id, { slug: value }, write(project)),
+      await expectAsyncRelayError(
+        async () => await service.update("project", project.id, { slug: value }, write(project)),
         "INVALID_ARGUMENT",
       );
 
@@ -559,14 +590,18 @@ describe("Паспорт продукта и реквизиты проекта",
 describe("Владение доской приложения", () => {
   test.each(invalidSlugs)(
     "slug приложения: $name отклоняется без приложения и доски",
-    ({ value }) => {
-      withKnowledgeFixture((service, db) => {
+    async ({ value }) => {
+      await withKnowledgeFixture(async (service, db) => {
         const snapshot = db.list();
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () =>
-            service.create("application", { name: "Web", slug: value, prefix: "WEB" }, "tester"),
+        await expectAsyncRelayError(
+          async () =>
+            await service.create(
+              "application",
+              { name: "Web", slug: value, prefix: "WEB" },
+              "tester",
+            ),
           "INVALID_ARGUMENT",
         );
 
@@ -578,9 +613,9 @@ describe("Владение доской приложения", () => {
 
   test.each(applicationSlugBoundaries)(
     "slug приложения длиной $name сохраняется в его доске",
-    ({ slug, prefix }) => {
-      withKnowledgeFixture((service) => {
-        const application = service.create(
+    async ({ slug, prefix }) => {
+      await withKnowledgeFixture(async (service) => {
+        const application = await service.create(
           "application",
           { name: "Приложение", slug, prefix },
           "tester",
@@ -594,14 +629,18 @@ describe("Владение доской приложения", () => {
     },
   );
 
-  test("прямое создание доски отклоняется без изменения состава", () => {
-    withKnowledgeFixture((service, db) => {
+  test("прямое создание доски отклоняется без изменения состава", async () => {
+    await withKnowledgeFixture(async (service, db) => {
       const productBoard = service.get("board", "BOARD-PRODUCT");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.create("board", { name: "Обход", slug: "custom", prefix: "CUSTOM" }, "tester"),
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
+            "board",
+            { name: "Обход", slug: "custom", prefix: "CUSTOM" },
+            "tester",
+          ),
         "INVALID_ARGUMENT",
       );
 
@@ -612,13 +651,13 @@ describe("Владение доской приложения", () => {
 
   test.each(productBoardFields)(
     "прямая правка %s продуктовой доски отклоняется без записи",
-    (field) => {
-      withKnowledgeFixture((service, db) => {
+    async (field) => {
+      await withKnowledgeFixture(async (service, db) => {
         const board = service.get("board", "BOARD-PRODUCT");
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () => service.update("board", board.id, { [field]: "Обход" }, write(board)),
+        await expectAsyncRelayError(
+          async () => await service.update("board", board.id, { [field]: "Обход" }, write(board)),
           "INVALID_ARGUMENT",
         );
 
@@ -628,14 +667,18 @@ describe("Владение доской приложения", () => {
     },
   );
 
-  test("прямая правка имени доски приложения отклоняется без изменения владельца", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("прямая правка имени доски приложения отклоняется без изменения владельца", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const board = service.get("board", application.data.boardId);
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("board", board.id, { name: "Чужое имя" }, write(board)),
+      await expectAsyncRelayError(
+        async () => await service.update("board", board.id, { name: "Чужое имя" }, write(board)),
         "INVALID_ARGUMENT",
       );
 
@@ -645,18 +688,22 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("изменение имени приложения атомарно обновляет доску с её собственной ревизией", () => {
-    withKnowledgeFixture((service) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("изменение имени приложения атомарно обновляет доску с её собственной ревизией", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const initialBoard = service.get("board", application.data.boardId);
-      const renamedBoard = service.rename(
+      const renamedBoard = await service.rename(
         "board",
         initialBoard.id,
         "FRONTEND-TASKS",
         write(initialBoard),
       );
 
-      const updated = service.update(
+      const updated = await service.update(
         "application",
         application.id,
         { name: "Web-клиент" },
@@ -673,13 +720,17 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("повтор имени приложения сохраняет обе записи и поколение", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("повтор имени приложения сохраняет обе записи и поколение", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      const unchanged = service.update(
+      const unchanged = await service.update(
         "application",
         application.id,
         { name: "Web" },
@@ -692,9 +743,13 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("отказ SQLite на записи доски откатывает имя приложения, обе ревизии и поколение", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("отказ SQLite на записи доски откатывает имя приложения, обе ревизии и поколение", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const snapshot = db.list();
       const generation = db.getGeneration();
       const connection = new Database(db.path, { create: false, readwrite: true });
@@ -706,9 +761,9 @@ describe("Владение доской приложения", () => {
           BEGIN SELECT RAISE(ABORT, 'knowledge board write failure'); END;
         `);
 
-        expectRelayError(
-          () =>
-            service.update(
+        await expectAsyncRelayError(
+          async () =>
+            await service.update(
               "application",
               application.id,
               { name: "Отклонённое имя" },
@@ -725,21 +780,30 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("конфликт ключа доски откатывает новое приложение и счётчик его ключей", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Зарезервированный адрес" }, "tester");
-      service.rename("feature", feature.key, "BOARD-WEB", write(feature));
+  test("конфликт ключа доски откатывает новое приложение и счётчик его ключей", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create(
+        "feature",
+        { name: "Зарезервированный адрес" },
+        "tester",
+      );
+      await service.rename("feature", feature.key, "BOARD-WEB", write(feature));
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.create("application", { name: "Web", slug: "web", prefix: "WEB" }, "tester"),
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
+            "application",
+            { name: "Web", slug: "web", prefix: "WEB" },
+            "tester",
+          ),
         "CONFLICT",
       );
 
       expect(db.list()).toEqual(snapshot);
       expect(db.getGeneration()).toBe(generation);
-      const next = service.create("application", { name: "API", slug: "api" }, "tester");
+      const next = await service.create("application", { name: "API", slug: "api" }, "tester");
       expect(next.key).toBe("APP-1");
       expect(service.get("board", next.data.boardId).data).toMatchObject({
         applicationId: next.id,
@@ -749,26 +813,44 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("переименование приложения сохраняет предметные данные и принадлежность доски", () => {
-    withKnowledgeFixture((service) => {
-      const application = service.create("application", { name: "API", slug: "api" }, "tester");
+  test("переименование приложения сохраняет предметные данные и принадлежность доски", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const application = await service.create(
+        "application",
+        { name: "API", slug: "api" },
+        "tester",
+      );
 
-      const renamed = service.rename("application", application.key, "API", write(application));
+      const renamed = await service.rename(
+        "application",
+        application.key,
+        "API",
+        write(application),
+      );
 
       expect(renamed.data).toEqual(application.data);
       expect(service.get("board", renamed.data.boardId).data.applicationId).toBe(application.id);
     });
   });
 
-  test("изменение slug приложения отклоняется без изменения доски и адресов", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "API", slug: "api" }, "tester");
+  test("изменение slug приложения отклоняется без изменения доски и адресов", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "API", slug: "api" },
+        "tester",
+      );
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.update("application", application.id, { slug: "different" }, write(application)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.update(
+            "application",
+            application.id,
+            { slug: "different" },
+            write(application),
+          ),
         "INVALID_ARGUMENT",
       );
 
@@ -777,16 +859,21 @@ describe("Владение доской приложения", () => {
     });
   });
 
-  test("подмена владельца доски отклоняется без изменения записей", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("подмена владельца доски отклоняется без изменения записей", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const board = service.get("board", application.data.boardId);
-      const feature = service.create("feature", { name: "Чужой владелец" }, "tester");
+      const feature = await service.create("feature", { name: "Чужой владелец" }, "tester");
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("board", board.id, { applicationId: feature.id }, write(board)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.update("board", board.id, { applicationId: feature.id }, write(board)),
         "INVALID_ARGUMENT",
       );
 
@@ -799,17 +886,20 @@ describe("Владение доской приложения", () => {
 describe("Ключи, алиасы и виртуальные адреса знаний", () => {
   test.each(reservedAddresses)(
     "ключ $kind не перехватывает чужой адрес $address",
-    ({ kind, address }) => {
-      withKnowledgeFixture((service, db) => {
-        const web = service.create("application", { name: "Web", slug: "web" }, "tester");
+    async ({ kind, address }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const web = await service.create("application", { name: "Web", slug: "web" }, "tester");
         if (address === "api" || address === "API") {
-          service.create("application", { name: "API", slug: "api" }, "tester");
+          await service.create("application", { name: "API", slug: "api" }, "tester");
         }
         const entity = kind === "application" ? web : service.get("board", web.data.boardId);
         const snapshot = db.list();
         const generation = db.getGeneration();
 
-        expectRelayError(() => service.rename(kind, entity.id, address, write(entity)), "CONFLICT");
+        await expectAsyncRelayError(
+          async () => await service.rename(kind, entity.id, address, write(entity)),
+          "CONFLICT",
+        );
 
         expect(db.list()).toEqual(snapshot);
         expect(db.getGeneration()).toBe(generation);
@@ -819,12 +909,12 @@ describe("Ключи, алиасы и виртуальные адреса зна
 
   test.each(productBoardAddresses)(
     "адрес %s выбирает продуктовую доску при создании задачи",
-    (address) => {
-      withKnowledgeFixture((service, db) => {
+    async (address) => {
+      await withKnowledgeFixture(async (service, db) => {
         const board = service.get("board", "product");
         const tasks = new TasksService(db);
 
-        const task = tasks.create({ board: address, title: "Работа продукта" }, "tester");
+        const task = await tasks.create({ board: address, title: "Работа продукта" }, "tester");
 
         expect(task.data.boardId).toBe(board.id);
         expect(task.key).toStartWith("PRODUCT-");
@@ -832,13 +922,13 @@ describe("Ключи, алиасы и виртуальные адреса зна
     },
   );
 
-  test("slug выбирает приложение для участия, сохраняя пустой состав другого приложения", () => {
-    withKnowledgeFixture((service) => {
-      const web = service.create("application", { name: "Web", slug: "web" }, "tester");
-      const api = service.create("application", { name: "API", slug: "api" }, "tester");
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
+  test("slug выбирает приложение для участия, сохраняя пустой состав другого приложения", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const web = await service.create("application", { name: "Web", slug: "web" }, "tester");
+      const api = await service.create("application", { name: "API", slug: "api" }, "tester");
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
 
-      const selected = service.replaceParticipation("api", [feature.id], write(api));
+      const selected = await service.replaceParticipation("api", [feature.id], write(api));
 
       expect(selected.id).toBe(api.id);
       expect(service.list("implementation", { application: web.id })).toEqual([]);
@@ -851,27 +941,31 @@ describe("Ключи, алиасы и виртуальные адреса зна
   for (const kind of addressOwners) {
     test.each(addressReservations)(
       `создание приложения не перехватывает ${kind}: $name`,
-      ({ address, slug, prefix, retired }) => {
-        withKnowledgeFixture((service, db) => {
-          const owner = service.create("application", { name: "Web", slug: "web" }, "tester");
+      async ({ address, slug, prefix, retired }) => {
+        await withKnowledgeFixture(async (service, db) => {
+          const owner = await service.create("application", { name: "Web", slug: "web" }, "tester");
           const initial = kind === "application" ? owner : service.get("board", owner.data.boardId);
-          let entity = service.rename(kind, initial.id, address, write(initial));
+          let entity = await service.rename(kind, initial.id, address, write(initial));
           if (retired) {
-            entity = service.rename(kind, entity.id, `OWNER-${address}`, write(entity));
+            entity = await service.rename(kind, entity.id, `OWNER-${address}`, write(entity));
           }
           const snapshot = db.list();
           const generation = db.getGeneration();
 
-          expectRelayError(
-            () =>
-              service.create("application", { name: "Новое приложение", slug, prefix }, "tester"),
+          await expectAsyncRelayError(
+            async () =>
+              await service.create(
+                "application",
+                { name: "Новое приложение", slug, prefix },
+                "tester",
+              ),
             "CONFLICT",
           );
 
           expect(db.list()).toEqual(snapshot);
           expect(db.getGeneration()).toBe(generation);
           expect(service.get(kind, address).id).toBe(entity.id);
-          const next = service.create("application", { name: "API", slug: "api" }, "tester");
+          const next = await service.create("application", { name: "API", slug: "api" }, "tester");
           expect(next.key).toBe("APP-2");
           expect(service.list("board")).toHaveLength(3);
         });
@@ -881,16 +975,20 @@ describe("Ключи, алиасы и виртуальные адреса зна
 
   test.each(addressOwners)(
     "последовательное переименование %s сохраняет собственные адреса и алиасы",
-    (kind) => {
-      withKnowledgeFixture((service) => {
-        const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+    async (kind) => {
+      await withKnowledgeFixture(async (service) => {
+        const application = await service.create(
+          "application",
+          { name: "Web", slug: "web" },
+          "tester",
+        );
         let entity =
           kind === "application" ? application : service.get("board", application.data.boardId);
         const originalKey = entity.key;
 
         // Это одна цепочка возврата собственных адресов, а не независимые варианты ввода.
         for (const key of ["web", "WEB", "OTHER", "web", originalKey]) {
-          entity = service.rename(kind, entity.id, key, write(entity));
+          entity = await service.rename(kind, entity.id, key, write(entity));
 
           for (const address of ["web", "WEB", originalKey, entity.id]) {
             expect(service.get(kind, address)).toEqual(entity);
@@ -901,14 +999,18 @@ describe("Ключи, алиасы и виртуальные адреса зна
     },
   );
 
-  test.each(addressOwners)("повтор ключа %s сохраняет ревизию и поколение", (kind) => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test.each(addressOwners)("повтор ключа %s сохраняет ревизию и поколение", async (kind) => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const entity =
         kind === "application" ? application : service.get("board", application.data.boardId);
       const generation = db.getGeneration();
 
-      const unchanged = service.rename(kind, entity.id, entity.key, write(entity));
+      const unchanged = await service.rename(kind, entity.id, entity.key, write(entity));
 
       expect(unchanged).toEqual(entity);
       expect(service.get(kind, entity.id)).toEqual(entity);
@@ -916,15 +1018,15 @@ describe("Ключи, алиасы и виртуальные адреса зна
     });
   });
 
-  test("генерация ключа приложения пропускает занятый чужим prefix адрес", () => {
-    withKnowledgeFixture((service) => {
-      const application = service.create(
+  test("генерация ключа приложения пропускает занятый чужим prefix адрес", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const application = await service.create(
         "application",
         { name: "Web", slug: "web", prefix: "APP-2" },
         "tester",
       );
 
-      const next = service.create("application", { name: "API", slug: "api" }, "tester");
+      const next = await service.create("application", { name: "API", slug: "api" }, "tester");
 
       expect(next.key).toBe("APP-3");
       expect(service.get("application", "APP-2").id).toBe(application.id);
@@ -932,9 +1034,9 @@ describe("Ключи, алиасы и виртуальные адреса зна
     });
   });
 
-  test("конфликт ключа новой доски с prefix откатывает приложение, поколение и счётчик", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create(
+  test("конфликт ключа новой доски с prefix откатывает приложение, поколение и счётчик", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
         "application",
         { name: "Web", slug: "web", prefix: "BOARD-API" },
         "tester",
@@ -942,17 +1044,17 @@ describe("Ключи, алиасы и виртуальные адреса зна
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.create("application", { name: "API", slug: "api" }, "tester"),
+      await expectAsyncRelayError(
+        async () => await service.create("application", { name: "API", slug: "api" }, "tester"),
         "CONFLICT",
       );
 
       expect(db.list()).toEqual(snapshot);
       expect(db.getGeneration()).toBe(generation);
       expect(service.get("board", "BOARD-API").id).toBe(application.data.boardId);
-      expect(service.create("application", { name: "CLI", slug: "cli" }, "tester").key).toBe(
-        "APP-2",
-      );
+      expect(
+        (await service.create("application", { name: "CLI", slug: "cli" }, "tester")).key,
+      ).toBe("APP-2");
     });
   });
 });
@@ -960,17 +1062,17 @@ describe("Ключи, алиасы и виртуальные адреса зна
 describe("Типизированные ссылки между предметными областями", () => {
   test.each(documentAddressGuards)(
     "%s не позволяет перехватить типизированную цель документа ключом",
-    (boundary) => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Поиск" }, "tester");
-        const other = service.create("feature", { name: "Другая фича" }, "tester");
+    async (boundary) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Поиск" }, "tester");
+        const other = await service.create("feature", { name: "Другая фича" }, "tester");
         const target = `feature:${feature.key}`;
         const snapshot = db.list();
         const generation = db.getGeneration();
 
-        expectRelayError(() => {
+        await expectAsyncRelayError(async () => {
           if (boundary === "KnowledgeService") {
-            return service.rename("feature", other.id, target, write(other));
+            return await service.rename("feature", other.id, target, write(other));
           }
           // Намеренный обход предметного API не должен создавать неоднозначный адрес.
           return db.rename(other.id, target, other.revision, "tester");
@@ -983,21 +1085,25 @@ describe("Типизированные ссылки между предметн�
     },
   );
 
-  test("типизированные ключ и ID связывают документ с той же целью при создании и правке", () => {
-    withKnowledgeFixture((service) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const other = service.create("feature", { name: "Другая фича" }, "tester");
+  test("типизированные ключ и ID связывают документ с той же целью при создании и правке", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const other = await service.create("feature", { name: "Другая фича" }, "tester");
       const target = `feature:${feature.key}`;
-      const document = service.create(
+      const document = await service.create(
         "document",
         { name: "Материал", body: "Текст", targets: [target] },
         "tester",
       );
 
-      const linked = service.linkDocument(`document:${document.id}`, `feature:${feature.id}`, {
-        ...write(document),
-        type: "references",
-      });
+      const linked = await service.linkDocument(
+        `document:${document.id}`,
+        `feature:${feature.id}`,
+        {
+          ...write(document),
+          type: "references",
+        },
+      );
 
       expect(document.data.relations).toEqual([
         { target: { kind: "feature", id: feature.id }, type: "documents", description: "" },
@@ -1011,20 +1117,20 @@ describe("Типизированные ссылки между предметн�
     });
   });
 
-  test("чтение документа по типизированной ссылке фичи даёт INVALID_ARGUMENT", () => {
-    withKnowledgeFixture((service) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
+  test("чтение документа по типизированной ссылке фичи даёт INVALID_ARGUMENT", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
 
       expectRelayError(() => service.get("document", `feature:${feature.key}`), "INVALID_ARGUMENT");
     });
   });
 
-  test("типизированная цель задачи сохраняется как ID и задача читается по task:ID", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
+  test("типизированная цель задачи сохраняется как ID и задача читается по task:ID", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
       const tasks = new TasksService(db);
 
-      const task = tasks.create(
+      const task = await tasks.create(
         { title: "Реализовать поиск", targets: [`feature:${feature.key}`] },
         "tester",
       );
@@ -1034,12 +1140,12 @@ describe("Типизированные ссылки между предметн�
     });
   });
 
-  test("типизированная область плана разрешается в ID и план читается по work-plan:ключ", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
+  test("типизированная область плана разрешается в ID и план читается по work-plan:ключ", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
       const planning = new PlanningService(db);
 
-      const plan = planning.create(
+      const plan = await planning.create(
         "work-plan",
         {
           title: "План поиска",
@@ -1054,12 +1160,16 @@ describe("Типизированные ссылки между предметн�
     });
   });
 
-  test("типизированная ссылка плана в релизе сохраняется как постоянный ID", () => {
-    withKnowledgeFixture((_service, db) => {
+  test("типизированная ссылка плана в релизе сохраняется как постоянный ID", async () => {
+    await withKnowledgeFixture(async (_service, db) => {
       const planning = new PlanningService(db);
-      const plan = planning.create("work-plan", { title: "План", goal: "Результат" }, "tester");
+      const plan = await planning.create(
+        "work-plan",
+        { title: "План", goal: "Результат" },
+        "tester",
+      );
 
-      const release = planning.create(
+      const release = await planning.create(
         "release",
         { title: "Выпуск", version: "1.0.0", planIds: [`work-plan:${plan.id}`] },
         "tester",
@@ -1069,10 +1179,10 @@ describe("Типизированные ссылки между предметн�
     });
   });
 
-  test("чтение задачи с явным видом feature отклоняется без записи", () => {
-    withKnowledgeFixture((_service, db) => {
+  test("чтение задачи с явным видом feature отклоняется без записи", async () => {
+    await withKnowledgeFixture(async (_service, db) => {
       const tasks = new TasksService(db);
-      const task = tasks.create({ title: "Работа" }, "tester");
+      const task = await tasks.create({ title: "Работа" }, "tester");
       const generation = db.getGeneration();
 
       expectRelayError(() => tasks.get(`feature:${task.id}`), "INVALID_ARGUMENT");
@@ -1082,10 +1192,10 @@ describe("Типизированные ссылки между предметн�
     });
   });
 
-  test("чтение плана с явным видом release отклоняется без записи", () => {
-    withKnowledgeFixture((_service, db) => {
+  test("чтение плана с явным видом release отклоняется без записи", async () => {
+    await withKnowledgeFixture(async (_service, db) => {
       const planning = new PlanningService(db);
-      const plan = planning.create("work-plan", { title: "План" }, "tester");
+      const plan = await planning.create("work-plan", { title: "План" }, "tester");
       const generation = db.getGeneration();
 
       expectRelayError(() => planning.get("work-plan", `release:${plan.id}`), "INVALID_ARGUMENT");
@@ -1097,15 +1207,15 @@ describe("Типизированные ссылки между предметн�
 });
 
 describe("Реализации фич и сценариев", () => {
-  test("создание SI без FI отклоняется без изменения приложения", () => {
-    withKnowledgeFixture((service, db) => {
-      const { scenario, application } = createKnowledgeRequirements(service);
+  test("создание SI без FI отклоняется без изменения приложения", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { scenario, application } = await createKnowledgeRequirements(service);
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.create(
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
             "implementation",
             { application: application.key, target: scenario.key, title: "SI" },
             "tester",
@@ -1118,21 +1228,21 @@ describe("Реализации фич и сценариев", () => {
     });
   });
 
-  test("FI другого приложения не разрешает создание SI и не меняет состав", () => {
-    withKnowledgeFixture((service, db) => {
-      const { feature, scenario, application } = createKnowledgeRequirements(service);
-      service.create(
+  test("FI другого приложения не разрешает создание SI и не меняет состав", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { feature, scenario, application } = await createKnowledgeRequirements(service);
+      await service.create(
         "implementation",
         { application: application.id, target: feature.id, title: "FI" },
         "tester",
       );
-      const another = service.create("application", { name: "API", slug: "api" }, "tester");
+      const another = await service.create("application", { name: "API", slug: "api" }, "tester");
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.create(
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
             "implementation",
             { application: another.key, target: scenario.key, title: "SI" },
             "tester",
@@ -1145,10 +1255,10 @@ describe("Реализации фич и сценариев", () => {
     });
   });
 
-  test("переименование фичи сохраняет постоянные ссылки сценария, FI и SI", () => {
-    withKnowledgeFixture((service) => {
-      const { feature, scenario, application } = createKnowledgeRequirements(service);
-      const fi = service.create(
+  test("переименование фичи сохраняет постоянные ссылки сценария, FI и SI", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const { feature, scenario, application } = await createKnowledgeRequirements(service);
+      const fi = await service.create(
         "implementation",
         {
           application: application.id,
@@ -1159,13 +1269,13 @@ describe("Реализации фич и сценариев", () => {
         },
         "tester",
       );
-      const si = service.create(
+      const si = await service.create(
         "implementation",
         { application: application.key, target: scenario.id, title: "Поиск по имени" },
         "tester",
       );
 
-      const renamed = service.rename("feature", feature.key, "SEARCH", write(feature));
+      const renamed = await service.rename("feature", feature.key, "SEARCH", write(feature));
 
       expect(service.get("scenario", scenario.key).data.featureId).toBe(feature.id);
       expect(service.get("implementation", fi.key).data.targetId).toBe(renamed.id);
@@ -1182,11 +1292,15 @@ describe("Реализации фич и сценариев", () => {
     });
   });
 
-  test("повтор FI той же цели даёт ALREADY_EXISTS без изменения участия", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Фича" }, "tester");
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
-      service.create(
+  test("повтор FI той же цели даёт ALREADY_EXISTS без изменения участия", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
+      await service.create(
         "implementation",
         { application: application.id, target: feature.id, title: "FI" },
         "tester",
@@ -1194,9 +1308,9 @@ describe("Реализации фич и сценариев", () => {
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.create(
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
             "implementation",
             { application: application.key, target: feature.key, title: "Дубликат" },
             "tester",
@@ -1209,21 +1323,22 @@ describe("Реализации фич и сценариев", () => {
     });
   });
 
-  test("чужая реализация не принимается в состав приложения без изменения обоих владельцев", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Фича" }, "tester");
-      const owner = service.create("application", { name: "Web", slug: "web" }, "tester");
-      const implementation = service.create(
+  test("чужая реализация не принимается в состав приложения без изменения обоих владельцев", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+      const owner = await service.create("application", { name: "Web", slug: "web" }, "tester");
+      const implementation = await service.create(
         "implementation",
         { application: owner.id, target: feature.id, title: "FI" },
         "tester",
       );
-      const another = service.create("application", { name: "API", slug: "api" }, "tester");
+      const another = await service.create("application", { name: "API", slug: "api" }, "tester");
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.replaceParticipation(another.id, [implementation.id], write(another)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.replaceParticipation(another.id, [implementation.id], write(another)),
         "INVALID_ARGUMENT",
       );
 
@@ -1234,26 +1349,30 @@ describe("Реализации фич и сценариев", () => {
 });
 
 describe("Замена участия приложения", () => {
-  test("повтор пустого участия сохраняет ревизию приложения и поколение", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("повтор пустого участия сохраняет ревизию приложения и поколение", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const generation = db.getGeneration();
 
-      const unchanged = service.replaceParticipation(application.id, [], write(application));
+      const unchanged = await service.replaceParticipation(application.id, [], write(application));
 
       expect(unchanged).toEqual(application);
       expect(db.getGeneration()).toBe(generation);
     });
   });
 
-  test("тот же состав по ID и ключам реализаций сохраняет записи и поколение", () => {
-    withKnowledgeFixture((service, db) => {
+  test("тот же состав по ID и ключам реализаций сохраняет записи и поколение", async () => {
+    await withKnowledgeFixture(async (service, db) => {
       const { application, featureImplementation, scenarioImplementation } =
-        createKnowledgeParticipation(service);
+        await createKnowledgeParticipation(service);
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      const unchanged = service.replaceParticipation(
+      const unchanged = await service.replaceParticipation(
         application.id,
         [featureImplementation.id, scenarioImplementation.key],
         write(application),
@@ -1267,9 +1386,9 @@ describe("Замена участия приложения", () => {
 
   test.each(invalidParticipation)(
     "состав: $name отклоняется целиком без изменения участия",
-    ({ targets, code }) => {
-      withKnowledgeFixture((service, db) => {
-        const { feature, scenario, application } = createKnowledgeParticipation(service);
+    async ({ targets, code }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const { feature, scenario, application } = await createKnowledgeParticipation(service);
         let invalidTargets: string[];
         switch (targets) {
           case "scenario":
@@ -1285,8 +1404,9 @@ describe("Замена участия приложения", () => {
         const snapshot = db.list();
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () => service.replaceParticipation(application.key, invalidTargets, write(application)),
+        await expectAsyncRelayError(
+          async () =>
+            await service.replaceParticipation(application.key, invalidTargets, write(application)),
           code,
         );
 
@@ -1296,15 +1416,20 @@ describe("Замена участия приложения", () => {
     },
   );
 
-  test("документ вместо требования отклоняется без изменения участия приложения", () => {
-    withKnowledgeFixture((service, db) => {
-      const { application } = createKnowledgeParticipation(service);
-      const document = service.create("document", { name: "Материал", body: "Текст" }, "tester");
+  test("документ вместо требования отклоняется без изменения участия приложения", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { application } = await createKnowledgeParticipation(service);
+      const document = await service.create(
+        "document",
+        { name: "Материал", body: "Текст" },
+        "tester",
+      );
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.replaceParticipation(application.key, [document.key], write(application)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.replaceParticipation(application.key, [document.key], write(application)),
         "INVALID_ARGUMENT",
       );
 
@@ -1313,14 +1438,14 @@ describe("Замена участия приложения", () => {
     });
   });
 
-  test("снятие, редактирование и возврат участия сохраняют ID, ключи, текст и существующие связи", () => {
-    withKnowledgeFixture((service) => {
+  test("снятие, редактирование и возврат участия сохраняют ID, ключи, текст и существующие связи", async () => {
+    await withKnowledgeFixture(async (service) => {
       const {
         application,
         featureImplementation: fi,
         scenarioImplementation,
-      } = createKnowledgeParticipation(service);
-      const si = service.update(
+      } = await createKnowledgeParticipation(service);
+      const si = await service.update(
         "implementation",
         scenarioImplementation.id,
         {
@@ -1330,7 +1455,7 @@ describe("Замена участия приложения", () => {
         },
         write(scenarioImplementation),
       );
-      const document = service.create(
+      const document = await service.create(
         "document",
         {
           name: "Материалы",
@@ -1340,7 +1465,7 @@ describe("Замена участия приложения", () => {
         "tester",
       );
 
-      const inactive = service.replaceParticipation(application.key, [], write(application));
+      const inactive = await service.replaceParticipation(application.key, [], write(application));
 
       expect(service.list("implementation", { active: true })).toEqual([]);
       expect(service.get("implementation", fi.key).data.active).toBe(false);
@@ -1351,12 +1476,12 @@ describe("Замена участия приложения", () => {
         data: { ...si.data, active: false },
       });
       expect(service.get("document", document.id).data.relations).toEqual(document.data.relations);
-      const linked = service.linkDocument(document.key, si.key, {
+      const linked = await service.linkDocument(document.key, si.key, {
         ...write(document),
         type: "references",
         description: "Прежняя связь остаётся доступной",
       });
-      const edited = service.update(
+      const edited = await service.update(
         "implementation",
         si.key,
         { description: "Уточнённый снятый вклад" },
@@ -1364,7 +1489,7 @@ describe("Замена участия приложения", () => {
       );
       expect(edited.data.active).toBe(false);
 
-      const restored = service.replaceParticipation(
+      const restored = await service.replaceParticipation(
         application.key,
         [fi.key, si.id],
         write(inactive),
@@ -1381,10 +1506,10 @@ describe("Замена участия приложения", () => {
     });
   });
 
-  test("новая связь со снятой реализацией отклоняется без изменения документа", () => {
-    withKnowledgeFixture((service, db) => {
-      const { application, scenarioImplementation } = createKnowledgeParticipation(service);
-      const document = service.create(
+  test("новая связь со снятой реализацией отклоняется без изменения документа", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { application, scenarioImplementation } = await createKnowledgeParticipation(service);
+      const document = await service.create(
         "document",
         {
           name: "Материалы",
@@ -1393,13 +1518,13 @@ describe("Замена участия приложения", () => {
         },
         "tester",
       );
-      service.replaceParticipation(application.id, [], write(application));
+      await service.replaceParticipation(application.id, [], write(application));
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.linkDocument(document.key, scenarioImplementation.key, {
+      await expectAsyncRelayError(
+        async () =>
+          await service.linkDocument(document.key, scenarioImplementation.key, {
             ...write(document),
             type: "documents",
           }),
@@ -1411,29 +1536,41 @@ describe("Замена участия приложения", () => {
     });
   });
 
-  test("поздний отказ состава откатывает внешнюю транзакцию с уже созданными FI и SI", () => {
-    withKnowledgeFixture((service, db) => {
-      const { feature, scenario, application } = createKnowledgeRequirements(service);
+  test("поздний отказ состава откатывает batch с уже рассчитанными FI и SI", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { feature, scenario, application } = await createKnowledgeRequirements(service);
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          db.transaction(() => {
-            const selected = service.replaceParticipation(
-              application.key,
-              [feature.key, scenario.key],
-              write(application),
-            );
-            expect(service.list("implementation")).toHaveLength(2);
-            service.replaceParticipation(application.id, [scenario.key], write(selected));
-          }),
+      await expectAsyncRelayError(
+        async () =>
+          await new BatchService(db).execute(
+            {
+              version: 1,
+              operations: [
+                {
+                  op: "application.participation.replace",
+                  as: "selected",
+                  ref: application.key,
+                  ifRevision: application.revision,
+                  input: { targets: [feature.key, scenario.key] },
+                },
+                {
+                  op: "application.participation.replace",
+                  ref: application.id,
+                  ifRevision: { $revision: "selected" },
+                  input: { targets: [scenario.key] },
+                },
+              ],
+            },
+            { actor: "tester", operationKey: "invalid-participation" },
+          ),
         "INVALID_ARGUMENT",
       );
 
       expect(db.list()).toEqual(snapshot);
       expect(db.getGeneration()).toBe(generation);
-      service.replaceParticipation(
+      await service.replaceParticipation(
         application.key,
         [feature.key, scenario.key],
         write(application),
@@ -1447,8 +1584,8 @@ describe("Замена участия приложения", () => {
 });
 
 describe("Разделы документов", () => {
-  test("проект без разделов возвращает пустой состав и свою ревизию", () => {
-    withKnowledgeFixture((service) => {
+  test("проект без разделов возвращает пустой состав и свою ревизию", async () => {
+    await withKnowledgeFixture((service) => {
       const project = service.get("project");
 
       const sections = service.documentSections();
@@ -1457,9 +1594,9 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("созданный раздел возвращается с ревизией проекта-владельца", () => {
-    withKnowledgeFixture((service) => {
-      const project = service.changeSection(
+  test("созданный раздел возвращается с ревизией проекта-владельца", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
@@ -1477,29 +1614,29 @@ describe("Разделы документов", () => {
 
   test.each(sectionMoves)(
     "перемещение $name меняет порядок, сохраняя ID и имена разделов",
-    ({ initialSections, before, expected }) => {
-      withKnowledgeFixture((service) => {
+    async ({ initialSections, before, expected }) => {
+      await withKnowledgeFixture(async (service) => {
         let project = service.get("project");
         for (const section of initialSections) {
-          project = service.changeSection("create", { ...section }, write(project));
+          project = await service.changeSection("create", { ...section }, write(project));
         }
 
-        const moved = service.changeSection("move", { id: "rules", before }, write(project));
+        const moved = await service.changeSection("move", { id: "rules", before }, write(project));
 
         expect(moved.data.documentSections).toEqual([...expected]);
       });
     },
   );
 
-  test("переименование раздела сохраняет его ID и положение", () => {
-    withKnowledgeFixture((service) => {
-      const project = service.changeSection(
+  test("переименование раздела сохраняет его ID и положение", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
 
-      const updated = service.changeSection(
+      const updated = await service.changeSection(
         "update",
         { id: "guides", name: "Инструкции" },
         write(project),
@@ -1509,20 +1646,20 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("удаление раздела проецирует null без переписывания документа и его метаданных", () => {
-    withKnowledgeFixture((service, db) => {
-      const project = service.changeSection(
+  test("удаление раздела проецирует null без переписывания документа и его метаданных", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
-      const document = service.create(
+      const document = await service.create(
         "document",
         { name: "Как искать", body: "# Поиск\n\nПоследний абзац.\n", sectionId: "guides" },
         "tester",
       );
 
-      service.changeSection("remove", { id: "guides" }, write(project));
+      await service.changeSection("remove", { id: "guides" }, write(project));
 
       const effective = service.get("document", document.key);
       expect(effective).toEqual({ ...document, data: { ...document.data, sectionId: null } });
@@ -1531,19 +1668,23 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("ID удалённого раздела не переиспользуется и сохраняет проект без записи", () => {
-    withKnowledgeFixture((service, db) => {
-      const created = service.changeSection(
+  test("ID удалённого раздела не переиспользуется и сохраняет проект без записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const created = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
-      const removed = service.changeSection("remove", { id: "guides" }, write(created));
+      const removed = await service.changeSection("remove", { id: "guides" }, write(created));
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.changeSection("create", { id: "guides", name: "Другой раздел" }, write(removed)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.changeSection(
+            "create",
+            { id: "guides", name: "Другой раздел" },
+            write(removed),
+          ),
         "ALREADY_EXISTS",
       );
 
@@ -1552,17 +1693,18 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("перемещение раздела перед собой отклоняется без изменения порядка и ревизии", () => {
-    withKnowledgeFixture((service, db) => {
-      const project = service.changeSection(
+  test("перемещение раздела перед собой отклоняется без изменения порядка и ревизии", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const project = await service.changeSection(
         "create",
         { id: "rules", name: "Правила" },
         write(service.get("project")),
       );
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.changeSection("move", { id: "rules", before: "rules" }, write(project)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.changeSection("move", { id: "rules", before: "rules" }, write(project)),
         "INVALID_ARGUMENT",
       );
 
@@ -1571,23 +1713,24 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("явное назначение удалённого раздела отклоняется без изменения документа", () => {
-    withKnowledgeFixture((service, db) => {
-      const project = service.changeSection(
+  test("явное назначение удалённого раздела отклоняется без изменения документа", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
-      const document = service.create(
+      const document = await service.create(
         "document",
         { name: "Документ", body: "Текст", sectionId: "guides" },
         "tester",
       );
-      service.changeSection("remove", { id: "guides" }, write(project));
+      await service.changeSection("remove", { id: "guides" }, write(project));
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("document", document.id, { sectionId: "guides" }, write(document)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.update("document", document.id, { sectionId: "guides" }, write(document)),
         "NOT_FOUND",
       );
 
@@ -1596,21 +1739,21 @@ describe("Разделы документов", () => {
     });
   });
 
-  test("несвязанная правка документа сохраняет удалённый ID в хранении и null в проекции", () => {
-    withKnowledgeFixture((service, db) => {
-      const project = service.changeSection(
+  test("несвязанная правка документа сохраняет удалённый ID в хранении и null в проекции", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const project = await service.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(service.get("project")),
       );
-      const document = service.create(
+      const document = await service.create(
         "document",
         { name: "Документ", body: "Текст", sectionId: "guides" },
         "tester",
       );
-      service.changeSection("remove", { id: "guides" }, write(project));
+      await service.changeSection("remove", { id: "guides" }, write(project));
 
-      const updated = service.update(
+      const updated = await service.update(
         "document",
         document.id,
         { summary: "Новая аннотация" },
@@ -1624,10 +1767,10 @@ describe("Разделы документов", () => {
 });
 
 describe("Связи документов", () => {
-  test("чтение связей возвращает проверенные цели и ревизию документа", () => {
-    withKnowledgeFixture((service) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const document = service.create(
+  test("чтение связей возвращает проверенные цели и ревизию документа", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const document = await service.create(
         "document",
         { name: "Инструкция", body: "Текст", targets: [feature.id] },
         "tester",
@@ -1645,10 +1788,10 @@ describe("Связи документов", () => {
     });
   });
 
-  test("два типа связи сохраняют полные пояснения и находятся по переименованной цели", () => {
-    withKnowledgeFixture((service) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const document = service.create(
+  test("два типа связи сохраняют полные пояснения и находятся по переименованной цели", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const document = await service.create(
         "document",
         {
           name: "Исследование",
@@ -1660,17 +1803,17 @@ describe("Связи документов", () => {
         "tester",
       );
       const description = "## Зачем читать\n\nПолное основание 🧭.\n";
-      const documented = service.linkDocument(document.key, feature.key, {
+      const documented = await service.linkDocument(document.key, feature.key, {
         ...write(document),
         type: "documents",
         description,
       });
-      const linked = service.linkDocument(document.key, feature.id, {
+      const linked = await service.linkDocument(document.key, feature.id, {
         ...write(documented),
         type: "references",
         description: "Другое отношение",
       });
-      const renamed = service.rename("feature", feature.id, "LOOKUP", write(feature));
+      const renamed = await service.rename("feature", feature.id, "LOOKUP", write(feature));
 
       const documents = service.list("document", {
         target: renamed.key,
@@ -1694,20 +1837,20 @@ describe("Связи документов", () => {
 
   test.each(invalidRelationInputs)(
     "отношение: $name отклоняется без изменения документа",
-    ({ input }) => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Поиск" }, "tester");
-        const document = service.create(
+    async ({ input }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Поиск" }, "tester");
+        const document = await service.create(
           "document",
           { name: "Материал", body: "Текст", targets: [feature.key] },
           "tester",
         );
         const generation = db.getGeneration();
 
-        expectRelayError(() => {
+        await expectAsyncRelayError(async () => {
           switch (input) {
             case "duplicate":
-              return service.update(
+              return await service.update(
                 "document",
                 document.id,
                 {
@@ -1719,14 +1862,14 @@ describe("Связи документов", () => {
                 write(document),
               );
             case "unknown-field":
-              return service.update(
+              return await service.update(
                 "document",
                 document.id,
                 { relations: [{ target: feature.key, typo: true }] },
                 write(document),
               );
             case "kind-mismatch":
-              return service.update(
+              return await service.update(
                 "document",
                 document.id,
                 { relations: [{ target: { kind: "document", id: `feature:${feature.key}` } }] },
@@ -1741,13 +1884,17 @@ describe("Связи документов", () => {
     },
   );
 
-  test("ссылка документа на себя отклоняется без изменения отношений", () => {
-    withKnowledgeFixture((service, db) => {
-      const document = service.create("document", { name: "Материал", body: "Текст" }, "tester");
+  test("ссылка документа на себя отклоняется без изменения отношений", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const document = await service.create(
+        "document",
+        { name: "Материал", body: "Текст" },
+        "tester",
+      );
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.linkDocument(document.key, document.id, write(document)),
+      await expectAsyncRelayError(
+        async () => await service.linkDocument(document.key, document.id, write(document)),
         "INVALID_ARGUMENT",
       );
 
@@ -1756,10 +1903,10 @@ describe("Связи документов", () => {
     });
   });
 
-  test("открепление одной пары цель и тип сохраняет другое отношение к той же цели", () => {
-    withKnowledgeFixture((service) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const document = service.create(
+  test("открепление одной пары цель и тип сохраняет другое отношение к той же цели", async () => {
+    await withKnowledgeFixture(async (service) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const document = await service.create(
         "document",
         {
           name: "Материал",
@@ -1772,7 +1919,7 @@ describe("Связи документов", () => {
         "tester",
       );
 
-      const unlinked = service.linkDocument(document.key, feature.key, {
+      const unlinked = await service.linkDocument(document.key, feature.key, {
         ...write(document),
         remove: true,
         type: "references",
@@ -1788,10 +1935,10 @@ describe("Связи документов", () => {
     });
   });
 
-  test("повтор существующей связи без описания сохраняет её текст, ревизию и поколение", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const document = service.create(
+  test("повтор существующей связи без описания сохраняет её текст, ревизию и поколение", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const document = await service.create(
         "document",
         {
           name: "Материал",
@@ -1802,7 +1949,7 @@ describe("Связи документов", () => {
       );
       const generation = db.getGeneration();
 
-      const unchanged = service.linkDocument(document.key, feature.key, write(document));
+      const unchanged = await service.linkDocument(document.key, feature.key, write(document));
 
       expect(unchanged).toEqual(document);
       expect(db.getGeneration()).toBe(generation);
@@ -1813,13 +1960,13 @@ describe("Связи документов", () => {
 describe("Исходная ревизия знаний при конкурентной записи", () => {
   test.each(featureRevisionOperations)(
     "%s: устаревшая ревизия до no-op сохраняет запись другого соединения",
-    (operation) => {
-      withKnowledgeFixture((service, db) => {
-        const initial = service.create("feature", { name: "Поиск" }, "tester");
+    async (operation) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const initial = await service.create("feature", { name: "Поиск" }, "tester");
         const connection = ProjectDatabase.open(db.path);
         try {
           const second = new KnowledgeService(connection);
-          const current = second.update(
+          const current = await second.update(
             "feature",
             initial.id,
             { name: "Новый поиск" },
@@ -1827,11 +1974,16 @@ describe("Исходная ревизия знаний при конкурент
           );
           const generation = db.getGeneration();
 
-          expectRelayError(() => {
+          await expectAsyncRelayError(async () => {
             if (operation === "update") {
-              return service.update("feature", initial.id, { name: "Новый поиск" }, write(initial));
+              return await service.update(
+                "feature",
+                initial.id,
+                { name: "Новый поиск" },
+                write(initial),
+              );
             }
-            return service.rename("feature", initial.id, initial.key, write(initial));
+            return await service.rename("feature", initial.id, initial.key, write(initial));
           }, "REVISION_CONFLICT");
 
           expect(service.get("feature", initial.id)).toEqual(current);
@@ -1843,21 +1995,25 @@ describe("Исходная ревизия знаний при конкурент
     },
   );
 
-  test("устаревшая ревизия документа отклоняет повтор связи после чужого commit", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const initial = service.create("document", { name: "Материал", body: "Текст" }, "tester");
+  test("устаревшая ревизия документа отклоняет повтор связи после чужого commit", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const initial = await service.create(
+        "document",
+        { name: "Материал", body: "Текст" },
+        "tester",
+      );
       const connection = ProjectDatabase.open(db.path);
       try {
-        const linked = new KnowledgeService(connection).linkDocument(
+        const linked = await new KnowledgeService(connection).linkDocument(
           initial.id,
           feature.id,
           write(initial),
         );
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () => service.linkDocument(initial.id, feature.id, write(initial)),
+        await expectAsyncRelayError(
+          async () => await service.linkDocument(initial.id, feature.id, write(initial)),
           "REVISION_CONFLICT",
         );
 
@@ -1869,20 +2025,24 @@ describe("Исходная ревизия знаний при конкурент
     });
   });
 
-  test("повтор связи с актуальной ревизией после чужого commit остаётся no-op", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Поиск" }, "tester");
-      const initial = service.create("document", { name: "Материал", body: "Текст" }, "tester");
+  test("повтор связи с актуальной ревизией после чужого commit остаётся no-op", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Поиск" }, "tester");
+      const initial = await service.create(
+        "document",
+        { name: "Материал", body: "Текст" },
+        "tester",
+      );
       const connection = ProjectDatabase.open(db.path);
       try {
-        const linked = new KnowledgeService(connection).linkDocument(
+        const linked = await new KnowledgeService(connection).linkDocument(
           initial.id,
           feature.id,
           write(initial),
         );
         const generation = db.getGeneration();
 
-        const unchanged = service.linkDocument(initial.id, feature.id, write(linked));
+        const unchanged = await service.linkDocument(initial.id, feature.id, write(linked));
 
         expect(unchanged).toEqual(linked);
         expect(db.getGeneration()).toBe(generation);
@@ -1892,12 +2052,12 @@ describe("Исходная ревизия знаний при конкурент
     });
   });
 
-  test("устаревшая ревизия приложения отклоняет повтор состава после чужого commit", () => {
-    withKnowledgeFixture((service, db) => {
-      const { feature, scenario, application } = createKnowledgeRequirements(service);
+  test("устаревшая ревизия приложения отклоняет повтор состава после чужого commit", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { feature, scenario, application } = await createKnowledgeRequirements(service);
       const connection = ProjectDatabase.open(db.path);
       try {
-        new KnowledgeService(connection).replaceParticipation(
+        await new KnowledgeService(connection).replaceParticipation(
           application.id,
           [feature.id, scenario.id],
           write(application),
@@ -1910,9 +2070,9 @@ describe("Исходная ревизия знаний при конкурент
         const snapshot = db.list();
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () =>
-            service.replaceParticipation(
+        await expectAsyncRelayError(
+          async () =>
+            await service.replaceParticipation(
               application.id,
               [featureImplementation.id, scenarioImplementation.key],
               write(application),
@@ -1928,20 +2088,21 @@ describe("Исходная ревизия знаний при конкурент
     });
   });
 
-  test("устаревшая ревизия проекта отклоняет повтор имени раздела после чужого commit", () => {
-    withKnowledgeFixture((service, db) => {
+  test("устаревшая ревизия проекта отклоняет повтор имени раздела после чужого commit", async () => {
+    await withKnowledgeFixture(async (service, db) => {
       const initial = service.get("project");
       const connection = ProjectDatabase.open(db.path);
       try {
-        const current = new KnowledgeService(connection).changeSection(
+        const current = await new KnowledgeService(connection).changeSection(
           "create",
           { id: "rules", name: "Правила" },
           write(initial),
         );
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () => service.changeSection("update", { id: "rules", name: "Правила" }, write(initial)),
+        await expectAsyncRelayError(
+          async () =>
+            await service.changeSection("update", { id: "rules", name: "Правила" }, write(initial)),
           "REVISION_CONFLICT",
         );
 
@@ -1955,24 +2116,24 @@ describe("Исходная ревизия знаний при конкурент
 });
 
 describe("Владельцы полей и валидация публичных операций знаний", () => {
-  test.each(foreignKindOperations)("%s чужого вида отклоняется без записи", (operation) => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Фича" }, "tester");
+  test.each(foreignKindOperations)("%s чужого вида отклоняется без записи", async (operation) => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(() => {
+      await expectAsyncRelayError(async () => {
         switch (operation) {
           case "create":
-            return service.create("task", { name: "Обход" }, "tester");
+            return await service.create("task", { name: "Обход" }, "tester");
           case "get":
             return service.get("work-plan", feature.id);
           case "list":
             return service.list("release");
           case "update":
-            return service.update("task", feature.id, {}, write(feature));
+            return await service.update("task", feature.id, {}, write(feature));
           case "rename":
-            return service.rename("work-checkpoint", feature.id, "OTHER", write(feature));
+            return await service.rename("work-checkpoint", feature.id, "OTHER", write(feature));
         }
       }, "INVALID_ARGUMENT");
 
@@ -1981,24 +2142,33 @@ describe("Владельцы полей и валидация публичных
     });
   });
 
-  test.each(invalidFeatureInputs)("фича: $name отклоняется без создания записи", ({ input }) => {
-    withKnowledgeFixture((service, db) => {
-      const generation = db.getGeneration();
+  test.each(invalidFeatureInputs)(
+    "фича: $name отклоняется без создания записи",
+    async ({ input }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const generation = db.getGeneration();
 
-      expectRelayError(() => service.create("feature", input, "tester"), "INVALID_ARGUMENT");
+        await expectAsyncRelayError(
+          async () => await service.create("feature", input, "tester"),
+          "INVALID_ARGUMENT",
+        );
 
-      expect(service.list("feature")).toEqual([]);
-      expect(db.getGeneration()).toBe(generation);
-    });
-  });
+        expect(service.list("feature")).toEqual([]);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
 
   test.each(invalidDocumentInputs)(
     "документ: $name отклоняется без создания записи",
-    ({ input }) => {
-      withKnowledgeFixture((service, db) => {
+    async ({ input }) => {
+      await withKnowledgeFixture(async (service, db) => {
         const generation = db.getGeneration();
 
-        expectRelayError(() => service.create("document", input, "tester"), "INVALID_ARGUMENT");
+        await expectAsyncRelayError(
+          async () => await service.create("document", input, "tester"),
+          "INVALID_ARGUMENT",
+        );
 
         expect(service.list("document")).toEqual([]);
         expect(db.getGeneration()).toBe(generation);
@@ -2006,14 +2176,14 @@ describe("Владельцы полей и валидация публичных
     },
   );
 
-  test("одновременные feature и featureId при создании сценария отклоняются без записи", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Фича" }, "tester");
+  test("одновременные feature и featureId при создании сценария отклоняются без записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.create(
+      await expectAsyncRelayError(
+        async () =>
+          await service.create(
             "scenario",
             { name: "Сценарий", feature: feature.id, featureId: feature.id },
             "tester",
@@ -2028,18 +2198,19 @@ describe("Владельцы полей и валидация публичных
 
   test.each(immutableScenarioFields)(
     "прямая правка %s сценария отклоняется без изменения связи",
-    (field) => {
-      withKnowledgeFixture((service, db) => {
-        const feature = service.create("feature", { name: "Фича" }, "tester");
-        const scenario = service.create(
+    async (field) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Фича" }, "tester");
+        const scenario = await service.create(
           "scenario",
           { name: "Сценарий", feature: feature.id },
           "tester",
         );
         const generation = db.getGeneration();
 
-        expectRelayError(
-          () => service.update("scenario", scenario.id, { [field]: feature.id }, write(scenario)),
+        await expectAsyncRelayError(
+          async () =>
+            await service.update("scenario", scenario.id, { [field]: feature.id }, write(scenario)),
           "INVALID_ARGUMENT",
         );
 
@@ -2049,11 +2220,15 @@ describe("Владельцы полей и валидация публичных
     },
   );
 
-  test("прямая правка active реализации отклоняется без изменения участия", () => {
-    withKnowledgeFixture((service, db) => {
-      const feature = service.create("feature", { name: "Фича" }, "tester");
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
-      const implementation = service.create(
+  test("прямая правка active реализации отклоняется без изменения участия", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
+      const implementation = await service.create(
         "implementation",
         { application: application.id, target: feature.id, title: "FI" },
         "tester",
@@ -2061,9 +2236,9 @@ describe("Владельцы полей и валидация публичных
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.update(
+      await expectAsyncRelayError(
+        async () =>
+          await service.update(
             "implementation",
             implementation.id,
             { active: false },
@@ -2077,14 +2252,18 @@ describe("Владельцы полей и валидация публичных
     });
   });
 
-  test("прямая замена implementationIds приложения отклоняется без изменения владельца", () => {
-    withKnowledgeFixture((service, db) => {
-      const application = service.create("application", { name: "Web", slug: "web" }, "tester");
+  test("прямая замена implementationIds приложения отклоняется без изменения владельца", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () =>
-          service.update(
+      await expectAsyncRelayError(
+        async () =>
+          await service.update(
             "application",
             application.id,
             { implementationIds: [] },
@@ -2098,13 +2277,14 @@ describe("Владельцы полей и валидация публичных
     });
   });
 
-  test("прямая замена documentSections проекта отклоняется без изменения разделов", () => {
-    withKnowledgeFixture((service, db) => {
+  test("прямая замена documentSections проекта отклоняется без изменения разделов", async () => {
+    await withKnowledgeFixture(async (service, db) => {
       const project = service.get("project");
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.update("project", undefined, { documentSections: [] }, write(project)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.update("project", undefined, { documentSections: [] }, write(project)),
         "INVALID_ARGUMENT",
       );
 
@@ -2113,14 +2293,14 @@ describe("Владельцы полей и валидация публичных
     });
   });
 
-  test("неизвестный фильтр фич даёт INVALID_ARGUMENT", () => {
-    withKnowledgeFixture((service) => {
+  test("неизвестный фильтр фич даёт INVALID_ARGUMENT", async () => {
+    await withKnowledgeFixture((service) => {
       expectRelayError(() => service.list("feature", { unknown: "value" }), "INVALID_ARGUMENT");
     });
   });
 
-  test("строковый active в фильтре реализаций даёт INVALID_ARGUMENT", () => {
-    withKnowledgeFixture((service) => {
+  test("строковый active в фильтре реализаций даёт INVALID_ARGUMENT", async () => {
+    await withKnowledgeFixture((service) => {
       expectRelayError(
         () => service.list("implementation", { active: "false" }),
         "INVALID_ARGUMENT",
@@ -2128,14 +2308,15 @@ describe("Владельцы полей и валидация публичных
     });
   });
 
-  test("сценарий без фичи не создаёт первое участие приложения", () => {
-    withKnowledgeFixture((service, db) => {
-      const { scenario, application } = createKnowledgeRequirements(service);
+  test("сценарий без фичи не создаёт первое участие приложения", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { scenario, application } = await createKnowledgeRequirements(service);
       const snapshot = db.list();
       const generation = db.getGeneration();
 
-      expectRelayError(
-        () => service.replaceParticipation(application.id, [scenario.id], write(application)),
+      await expectAsyncRelayError(
+        async () =>
+          await service.replaceParticipation(application.id, [scenario.id], write(application)),
         "INVALID_ARGUMENT",
       );
 

@@ -8,9 +8,9 @@ import type { CorruptedTaskFixture, TaskWithCriterion } from "./helpers/task-fix
 /**
  * Создаёт задачу с одним критерием через Core; соединение принадлежит вызывающей fixture.
  */
-function createTaskWithCriterion(db: ProjectDatabase): TaskWithCriterion {
+async function createTaskWithCriterion(db: ProjectDatabase): Promise<TaskWithCriterion> {
   const tasks = new TasksService(db);
-  const task = tasks.create(
+  const task = await tasks.create(
     { title: "Работа", acceptanceCriteria: [{ title: "Проверено" }] },
     "fixture",
   );
@@ -25,8 +25,8 @@ function createTaskWithCriterion(db: ProjectDatabase): TaskWithCriterion {
  * Намеренно записывает null вместо dependencies через Storage для проверки отказа декодера.
  * Возвращает состояние после повреждения; соединение не закрывает и не скрывает записи.
  */
-function createCorruptedDependencies(db: ProjectDatabase): CorruptedTaskFixture {
-  const task = new TasksService(db).create({ title: "Повреждение" }, "fixture");
+async function createCorruptedDependencies(db: ProjectDatabase): Promise<CorruptedTaskFixture> {
+  const task = await new TasksService(db).create({ title: "Повреждение" }, "fixture");
   db.update(
     { ...task, revision: task.revision + 1, data: { ...task.data, dependencies: null } },
     task.revision,
@@ -68,7 +68,7 @@ describe("Задачи через CLI", () => {
   test("выполнение критерия делает задачу готовой к завершению без перевода в done", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { task, criterion } = cli.withDatabase(project, createTaskWithCriterion);
+      const { task, criterion } = await cli.withDatabase(project, createTaskWithCriterion);
       const initialProgress = objectValue((await cli.success(["task", "progress", task.key])).data);
 
       const checked = await cli.entity([
@@ -101,9 +101,9 @@ describe("Задачи через CLI", () => {
   test("перевод готовой задачи в done сохраняет колонку и вычисляемое завершение", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const checked = cli.withDatabase(project, (db) => {
-        const { task, criterion } = createTaskWithCriterion(db);
-        return new TasksService(db).criterion(
+      const checked = await cli.withDatabase(project, async (db) => {
+        const { task, criterion } = await createTaskWithCriterion(db);
+        return await new TasksService(db).criterion(
           task.id,
           "complete",
           { id: criterion.id },
@@ -137,11 +137,11 @@ describe("Задачи через CLI", () => {
   test("назначение родителя сохраняет его ID и добавляет задачу в прямых детей", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { parent, child } = cli.withDatabase(project, (db) => {
+      const { parent, child } = await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
         return {
-          parent: tasks.create({ title: "Родитель" }, "fixture"),
-          child: tasks.create({ title: "Ребёнок" }, "fixture"),
+          parent: await tasks.create({ title: "Родитель" }, "fixture"),
+          child: await tasks.create({ title: "Ребёнок" }, "fixture"),
         };
       });
 
@@ -166,11 +166,11 @@ describe("Задачи через CLI", () => {
   test("снятие родителя очищает связь и исключает задачу из прямых детей", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { parent, child } = cli.withDatabase(project, (db) => {
+      const { parent, child } = await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
-        const parent = tasks.create({ title: "Родитель" }, "fixture");
-        const child = tasks.create({ title: "Ребёнок" }, "fixture");
-        const assigned = tasks.setParent(child.id, parent.id, {
+        const parent = await tasks.create({ title: "Родитель" }, "fixture");
+        const child = await tasks.create({ title: "Ребёнок" }, "fixture");
+        const assigned = await tasks.setParent(child.id, parent.id, {
           actor: "fixture",
           ifRevision: child.revision,
         });
@@ -197,11 +197,11 @@ describe("Задачи через CLI", () => {
   test("добавление зависимости по ключу сохраняет её ID и показывает блокер прогресса", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { task, dependency } = cli.withDatabase(project, (db) => {
+      const { task, dependency } = await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
         return {
-          task: tasks.create({ title: "Работа" }, "fixture"),
-          dependency: tasks.create({ title: "Предварительная работа" }, "fixture"),
+          task: await tasks.create({ title: "Работа" }, "fixture"),
+          dependency: await tasks.create({ title: "Предварительная работа" }, "fixture"),
         };
       });
 
@@ -232,7 +232,7 @@ describe("Задачи через CLI", () => {
   test("чтение повреждённых зависимостей возвращает CORRUPT_DATA без изменения записи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { damaged, generation } = cli.withDatabase(project, createCorruptedDependencies);
+      const { damaged, generation } = await cli.withDatabase(project, createCorruptedDependencies);
 
       const error = await cli.error(["task", "dependency", "list", damaged.key], 1);
 
@@ -247,7 +247,7 @@ describe("Задачи через CLI", () => {
   test("обновление задачи с повреждёнными зависимостями возвращает CORRUPT_DATA без записи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { damaged, generation } = cli.withDatabase(project, createCorruptedDependencies);
+      const { damaged, generation } = await cli.withDatabase(project, createCorruptedDependencies);
 
       const error = await cli.error(
         [
@@ -273,8 +273,9 @@ describe("Задачи через CLI", () => {
   test("добавленный комментарий читается целиком без изменения ревизии задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const task = cli.withDatabase(project, (db) =>
-        new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
+      const task = await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
       );
       const body = "# Полный текст комментария\n\n    точный отступ\n";
 
@@ -312,8 +313,9 @@ describe("Задачи через CLI", () => {
   test("неизвестное поле JSON комментария отклоняется без его публикации", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const task = cli.withDatabase(project, (db) =>
-        new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
+      const task = await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({ title: "Обсуждение" }, "fixture"),
       );
 
       const error = await cli.error(

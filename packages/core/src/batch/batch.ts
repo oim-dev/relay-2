@@ -1,162 +1,265 @@
 import {
   RelayError,
-  validateActor,
   type BatchItemResult,
-  type BatchOptions,
   type BatchResult,
+  type CommandOptions,
+  type CommandStore,
+  type CommandReceipt,
+  type NamedCommand,
+  type EntityKind,
+  type VersionedCommandEntity,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
-import { EntityReader } from "../projections/entity-reader";
+import type { ProjectStore } from "@relay/storage";
+import { CommandContext } from "../commands/command-context";
+import { commandMessages } from "../commands/command.messages";
+import { finalizeCommandResult } from "../commands/command-result";
+import { readVersionedEntity } from "../commands/command-versioned-read";
+import type { CommandResultMaterial } from "../commands/command-result.types";
+import type { CommandExecutorCompatibility } from "../commands/command-context.types";
+import { decodeKnowledge } from "../knowledge/knowledge-data";
+import { indexDocumentSections } from "../knowledge/document-sections";
 import { batchActions } from "./batch-catalog";
 import { BatchStepContext } from "./batch-context";
-import { batchFields, batchText, invalidBatch, parseBatch, prepareBatchInput } from "./batch-input";
+import { batchText, invalidBatch, parseBatch, prepareBatchInput } from "./batch-input";
+import { parseCommandAddresses, prepareCommandOptions } from "./batch-options";
 import { decodeBatchReceipt } from "./batch-receipt";
 import { batchMessages } from "./batch.messages";
 import { locateBatchError } from "./batch-errors";
 import type { BatchExecutionState, BatchStep } from "./batch.types";
 
 /**
- * Служебное исключение только для успешной проверки: результат извлекается после отката SQLite.
+ * Единственный async исполнитель single/batch: явные загрузки, чистые предметные эффекты,
+ * разреженное промежуточное состояние и один guarded commit. Никогда не повторяет мутацию.
  */
-class CheckedBatch extends Error {
-  /* Подготовленный результат, который не сохранялся и не резервировал ID либо ключи. */
-  readonly result: BatchResult;
+export class CommandExecutor {
+  /* Асинхронный command port, без доступа предметных calculators к локальной БД. */
+  private readonly store: CommandStore;
+  /* Только локальное чтение первоначальной квитанции для совместимого getResult. */
+  private readonly local: ProjectStore | undefined;
+  /* Совместимость старых точечных TypeScript фасадов; NamedCommand по умолчанию следует batch-каталогу. */
+  private readonly compatibility: CommandExecutorCompatibility;
 
   /**
-   * Передаёт результат за границу rollback, сохраняя идентичность исключения в Storage.
+   * Принимает самостоятельный async port либо локальную БД с предоставленным ею портом.
    */
-  constructor(result: BatchResult) {
-    super();
-    this.result = result;
-  }
-}
-
-/**
- * Выполняет предметные операции одного проекта атомарно через существующие сервисы Core.
- * Журнал и изменения входят в одну внешнюю транзакцию; формат вывода не входит в идентичность.
- */
-export class BatchService {
-  /* Открытое соединение проекта; временем жизни и закрытием владеет приложение. */
-  private readonly db: ProjectDatabase;
-
-  /**
-   * Подключает исполнитель к выбранной БД, не открывая дополнительных ресурсов.
-   */
-  constructor(db: ProjectDatabase) {
-    this.db = db;
+  constructor(
+    source: ProjectStore | CommandStore,
+    compatibility: CommandExecutorCompatibility = {},
+  ) {
+    this.compatibility = { legacyFacade: compatibility.legacyFacade === true };
+    if ("commands" in source) {
+      this.local = source;
+      this.store = source.commands;
+    } else {
+      this.local = undefined;
+      this.store = source;
+    }
   }
 
   /**
-   * Нормализует исходный JSON без БД, затем выполняет 1..200 действий v1 в объявленном порядке.
-   * Применение требует operationKey. Повтор нормализованного запроса с тем же автором возвращает
-   * первоначальную квитанцию до разрешения адресов и CAS; иное содержание даёт CONFLICT.
-   * check выполняет тот же сценарий с rollback, без квитанции и расхода ключа.
+   * Передаёт одну команду тому же массивному исполнителю без обязательной receipt.
    */
-  execute(input: unknown, options: BatchOptions): BatchResult {
-    batchFields(options, ["actor", "operationKey", "check"], "options");
-    const actor = validateActor(options.actor);
-    if (options.check !== undefined && typeof options.check !== "boolean") {
-      invalidBatch(batchMessages.check, "options.check");
+  execute(input: NamedCommand, options: CommandOptions): Promise<BatchResult> {
+    return this.executeCommands([input], options);
+  }
+
+  /**
+   * Выполняет последовательный массив через общий каталог; receipt необязательна для API.
+   */
+  executeCommands(
+    commands: readonly NamedCommand[],
+    options: CommandOptions,
+  ): Promise<BatchResult> {
+    return this.runCommands({ version: 1, operations: commands }, options, false);
+  }
+
+  /**
+   * Читает сохраняемый агрегат с отдельным переносимым token для expectedVersion того же владельца.
+   */
+  readVersioned(ref: string, kind?: EntityKind): Promise<VersionedCommandEntity> {
+    return readVersionedEntity(this.store, ref, kind);
+  }
+
+  /**
+   * Читает сохранённый результат раньше адресных/CAS проверок, не актуализируя его из карточек.
+   */
+  private async receipt(
+    operationKey: string,
+    requestJson: string,
+  ): Promise<BatchResult | undefined> {
+    const loaded = await this.store.load({
+      anchor: null,
+      selectors: [{ kind: "receipt", operationKey }],
+    });
+    const observation = loaded.observations[0];
+    if (observation?.kind !== "receipt") {
+      throw new RelayError("CORRUPT_DATA", commandMessages.observation);
     }
-    const key =
-      options.operationKey === undefined
-        ? null
-        : batchText(options.operationKey, "options.operationKey");
-    if (!options.check && key === null) {
-      invalidBatch(batchMessages.operationKey, "options.operationKey");
+    if (observation.receipt === null) {
+      return undefined;
     }
+    return this.replay(observation.receipt, requestJson);
+  }
+
+  /**
+   * Проверяет идентичность исходного запроса и восстанавливает неизменяемую квитанцию.
+   */
+  private replay(receipt: CommandReceipt, requestJson: string): BatchResult {
+    if (receipt.requestJson !== requestJson) {
+      throw new RelayError("CONFLICT", batchMessages.keyConflict, 4, {
+        operationKey: receipt.operationKey,
+      });
+    }
+    return decodeBatchReceipt(receipt.resultJson, receipt.operationKey, this.store.projectId);
+  }
+
+  /**
+   * Нормализует вход, готовит все шаги вне writer lock и один раз применяет точный план.
+   * Проверка использует тот же SQL-путь с rollback; конкурентный отказ не обновляет CAS.
+   */
+  protected async runCommands(
+    input: unknown,
+    options: CommandOptions,
+    requireKey: boolean,
+  ): Promise<BatchResult> {
+    const selected = prepareCommandOptions(options, requireKey);
+    const { actor, operationKey: key, check } = selected;
     const prepared = prepareBatchInput(input, actor);
-    const { requestJson } = prepared;
+    if (!check && key !== null) {
+      const previous = await this.receipt(key, prepared.requestJson);
+      if (previous !== undefined) {
+        return previous;
+      }
+    }
+    const expectedAddresses = parseCommandAddresses(selected.addresses);
+    const commands = new CommandContext(
+      this.store,
+      actor,
+      new Date().toISOString(),
+      expectedAddresses,
+    );
     try {
-      return this.db.transaction(() => {
-        if (!options.check && key !== null) {
-          const previous = this.db.getBatchReceipt(key);
-          if (previous !== undefined) {
-            if (previous.requestJson !== requestJson) {
-              throw new RelayError("CONFLICT", batchMessages.keyConflict, 4, { operationKey: key });
-            }
-            return decodeBatchReceipt(previous.resultJson, key, this.db.projectId);
-          }
-        }
-        const operations = parseBatch(prepared, batchActions);
-        const result = this.runSteps(operations, actor, key, options.check === true);
-        if (options.check) {
-          throw new CheckedBatch(result);
-        }
-        if (key !== null) {
-          this.db.insertBatchReceipt({
-            operationKey: key,
-            requestJson,
-            resultJson: JSON.stringify(result),
+      for (const expected of expectedAddresses) {
+        const identity = await commands.resolve(expected.ref);
+        if (identity.id !== expected.expectedId) {
+          throw new RelayError("ADDRESS_CHANGED", commandMessages.addressChanged, 4, {
+            ref: expected.ref,
+            expectedId: expected.expectedId,
+            actualId: identity.id,
           });
         }
-        return result;
+      }
+      const legacyFacade = !requireKey && this.compatibility.legacyFacade === true;
+      const operations = parseBatch(prepared, batchActions, legacyFacade);
+      const state: BatchExecutionState = {
+        aliases: new Map(),
+        authorizedOwners: new Set(),
+        touched: new Set(),
+      };
+      const items: BatchItemResult[] = [];
+      for (const [index, step] of operations.entries()) {
+        items.push(await this.runStep(commands, step, index, actor, state, legacyFacade));
+      }
+      const contentOwners = new Set<string>();
+      const commentOwners = new Set<string>();
+      for (const transition of commands.transitions()) {
+        for (const effect of transition.effects) {
+          state.touched.add(effect.kind === "entity" ? effect.after.id : effect.taskId);
+          if (effect.kind === "entity") {
+            contentOwners.add(effect.after.id);
+          } else {
+            commentOwners.add(effect.taskId);
+          }
+        }
+      }
+      const freshTaskIds = [...commentOwners].filter((id) => !contentOwners.has(id));
+      const records = commands.materialize([...state.touched]);
+      const project = records.some((record) => record.kind === "document")
+        ? commands.materialize([commands.projectId])[0]
+        : undefined;
+      const material: CommandResultMaterial = {
+        projectId: commands.projectId,
+        operationKey: key,
+        check,
+        items,
+        records,
+        freshTaskIds,
+        sections:
+          project === undefined
+            ? undefined
+            : indexDocumentSections(decodeKnowledge(project, "project")),
+      };
+      const committed = await this.store.commit({
+        projectId: commands.projectId,
+        replicaId: commands.replicaId(),
+        actor,
+        timestamp: commands.timestamp,
+        check,
+        guards: commands.expected(),
+        transitions: commands.transitions(),
+        counters: commands.counters(),
+        receipt:
+          key === null || check ? null : { operationKey: key, requestJson: prepared.requestJson },
+        commentTaskIds: records
+          .filter((record) => record.kind === "task")
+          .map((record) => record.id),
+        freshTaskIds,
+        finalize: (facts) => finalizeCommandResult(material, facts),
       });
+      return committed.kind === "replayed"
+        ? this.replay(committed.receipt, prepared.requestJson)
+        : committed.result;
     } catch (error) {
-      if (error instanceof CheckedBatch) {
-        return error.result;
+      if (
+        !check &&
+        key !== null &&
+        error instanceof RelayError &&
+        [
+          "COMMAND_CONTEXT_CHANGED",
+          "REVISION_CONFLICT",
+          "VERSION_CONFLICT",
+          "ADDRESS_CHANGED",
+          "ADDRESS_GUARD_REQUIRED",
+          "NOT_FOUND",
+        ].includes(error.code)
+      ) {
+        const previous = await this.receipt(key, prepared.requestJson);
+        if (previous !== undefined) {
+          return previous;
+        }
       }
       throw error;
     }
   }
 
   /**
-   * Читает неизменяемую первоначальную квитанцию без текущих адресов/ревизий, в том числе после reopen.
-   * Отсутствие ключа даёт NOT_FOUND; повреждение сохранённого результата — CORRUPT_DATA.
+   * Сохраняет компактный результат именно этого шага и авторизует его локальное имя.
    */
-  getResult(operationKey: string): BatchResult {
-    const key = batchText(operationKey, "operationKey");
-    const receipt = this.db.getBatchReceipt(key);
-    if (receipt === undefined) {
-      throw new RelayError("NOT_FOUND", batchMessages.missingReceipt, 3, { operationKey: key });
-    }
-    return decodeBatchReceipt(receipt.resultJson, key, this.db.projectId);
-  }
-
-  /**
-   * Выполняет шаги под внешней транзакцией, затем читает только затронутые записи один раз.
-   * Сервисы сами управляют графами своего шага; итоговая проекция разделов общая и уже актуальная.
-   */
-  private runSteps(
-    operations: readonly BatchStep[],
-    actor: string,
-    operationKey: string | null,
-    check: boolean,
-  ): BatchResult {
-    const state: BatchExecutionState = {
-      aliases: new Map(),
-      authorizedOwners: new Set(),
-      touched: new Set(),
-    };
-    const items = operations.map((step, index) => this.runStep(step, index, actor, state));
-    const reader = new EntityReader(this.db);
-    const entities = this.db.getMany([...state.touched]).map((record) => reader.decode(record));
-    return {
-      operationKey,
-      status: check ? "checked" : "committed",
-      replayed: false,
-      items,
-      entities,
-    };
-  }
-
-  /**
-   * Дополняет успешный предметный результат координатами и разрешает его локальное имя для следующих шагов.
-   * Любой отказ покидает внешнюю транзакцию с координатами операции и исходной причиной.
-   */
-  private runStep(
+  private async runStep(
+    commands: CommandContext,
     step: BatchStep,
     index: number,
     actor: string,
     state: BatchExecutionState,
-  ): BatchItemResult {
+    implicitCreation: boolean,
+  ): Promise<BatchItemResult> {
     try {
       const action = batchActions.get(step.op);
       if (action === undefined) {
         invalidBatch(batchMessages.unknownOperation, `operations[${index}].op`);
       }
-      const context = new BatchStepContext(this.db, step, action, index, actor, state);
-      const outcome = action.execute(context);
+      commands.beginStep(index, step.op);
+      const context = new BatchStepContext(
+        commands,
+        step,
+        action,
+        index,
+        actor,
+        state,
+        implicitCreation,
+      );
+      await context.prepare();
+      const outcome = await action.execute(context);
       const item: BatchItemResult = {
         ...outcome.primary,
         index,
@@ -166,11 +269,50 @@ export class BatchService {
         outputs: outcome.outputs,
       };
       if (step.as !== null) {
-        state.aliases.set(step.as, item);
+        state.aliases.set(step.as, structuredClone(item));
       }
+      commands.endStep(outcome);
       return item;
     } catch (error) {
       throw locateBatchError(error, index, step.op);
     }
   }
+
+  /**
+   * Читает первоначальную receipt локально и синхронно; общий async read port здесь не обещается.
+   */
+  getResult(operationKey: string): BatchResult {
+    const key = batchText(operationKey, "operationKey");
+    if (this.local === undefined) {
+      throw new RelayError("INVALID_ARGUMENT", commandMessages.unavailable, 2);
+    }
+    const receipt = this.local.getBatchReceipt(key);
+    if (receipt === undefined) {
+      throw new RelayError("NOT_FOUND", batchMessages.missingReceipt, 3, { operationKey: key });
+    }
+    return decodeBatchReceipt(receipt.resultJson, key, this.store.projectId);
+  }
+}
+
+/**
+ * Совместимая v1 оболочка единого исполнителя; apply требует явный operationKey.
+ */
+export class BatchService extends CommandExecutor {
+  /**
+   * Выполняет прежний batch-контракт асинхронно с теми же правилами локальных ссылок и первого CAS.
+   */
+  override execute(input: unknown, options: CommandOptions): Promise<BatchResult> {
+    return this.runCommands(input, options, true);
+  }
+}
+
+/**
+ * Функциональный вход единственного исполнителя для любой реализации async command port.
+ */
+export function executeCommands(
+  store: CommandStore,
+  commands: readonly NamedCommand[],
+  options: CommandOptions,
+): Promise<BatchResult> {
+  return new CommandExecutor(store).executeCommands(commands, options);
 }

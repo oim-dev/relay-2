@@ -30,6 +30,7 @@ import {
   references,
   scope,
   text,
+  uniqueList,
 } from "./planning-validation";
 
 export { planFields, releaseFields } from "./planning.constants";
@@ -70,6 +71,37 @@ export function parsePlanFields(input: unknown): Partial<WorkPlanFields> {
     result.scope = scope(fields.scope);
   }
   return result;
+}
+
+/**
+ * Проверяет вход команды до async адресации. CLI допускает строковую ссылку scope;
+ * строгий parsePlanFields по-прежнему принимает только предметные объекты {kind,id}.
+ * Пропуски массивов, неизвестные поля и undefined не теряются при упаковке single-команды.
+ */
+export function parsePlanCommandInput(input: unknown): Readonly<Record<string, unknown>> {
+  const value = object(input, planFields);
+  const { scope: entries, ...fields } = value;
+  const parsed = parsePlanFields(fields);
+  if (!Object.hasOwn(value, "scope")) {
+    return { ...parsed };
+  }
+  const checked = uniqueList(
+    entries,
+    "scope",
+    planningLimits.scopeEntries,
+    (entry) => {
+      if (typeof entry === "string") {
+        return reference(entry, "scope");
+      }
+      const [target] = scope([entry]);
+      if (target === undefined) {
+        invalid(planningMessages.missingScope);
+      }
+      return target;
+    },
+    (entry) => (typeof entry === "string" ? entry : entry.id),
+  );
+  return { ...parsed, scope: checked };
 }
 
 /**

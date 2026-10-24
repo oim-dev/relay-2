@@ -17,6 +17,26 @@ describe("Однократное чтение знаний в адаптере C
         const project = cli.createProject();
         const initial = cli.withDatabase(project, (db) => new KnowledgeService(db).get(kind));
         const read = spyOn(ProjectDatabase.prototype, "get");
+        const originalOpen = ProjectDatabase.open;
+        const restoreLoads: (() => void)[] = [];
+        let fullOwnerLoads = 0;
+        const open = spyOn(ProjectDatabase, "open").mockImplementation((path) => {
+          const database = originalOpen.call(ProjectDatabase, path);
+          const load = database.commands.load.bind(database.commands);
+          const observed = spyOn(database.commands, "load").mockImplementation(async (request) => {
+            const loaded = await load(request);
+            for (const observation of loaded.observations) {
+              if (observation.kind === "records") {
+                fullOwnerLoads += observation.records.filter(
+                  (record) => record.id === initial.id,
+                ).length;
+              }
+            }
+            return loaded;
+          });
+          restoreLoads.push(() => observed.mockRestore());
+          return database;
+        });
         try {
           const renamed = await cli.entity([
             kind,
@@ -32,8 +52,14 @@ describe("Однократное чтение знаний в адаптере C
             revision: initial.revision + 1,
             data: initial.data,
           });
-          expect(read).toHaveBeenCalledTimes(1);
+          // Полная карточка теперь загружается command port, а не legacy ProjectDatabase.get.
+          expect(read).not.toHaveBeenCalled();
+          expect(fullOwnerLoads).toBe(1);
         } finally {
+          for (const restore of restoreLoads) {
+            restore();
+          }
+          open.mockRestore();
           read.mockRestore();
         }
         expect((await cli.entity([kind, "get"])).key).toBe("PASSPORT-RENAMED");
@@ -47,16 +73,16 @@ describe("Однократное чтение знаний в адаптере C
   test("страница участия получает приложение и его ревизию без повторного чтения карточки", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const expected = cli.withDatabase(project, (db) => {
+      const expected = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const first = knowledge.create("feature", { name: "Поиск" }, "fixture");
-        const second = knowledge.create("feature", { name: "Каталог" }, "fixture");
-        const application = knowledge.create(
+        const first = await knowledge.create("feature", { name: "Поиск" }, "fixture");
+        const second = await knowledge.create("feature", { name: "Каталог" }, "fixture");
+        const application = await knowledge.create(
           "application",
           { name: "Витрина", slug: "web" },
           "fixture",
         );
-        const owner = knowledge.replaceParticipation(application.id, [first.id, second.id], {
+        const owner = await knowledge.replaceParticipation(application.id, [first.id, second.id], {
           actor: "fixture",
           ifRevision: application.revision,
         });

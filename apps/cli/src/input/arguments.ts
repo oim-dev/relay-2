@@ -7,6 +7,7 @@ import {
   MIN_PAGE_SIZE,
 } from "../pagination/pagination.constants";
 import type { InputFields } from "./arguments.types";
+import { CliUsageError } from "../errors/errors";
 
 /**
  * Описывает строковый параметр; обязательность проверяет Gunshi до выполнения команды.
@@ -81,8 +82,31 @@ export function integer(
   };
 }
 
+/**
+ * Принимает непрозрачный токен дословно; пустая строка не является переносимым предусловием.
+ */
+export function versionToken(description: string, name = "expected-version"): ArgSchema {
+  return {
+    type: "custom",
+    description,
+    /**
+     * Проверяет только непустоту, не интерпретируя формат или содержимое token.
+     */
+    parse: (value: string): string => {
+      if (!value.trim()) {
+        throw new CliUsageError(argumentMessages.invalidVersionToken(name));
+      }
+      return value;
+    },
+  };
+}
+
+export const expectedVersionArgs: Args = {
+  "expected-version": versionToken(argumentMessages.expectedVersion),
+};
 export const revisionArgs: Args = {
-  "if-revision": { ...integer(argumentMessages.revision, 1), required: true },
+  "if-revision": integer(argumentMessages.revision, 1),
+  ...expectedVersionArgs,
 };
 export const pageArgs: Args = {
   limit: {

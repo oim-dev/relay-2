@@ -4,11 +4,12 @@ import { renderPage } from "./pages";
 import { renderConfiguration, renderOverview } from "./project";
 import { renderEntityRead } from "./reads";
 import { terminalText } from "./terminal";
+import { renderGitSyncStatus } from "./git-sync";
 
 /**
- * Оборачивает данные предметного сценария без изменения формы и без вывода в потоки.
+ * Оборачивает завершённые данные предметного сценария без изменения формы; Promise нужно ожидать до вызова.
  */
-export function result(data: unknown): Result {
+export function result<T>(data: T & (T extends PromiseLike<unknown> ? never : unknown)): Result {
   return { data };
 }
 
@@ -22,8 +23,11 @@ export function renderResult(
   format: string,
   presentation?: TextPresentation,
 ): string {
+  if (result.silent) {
+    return "";
+  }
   if (format === "json") {
-    const { failure, ...payload } = result;
+    const { failure, silent: _silent, ...payload } = result;
     const error = failure && {
       code: failure.code,
       message: failure.message,
@@ -31,8 +35,11 @@ export function renderResult(
     };
     return JSON.stringify({ ok: !failure, ...payload, ...(error ? { error } : {}) });
   }
+  if (presentation === "git-sync-status") {
+    return terminalText(renderGitSyncStatus(result.data));
+  }
   if (presentation === "entity-read") {
-    return terminalText(renderEntityRead(result.data));
+    return terminalText(renderEntityRead(result.data, result.meta?.versions));
   }
   if (presentation === "configuration") {
     return terminalText(renderConfiguration(result));

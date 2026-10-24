@@ -3,7 +3,7 @@ import {
   type EntityRecord,
   type PlanningCompositionPageRequest,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { entityMessages } from "../entities/entity.messages";
 
 /**
@@ -13,7 +13,7 @@ import { entityMessages } from "../entities/entity.messages";
  * исчезновение уже проверенной записи считается CORRUPT_DATA.
  */
 export function readCompositionWindow(
-  db: ProjectDatabase,
+  db: ProjectStore,
   ids: readonly string[],
   kind: "task" | "work-plan",
   request: Readonly<PlanningCompositionPageRequest>,

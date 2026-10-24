@@ -21,7 +21,7 @@ export interface BinaryOptions {
   /* Текст либо исходные байты stdin с EOF; отсутствие сохраняет openStdin либо закрытый ввод. */
   readonly stdin?: string | Uint8Array;
   /* Минимальная подготовка проекта через Runtime/Core до запуска процесса. */
-  readonly prepare?: (directory: string) => void;
+  readonly prepare?: (directory: string) => void | Promise<void>;
   /* Необязательный подкаталог артефактов для согласованного запуска группы проверок. */
   readonly artifactGroup?: string;
 }

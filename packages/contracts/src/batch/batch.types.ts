@@ -110,7 +110,7 @@ export interface BatchOperationDescription {
   readonly description: string;
   /* Требование к верхнеуровневому ref; singleton не принимает ref. */
   readonly ref: "required" | "none";
-  /* Владелец обязательного ifRevision; null у создания и независимого комментария. */
+  /* Владелец обязательного ifRevision либо expectedVersion; null у создания и независимого комментария. */
   readonly revisionOwner: string | null;
   /* Единственные допустимые поля input; обязательность и значения определяет предметный ввод. */
   readonly inputFields: readonly string[];

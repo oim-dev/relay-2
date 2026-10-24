@@ -7,14 +7,17 @@ import type { BatchAddressField, BatchObject } from "./batch.types";
  * Обходит один объявленный путь; * относится только к массиву, а не произвольным полям JSON.
  * Структурированные target проверяются своим вторым путём target.id, без замены всего объекта.
  */
-function resolvePath(
+async function resolvePath(
   value: unknown,
   segments: readonly string[],
   field: BatchAddressField,
   path: string,
   context: BatchStepContext,
-): unknown {
+): Promise<unknown> {
   if (value === undefined || value === null) {
+    if (value === null && segments.length === 0) {
+      context.commands.target(path, null);
+    }
     return value;
   }
   if (segments.length === 0) {
@@ -33,7 +36,11 @@ function resolvePath(
     if (!Array.isArray(value)) {
       return value;
     }
-    return value.map((item, index) => resolvePath(item, rest, field, `${path}[${index}]`, context));
+    const result: unknown[] = [];
+    for (const [index, item] of value.entries()) {
+      result.push(await resolvePath(item, rest, field, `${path}[${index}]`, context));
+    }
+    return result;
   }
   if (segment === undefined || typeof value !== "object" || Array.isArray(value)) {
     return value;
@@ -48,7 +55,13 @@ function resolvePath(
       : field;
   return {
     ...object,
-    [segment]: resolvePath(object[segment], rest, selectedField, `${path}.${segment}`, context),
+    [segment]: await resolvePath(
+      object[segment],
+      rest,
+      selectedField,
+      `${path}.${segment}`,
+      context,
+    ),
   };
 }
 
@@ -56,14 +69,14 @@ function resolvePath(
  * Подставляет только объявленные адреса, сохраняя Markdown, пользовательские строки и прочие объекты.
  * Повреждённую форму массива/структуры оставляет предметному декодеру без молчаливого исправления.
  */
-export function resolveBatchInput(
+export async function resolveBatchInput(
   input: BatchObject,
   fields: readonly BatchAddressField[],
   context: BatchStepContext,
-): Readonly<Record<string, unknown>> {
+): Promise<Readonly<Record<string, unknown>>> {
   let result: unknown = input;
   for (const field of fields) {
-    result = resolvePath(result, field.path.split("."), field, "input", context);
+    result = await resolvePath(result, field.path.split("."), field, "input", context);
   }
   return batchObject(result, context.path("input"));
 }

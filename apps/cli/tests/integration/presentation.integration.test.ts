@@ -53,11 +53,11 @@ describe("Подключение предметных макетов CLI", () =>
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const body = "\n## Обсуждение\n\n    код  \n";
-      const { task, comments } = cli.withDatabase(project, (db) => {
+      const { task, comments } = await cli.withDatabase(project, async (db) => {
         const tasks = new TasksService(db);
-        const task = tasks.create({ title: "Обсуждаемая работа" }, "fixture");
-        tasks.comment(task.id, body, "writer-1");
-        tasks.comment(task.id, "Следующая страница", "writer-2");
+        const task = await tasks.create({ title: "Обсуждаемая работа" }, "fixture");
+        await tasks.comment(task.id, body, "writer-1");
+        await tasks.comment(task.id, "Следующая страница", "writer-2");
         return { task, comments: tasks.comments(task.id) };
       });
 
@@ -84,17 +84,17 @@ describe("Подключение предметных макетов CLI", () =>
   test("session tree сохраняет ID родителя за пределами страницы и завершает выдачу честно", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { root, child } = cli.withDatabase(project, (db) => {
+      const { root, child } = await cli.withDatabase(project, async (db) => {
         const history = new HistoryService(db);
-        const started = history.start({ title: "Общая работа" }, "agent");
+        const started = await history.start({ title: "Общая работа" }, "agent");
         const runId = stringValue(started.data.currentRunId);
-        const intent = history.checkpoint(
+        const intent = await history.checkpoint(
           started.id,
           "open",
           { runId, title: "Намерение", body: "Делегировать проверку" },
           { actor: "agent", ifRevision: started.revision },
         );
-        const child = history.transition(
+        const child = await history.transition(
           intent.id,
           "fork",
           { runId, title: "Дочерняя проверка" },
@@ -128,8 +128,8 @@ describe("Подключение предметных макетов CLI", () =>
   test("overview сохраняет глобальную сводку при ограниченной карте и не меняет JSON", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { items, ...overview } = cli.withDatabase(project, (db) => {
-        new KnowledgeService(db).create(
+      const { items, ...overview } = await cli.withDatabase(project, async (db) => {
+        await new KnowledgeService(db).create(
           "document",
           { name: "Инструкция", body: "Полный документ" },
           "agent",

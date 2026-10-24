@@ -184,7 +184,7 @@ describe("Метаданные полей атомарного пакета", ()
     },
   );
 
-  test("scope, targetRevision и operator сохраняют формы batch вместо строк CLI и произвольного JSON", () => {
+  test("scope, целевые предусловия и operator сохраняют формы batch", () => {
     const commands = createProgram(helpRuntime).options.subCommands;
 
     const metadata = BATCH_OPERATIONS.map((operation) =>
@@ -199,6 +199,11 @@ describe("Метаданные полей атомарного пакета", ()
     expect(revision.format).toBe('number | {"$revision":string}');
     expect(revision.description).toContain("положительное целое число");
     expect(revision.description).toContain("целевому плану");
+    const targetVersion = field(metadata, "plan.stage.task.transfer", "targetVersion");
+    expect(targetVersion.format).toBe("string");
+    expect(targetVersion.description).toContain("aggregateVersion целевого плана targetPlan");
+    expect(targetVersion.description).toContain("альтернативно targetRevision или вместе с ним");
+    expect(command(commands, "plan.stage.task.transfer").args?.["target-version"]).toBeDefined();
     const operator = field(metadata, "session.start", "operator");
     expect(operator.format).toBe("JSON-объект | null");
     expect(operator.description).toContain("name?:string|null,email?:string|null,source:string");
@@ -300,6 +305,11 @@ describe("Самодостаточная справка одной операц�
         'ifRevision: positive integer | {"$revision":string} — обязательно',
       );
       expect(product).toContain("владелец: product");
+      expect(product).toContain(
+        "expectedVersion: string — обязательно, если ifRevision не передан",
+      );
+      expect(product).toContain("versions.aggregateVersion");
+      expect(product).toContain("readVersionedEntity(db.commands, ref, kind?)");
       const document = await operationHelp("document.create");
       expect(document).toContain('documentStatus: enum ("draft" | "active" | "archived")');
       expect(document).toContain("pinned: boolean —");
@@ -313,13 +323,27 @@ describe("Самодостаточная справка одной операц�
       expect(await operationHelp("task.parent.clear")).toContain(
         "input: {} — пустой объект, полей нет",
       );
-      expect(await operationHelp("plan.stage.task.transfer")).toContain(
-        'targetRevision: number | {"$revision":string}',
-      );
+      const transfer = await operationHelp("plan.stage.task.transfer");
+      expect(transfer).toContain('targetRevision: number | {"$revision":string}');
+      expect(transfer).toContain("targetVersion: string");
       expect(product).not.toContain("повторяйте параметр");
       expect(open).not.toHaveBeenCalled();
     } finally {
       open.mockRestore();
     }
+  });
+
+  test("общая batch help объясняет переносимый токен и обе формы предусловия предметной команды", async () => {
+    const batch = await invokeIsolatedCli(["batch", "--help"]);
+    const subject = await invokeIsolatedCli(["document", "update", "--help"]);
+
+    expect(batch).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(batch.stdout).toContain("передайте ifRevision либо expectedVersion");
+    expect(batch.stdout).toContain("можно передать оба, тогда проверяются оба");
+    expect(batch.stdout).toContain("versions.aggregateVersion");
+    expect(batch.stdout).toContain("CommandExecutor.readVersioned");
+    expect(subject).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(subject.stdout).toContain("--if-revision");
+    expect(subject.stdout).toContain("--expected-version");
   });
 });

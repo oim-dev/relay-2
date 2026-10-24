@@ -8,8 +8,9 @@ import {
   historyOperatorSources,
   type HistoryCheckpointAction,
   type HistoryOperator,
-  type WriteOptions,
+  type CommandWriteOptions,
 } from "@relay/contracts";
+import { expectedCommandVersion } from "../commands/command-write";
 import type {
   HistoryCheckpointValues,
   HistoryConnection,
@@ -137,11 +138,24 @@ function operator(value: unknown): HistoryOperator | null {
 }
 
 /**
- * Проверяет автора общим правилом и положительную ожидаемую ревизию именно сессии.
+ * Проверяет автора и исходные условия публичной записи сессии без чтения состояния.
+ * Version-only сохраняет отсутствие numeric CAS; при двух условиях проверяется также число.
+ * Отсутствие обоих token и ifRevision сохраняет прежний INVALID_INPUT.
  */
-export function historyWriteOptions(value: unknown): WriteOptions {
-  const input = object(value, ["actor", "ifRevision"], historyInputMessages.writeOptionsLabel);
+export function historyWriteOptions(
+  value: unknown,
+  inheritedVersion?: unknown,
+): CommandWriteOptions {
+  const input = object(
+    value,
+    ["actor", "ifRevision", "expectedVersion"],
+    historyInputMessages.writeOptionsLabel,
+  );
   const actor = validateActor(input.actor);
+  const expectedVersion = expectedCommandVersion(input.expectedVersion, inheritedVersion);
+  if (input.ifRevision === undefined && expectedVersion !== undefined) {
+    return { actor, expectedVersion };
+  }
   if (
     typeof input.ifRevision !== "number" ||
     !Number.isSafeInteger(input.ifRevision) ||
@@ -149,7 +163,11 @@ export function historyWriteOptions(value: unknown): WriteOptions {
   ) {
     invalidHistoryInput(historyInputMessages.revisionRequired);
   }
-  return { actor, ifRevision: input.ifRevision };
+  return {
+    actor,
+    ifRevision: input.ifRevision,
+    ...(expectedVersion === undefined ? {} : { expectedVersion }),
+  };
 }
 
 /**

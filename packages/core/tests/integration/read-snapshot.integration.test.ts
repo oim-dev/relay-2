@@ -7,24 +7,24 @@ import { TasksService } from "../../src/tasks/tasks";
 import { entityWriteOptions, withEntityDatabase } from "./helpers/entity-fixture";
 
 describe("Предметное чтение при активном писателе", () => {
-  test("удерживаемая запись оставляет прежний снимок доступным всем предметным чтениям", () => {
-    withEntityDatabase((writer) => {
+  test("удерживаемая запись оставляет прежний снимок доступным всем предметным чтениям", async () => {
+    await withEntityDatabase(async (writer) => {
       const knowledge = new KnowledgeService(writer);
       const tasks = new TasksService(writer);
       const planning = new PlanningService(writer);
       const history = new HistoryService(writer);
-      const document = knowledge.create(
+      const document = await knowledge.create(
         "document",
         { name: "Правила", body: "До записи" },
         "human",
       );
-      const task = tasks.create({ title: "Работа" }, "human");
-      const initialPlan = planning.create(
+      const task = await tasks.create({ title: "Работа" }, "human");
+      const initialPlan = await planning.create(
         "work-plan",
         { title: "План", goal: "Проверить работу" },
         "human",
       );
-      const stagedPlan = planning.stage(
+      const stagedPlan = await planning.stage(
         initialPlan.id,
         "create",
         { title: "Этап" },
@@ -34,24 +34,31 @@ describe("Предметное чтение при активном писате
       if (!stage) {
         throw new Error("Подготовка плана не создала этап");
       }
-      const plan = planning.stageTask(
+      const plan = await planning.stageTask(
         stagedPlan.id,
         stage.id,
         task.id,
         false,
         entityWriteOptions(stagedPlan, "human"),
       );
-      const session = history.start({ title: "Проверка" }, "agent");
+      const session = await history.start({ title: "Проверка" }, "agent");
       const generation = writer.getGeneration();
 
       writer.transaction(() => {
-        knowledge.update(
-          "document",
-          document.id,
-          { body: "После записи" },
-          entityWriteOptions(document, "human"),
+        // Техническая запись удерживает реальный SQLite lock синхронно: предметные
+        // async writers загружают контекст до commit и не вызываются внутри transaction.
+        writer.update(
+          {
+            ...document,
+            revision: document.revision + 1,
+            data: { ...document.data, body: "После записи" },
+          },
+          document.revision,
         );
-        tasks.move(task.id, { column: "done" }, entityWriteOptions(task, "human"));
+        writer.update(
+          { ...task, revision: task.revision + 1, data: { ...task.data, column: "done" } },
+          task.revision,
+        );
 
         // Читатель открывается уже при write-lock. BEGIN IMMEDIATE в любом из чтений
         // дал бы STORAGE_BUSY; незавершённая запись должна остаться невидимой в WAL.

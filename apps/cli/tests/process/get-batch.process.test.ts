@@ -7,7 +7,7 @@ import { invokeBinary } from "./cli-process";
 /**
  * Создаёт проект и одну запись через Runtime/Core; все соединения закрыты до запуска бинарника.
  */
-function prepareProject(directory: string): void {
+async function prepareProject(directory: string): Promise<void> {
   const project = initializeProject({
     cwd: directory,
     home: directory,
@@ -16,7 +16,7 @@ function prepareProject(directory: string): void {
   });
   const db = ProjectDatabase.open(project.databasePath);
   try {
-    new KnowledgeService(db).create(
+    await new KnowledgeService(db).create(
       "document",
       { name: "Исходный", body: "# Полный текст\n" },
       "fixture",

@@ -9,12 +9,7 @@ import {
   type EntityRecord,
   type WriteOptions,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
-import { EntityService } from "../entities/entities";
-import { KnowledgeService } from "../knowledge/knowledge";
-import { TasksService } from "../tasks/tasks";
-import { PlanningService } from "../planning/planning";
-import { HistoryService } from "../history/history";
+import type { CommandContext } from "../commands/command-context";
 import { batchReference, batchRevision, batchText, invalidBatch } from "./batch-input";
 import { batchMessages } from "./batch.messages";
 import { resolveBatchInput } from "./batch-references";
@@ -34,55 +29,54 @@ export function batchIdentity(record: BatchRevisionOwner): BatchRevisionOwner {
 }
 
 /**
- * Контекст одного шага в общей транзакции. Сервисы используют то же соединение;
- * разрешение ссылок и проверка владельца CAS явны в предметном адаптере.
+ * Контекст одного шага подготовки: explicit loaders используют общий command context,
+ * pure calculators получают значения. Сохранением единственного плана владеет executor.
  */
 export class BatchStepContext {
-  /* Соединение общей транзакции, принадлежащее вызывающему приложению. */
-  readonly db: ProjectDatabase;
-  /* Существующий предметный владелец знаний. */
-  readonly knowledge: KnowledgeService;
-  /* Существующий предметный владелец задач и их графов. */
-  readonly tasks: TasksService;
-  /* Существующий предметный владелец планирования. */
-  readonly planning: PlanningService;
-  /* Существующий предметный владелец истории. */
-  readonly history: HistoryService;
+  /* Явные async загрузки, выделение метаданных и разреженный overlay. */
+  readonly commands: CommandContext;
   /* Исходная оболочка шага с явно переданной ревизией. */
   readonly step: BatchStep;
   /* Проверяемая предметным сервисом граница ввода с раскрытыми адресными полями. */
-  readonly input: Readonly<Record<string, unknown>>;
+  input: Readonly<Record<string, unknown>>;
   /* Общий автор пакета. */
   readonly actor: string;
   /* Индекс операции для диагностики и разрешения путей. */
   readonly index: number;
   /* Состояние локальных результатов только текущего пакета. */
   private readonly state: BatchExecutionState;
-  /* Общий механизм адресации, без записи сырых данных. */
-  private readonly entities: EntityService;
+  /* Совместимость точечного фасада: conditional-create, singleton ref и literal acceptedSessionIds. */
+  readonly implicitCreation: boolean;
+  /* Адресные поля единственного описателя действия. */
+  private readonly action: BatchActionDescriptor;
 
   /**
    * Создаёт адаптер без открытия БД и раскрывает только объявленные адресные поля input.
    */
   constructor(
-    db: ProjectDatabase,
+    commands: CommandContext,
     step: BatchStep,
     action: BatchActionDescriptor,
     index: number,
     actor: string,
     state: BatchExecutionState,
+    implicitCreation = false,
   ) {
-    this.db = db;
+    this.commands = commands;
     this.step = step;
     this.index = index;
     this.actor = actor;
     this.state = state;
-    this.entities = new EntityService(db);
-    this.knowledge = new KnowledgeService(db);
-    this.tasks = new TasksService(db);
-    this.planning = new PlanningService(db);
-    this.history = new HistoryService(db);
-    this.input = resolveBatchInput(step.input, action.addresses, this);
+    this.implicitCreation = implicitCreation;
+    this.action = action;
+    this.input = step.input;
+  }
+
+  /**
+   * Разрешает только объявленные адресные позиции до предметного loader.
+   */
+  async prepare(): Promise<void> {
+    this.input = await resolveBatchInput(this.step.input, this.action.addresses, this);
   }
 
   /**
@@ -97,7 +91,11 @@ export class BatchStepContext {
    * Строковый адрес самостоятельной сущности разрешается стандартным resolver без чтения тела.
    * Вложенный ID проверяется владельцем предметного состава, а не пространством entity_refs.
    */
-  address(value: unknown, field: string, kinds: readonly BatchResultKind[] = []): string {
+  async address(
+    value: unknown,
+    field: string,
+    kinds: readonly BatchResultKind[] = [],
+  ): Promise<string> {
     try {
       const reference = batchReference(value, this.path(field));
       if (typeof reference !== "string") {
@@ -111,16 +109,19 @@ export class BatchStepContext {
         ) {
           invalidBatch(batchMessages.referenceKind, this.path(field));
         }
+        this.commands.target(field, result.id);
         return result.id;
       }
       if (kinds.some((kind) => !isEntityKind(kind))) {
+        this.commands.target(field, reference);
         return reference;
       }
       const expected = kinds.length === 1 && isEntityKind(kinds[0]) ? kinds[0] : undefined;
-      const identity = this.entities.resolve(reference, expected);
+      const identity = await this.commands.resolve(reference, expected);
       if (kinds.length > 0 && !kinds.includes(identity.kind)) {
         invalidBatch(batchMessages.referenceKind, this.path(field));
       }
+      this.commands.target(field, identity.id);
       return identity.id;
     } catch (error) {
       throw locateBatchError(error, this.index, this.step.op, field);
@@ -130,7 +131,7 @@ export class BatchStepContext {
   /**
    * Разрешает обязательный верхнеуровневый ref ожидаемого предметного вида.
    */
-  ref(kind: EntityKind): string {
+  ref(kind: EntityKind): Promise<string> {
     return this.address(this.step.ref, "ref", [kind]);
   }
 
@@ -168,6 +169,22 @@ export class BatchStepContext {
    * $revision не даёт права первой правки существующей записи через результат чтения/комментария.
    */
   write(owner: Readonly<EntityRecord>): WriteOptions {
+    if (this.step.expectedVersion !== undefined) {
+      this.checkVersion(owner, this.step.expectedVersion, "expectedVersion");
+      if (this.step.ifRevision === undefined) {
+        this.state.authorizedOwners.add(owner.id);
+        this.commands.owner(owner.id);
+        return { actor: this.actor, ifRevision: owner.revision };
+      }
+    }
+    if (
+      this.implicitCreation &&
+      this.step.ifRevision === undefined &&
+      (this.step.op === "product.create" || this.step.op === "implementation.create")
+    ) {
+      this.commands.owner(owner.id);
+      return { actor: this.actor, ifRevision: owner.revision };
+    }
     return this.writeRevision(owner, this.step.ifRevision, "ifRevision");
   }
 
@@ -175,8 +192,23 @@ export class BatchStepContext {
    * Проверяет явно выбранное поле CAS дополнительного владельца; отсутствие значения всегда ошибка.
    * Верхний ifRevision не служит значением по умолчанию для второго плана переноса.
    */
-  writeRevision(owner: Readonly<EntityRecord>, value: unknown, field: string): WriteOptions {
-    const requested = batchRevision(value, this.path(field));
+  writeRevision(
+    owner: Readonly<EntityRecord>,
+    value: unknown,
+    field: string,
+    expectedVersion?: unknown,
+  ): WriteOptions {
+    if (expectedVersion !== undefined) {
+      this.checkVersion(
+        owner,
+        batchText(expectedVersion, this.path("input.targetVersion")),
+        "input.targetVersion",
+      );
+    }
+    const requested =
+      value === undefined && expectedVersion !== undefined
+        ? owner.revision
+        : batchRevision(value, this.path(field));
     let revision: number;
     if (typeof requested === "number") {
       revision = requested;
@@ -202,7 +234,23 @@ export class BatchStepContext {
       });
     }
     this.state.authorizedOwners.add(owner.id);
+    this.commands.owner(owner.id);
     return { actor: this.actor, ifRevision: revision };
+  }
+
+  /**
+   * Проверяет исходный переносимый токен с координатами именно его адресной роли.
+   */
+  private checkVersion(
+    owner: Readonly<EntityRecord>,
+    expectedVersion: string,
+    field: string,
+  ): void {
+    try {
+      this.commands.assertExpectedVersion(owner, expectedVersion);
+    } catch (error) {
+      throw locateBatchError(error, this.index, this.step.op, field);
+    }
   }
 
   /**

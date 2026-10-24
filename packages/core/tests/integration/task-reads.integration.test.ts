@@ -5,7 +5,12 @@ import { ProjectDatabase } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import type { TaskCollection } from "../../src/tasks/task-read.types";
 import { TasksService } from "../../src/tasks/tasks";
-import { entityWriteOptions, expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import {
+  entityWriteOptions,
+  expectAsyncRelayError,
+  expectRelayError,
+  withEntityDatabase,
+} from "./helpers/entity-fixture";
 
 const ownerReads = [
   {
@@ -43,8 +48,8 @@ const ownerReads = [
  * Создаёт два критерия и два независимых комментария с полными текстами.
  * Соединением владеет вызывающий тест; helper возвращает состояние после публикаций.
  */
-function createNestedTask(tasks: TasksService): TaskRecord {
-  const task = tasks.create(
+async function createNestedTask(tasks: TasksService): Promise<TaskRecord> {
+  const task = await tasks.create(
     {
       title: "Приёмка и обсуждение",
       acceptanceCriteria: [
@@ -54,7 +59,7 @@ function createNestedTask(tasks: TasksService): TaskRecord {
     },
     "автор",
   );
-  tasks.comment(task.id, "## Первый\n\n  точный отступ\n", "рецензент");
+  await tasks.comment(task.id, "## Первый\n\n  точный отступ\n", "рецензент");
   return tasks.comment(task.id, "Второй комментарий", "другой автор", "Ответ");
 }
 
@@ -64,10 +69,10 @@ describe("Составные чтения владельца и вложенны
     { method: "commentsWithOwner", field: "comments" },
   ] as const)(
     "$method читает владельца один раз и сохраняет полный состав",
-    ({ method, field }) => {
-      withEntityDatabase((db) => {
+    async ({ method, field }) => {
+      await withEntityDatabase(async (db) => {
         const tasks = new TasksService(db);
-        const owner = createNestedTask(tasks);
+        const owner = await createNestedTask(tasks);
         const generation = db.getGeneration();
         const fullRead = spyOn(db, "get");
         const identityRead = spyOn(db, "getIdentity");
@@ -93,13 +98,13 @@ describe("Составные чтения владельца и вложенны
     },
   );
 
-  test("критерий возвращается с ревизией владельца после одного полного чтения", () => {
-    withEntityDatabase((db) => {
+  test("критерий возвращается с ревизией владельца после одного полного чтения", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const initial = createNestedTask(tasks);
+      const initial = await createNestedTask(tasks);
       const [criterion] = initial.data.acceptanceCriteria;
       assert(criterion);
-      const owner = tasks.criterion(
+      const owner = await tasks.criterion(
         initial.id,
         "complete",
         { id: criterion.id },
@@ -132,18 +137,18 @@ describe("Составные чтения владельца и вложенны
     });
   });
 
-  test("зависимости сохраняют порядок и полные журналы с одним чтением владельца по алиасу", () => {
-    withEntityDatabase((db) => {
+  test("зависимости сохраняют порядок и полные журналы с одним чтением владельца по алиасу", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const first = tasks.create({ title: "Первая созданная" }, "автор");
-      const second = createNestedTask(tasks);
-      const initial = tasks.create({ dependencies: [second.id, first.id] }, "автор");
-      const application = new KnowledgeService(db).create(
+      const first = await tasks.create({ title: "Первая созданная" }, "автор");
+      const second = await createNestedTask(tasks);
+      const initial = await tasks.create({ dependencies: [second.id, first.id] }, "автор");
+      const application = await new KnowledgeService(db).create(
         "application",
         { name: "Приложение", slug: "web" },
         "автор",
       );
-      const owner = tasks.move(
+      const owner = await tasks.move(
         initial.id,
         { board: application.data.boardId },
         entityWriteOptions(initial),
@@ -174,14 +179,13 @@ describe("Составные чтения владельца и вложенны
     });
   });
 
-  test("владелец и зависимости остаются в одном снимке при коммите между их чтениями", () => {
-    withEntityDatabase((db) => {
+  test("владелец и зависимости остаются в одном снимке при коммите между их чтениями", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const dependency = tasks.create({ title: "Исходное обязательство" }, "автор");
-      const owner = tasks.create({ dependencies: [dependency.id] }, "автор");
+      const dependency = await tasks.create({ title: "Исходное обязательство" }, "автор");
+      const owner = await tasks.create({ dependencies: [dependency.id] }, "автор");
       const peer = ProjectDatabase.open(db.path);
       try {
-        const competingTasks = new TasksService(peer);
         /**
          * Сохраняет настоящее чтение снимка перед синхронизированной записью второго соединения.
          */
@@ -191,15 +195,32 @@ describe("Составные чтения владельца и вложенны
           const record = read(ref, kind);
           if (ref === owner.id && !changed) {
             changed = true;
-            // Коммит после чтения владельца, но до чтения его зависимости.
+            // Синхронный SQL-коммит после чтения владельца, до зависимости:
+            // тест защищает snapshot чтения, а async writers проверяются отдельно.
             peer.transaction(() => {
-              competingTasks.update(owner.id, { title: "Новая задача" }, entityWriteOptions(owner));
-              competingTasks.update(
-                dependency.id,
-                { title: "Новое обязательство" },
-                entityWriteOptions(dependency),
+              peer.update(
+                {
+                  ...owner,
+                  revision: owner.revision + 1,
+                  data: { ...owner.data, title: "Новая задача" },
+                },
+                owner.revision,
               );
-              competingTasks.comment(dependency.id, "Позднее сообщение", "рецензент");
+              peer.update(
+                {
+                  ...dependency,
+                  revision: dependency.revision + 1,
+                  data: { ...dependency.data, title: "Новое обязательство" },
+                },
+                dependency.revision,
+              );
+              peer.appendTaskComment(dependency.id, {
+                id: crypto.randomUUID(),
+                body: "Позднее сообщение",
+                title: "",
+                createdAt: new Date().toISOString(),
+                createdBy: "рецензент",
+              });
             });
           }
           return record;
@@ -235,14 +256,14 @@ describe("Составные чтения владельца и вложенны
     });
   });
 
-  test("ревизия составного чтения допускает запись после append, сохраняя журнал и CAS", () => {
-    withEntityDatabase((db) => {
+  test("ревизия составного чтения допускает запись после append, сохраняя журнал и CAS", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const owner = createNestedTask(tasks);
+      const owner = await createNestedTask(tasks);
       const before = tasks.commentsWithOwner(owner.id);
-      const appended = tasks.comment(owner.id, "После чтения", "рецензент");
+      const appended = await tasks.comment(owner.id, "После чтения", "рецензент");
 
-      const updated = tasks.update(
+      const updated = await tasks.update(
         owner.id,
         { title: "Уточнение" },
         { actor: "редактор", ifRevision: before.revision },
@@ -258,7 +279,7 @@ describe("Составные чтения владельца и вложенны
       });
       expect(before.items).toEqual(owner.data.comments);
       const generation = db.getGeneration();
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           tasks.update(
             owner.id,
@@ -274,10 +295,10 @@ describe("Составные чтения владельца и вложенны
 
   test.each(["dependenciesWithOwner", "criteriaWithOwner", "commentsWithOwner"] as const)(
     "%s возвращает владельца и пустой состав без потери ревизии",
-    (method) => {
-      withEntityDatabase((db) => {
+    async (method) => {
+      await withEntityDatabase(async (db) => {
         const tasks = new TasksService(db);
-        const owner = tasks.create({}, "автор");
+        const owner = await tasks.create({}, "автор");
 
         expect(tasks[method](owner.id)).toEqual({
           task: owner.key,
@@ -304,10 +325,10 @@ describe("Составные чтения владельца и вложенны
 
   test.each(ownerReads)(
     "$name проверяет полную карточку и сохраняет повреждённые данные",
-    ({ read }) => {
-      withEntityDatabase((db) => {
+    async ({ read }) => {
+      await withEntityDatabase(async (db) => {
         const tasks = new TasksService(db);
-        const owner = createNestedTask(tasks);
+        const owner = await createNestedTask(tasks);
         // Поле вне выбранного вложенного состава повреждено намеренно через Storage.
         const corrupted = {
           ...owner,
@@ -325,11 +346,11 @@ describe("Составные чтения владельца и вложенны
     },
   );
 
-  test("чужой критерий не принимается за критерий указанного владельца", () => {
-    withEntityDatabase((db) => {
+  test("чужой критерий не принимается за критерий указанного владельца", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const owner = tasks.create({}, "автор");
-      const other = createNestedTask(tasks);
+      const owner = await tasks.create({}, "автор");
+      const other = await createNestedTask(tasks);
       const [criterion] = other.data.acceptanceCriteria;
       assert(criterion);
       const generation = db.getGeneration();
@@ -346,11 +367,11 @@ describe("Составные чтения владельца и вложенны
     });
   });
 
-  test("отсутствующая зависимость отвергает весь состав без частичного результата", () => {
-    withEntityDatabase((db) => {
+  test("отсутствующая зависимость отвергает весь состав без частичного результата", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const dependency = tasks.create({}, "автор");
-      const owner = tasks.create({ dependencies: [dependency.id] }, "автор");
+      const dependency = await tasks.create({}, "автор");
+      const owner = await tasks.create({ dependencies: [dependency.id] }, "автор");
       // Имитируем внешнее повреждение постоянной ссылки после валидного элемента состава.
       const corrupted = {
         ...owner,
@@ -368,11 +389,11 @@ describe("Составные чтения владельца и вложенны
     });
   });
 
-  test("повреждённая зависимость отвергает весь состав и сохраняет обе задачи", () => {
-    withEntityDatabase((db) => {
+  test("повреждённая зависимость отвергает весь состав и сохраняет обе задачи", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const dependency = tasks.create({}, "автор");
-      const owner = tasks.create({ dependencies: [dependency.id] }, "автор");
+      const dependency = await tasks.create({}, "автор");
+      const owner = await tasks.create({ dependencies: [dependency.id] }, "автор");
       const corrupted = {
         ...dependency,
         revision: dependency.revision + 1,

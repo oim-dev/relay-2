@@ -12,33 +12,75 @@ const boundedLists = [
   { name: "задачи с комментариями", kind: "task", seed: seedCommentedTasks },
 ] as const;
 
+const readGuards = [
+  { name: "пустой набор", value: "[]" },
+  {
+    name: "ожидание записи",
+    value: '[{"ref":"DOC-1","expectedId":"previously-read-id"}]',
+  },
+] as const;
+
 /**
  * Создаёт три документа в переданном соединении; соединением владеет fixture вызывающего теста.
  */
-function seedDocuments(db: ProjectDatabase): EntityRecord[] {
+async function seedDocuments(db: ProjectDatabase): Promise<EntityRecord[]> {
   const knowledge = new KnowledgeService(db);
-  return Array.from({ length: 3 }, (_, index) =>
-    knowledge.create("document", { name: `Документ ${index}`, body: "Содержание" }, "agent"),
-  );
+  const records: EntityRecord[] = [];
+  for (let index = 0; index < 3; index++) {
+    records.push(
+      await knowledge.create(
+        "document",
+        { name: `Документ ${index}`, body: "Содержание" },
+        "agent",
+      ),
+    );
+  }
+  return records;
 }
 
 /**
  * Создаёт три задачи с независимыми комментариями для проверки полноты ограниченного окна.
  * Соединение не закрывается: им владеет вызывающий тест.
  */
-function seedCommentedTasks(db: ProjectDatabase): EntityRecord[] {
+async function seedCommentedTasks(db: ProjectDatabase): Promise<EntityRecord[]> {
   const tasks = new TasksService(db);
-  return Array.from({ length: 3 }, (_, index) => {
-    const task = tasks.create({ title: `Задача ${index}`, description: "Текст" }, "agent");
-    return tasks.comment(task.id, "Независимый комментарий", "agent");
-  });
+  const records: EntityRecord[] = [];
+  for (let index = 0; index < 3; index++) {
+    const task = await tasks.create({ title: `Задача ${index}`, description: "Текст" }, "agent");
+    records.push(await tasks.comment(task.id, "Независимый комментарий", "agent"));
+  }
+  return records;
 }
 
 describe("Пагинация списков CLI", () => {
+  test.each(readGuards)(
+    "guard записи не входит в курсор и nextCommand чтения: $name",
+    async ({ value }) => {
+      await withCliFixture(async (cli) => {
+        const project = cli.createProject();
+        const documents = await cli.withDatabase(project, seedDocuments);
+
+        const first = await cli.page(
+          ["document", "list", "--limit", "1", "--expected-addresses", value],
+          entityValue,
+        );
+        const second = await cli.page(
+          ["document", "list", "--cursor", stringValue(first.meta.page.nextCursor)],
+          entityValue,
+        );
+
+        expect(first.meta.page.nextCommand).not.toContain("--expected-addresses");
+        expect(first.data.items).toEqual(documents.slice(0, 1));
+        expect(second.data.items).toEqual(documents.slice(1, 2));
+        expect(second.meta.page).toMatchObject({ limit: 1, total: 3 });
+      }, "git-sync-implementation/review-cli");
+    },
+  );
+
   test("курсор проходит весь список без повторов и сохраняет размер страницы", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const documents = cli.withDatabase(project, seedDocuments);
+      const documents = await cli.withDatabase(project, seedDocuments);
 
       const first = await cli.page(["document", "list", "--limit", "1"], entityValue);
       const second = await cli.page(
@@ -131,7 +173,7 @@ describe("Пагинация списков CLI", () => {
     async ({ kind, seed }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const records = cli.withDatabase(project, seed);
+        const records = await cli.withDatabase(project, seed);
         const fullRead = spyOn(ProjectDatabase.prototype, "list");
         const pageRead = spyOn(ProjectDatabase.prototype, "listPage");
         try {
@@ -154,7 +196,7 @@ describe("Пагинация списков CLI", () => {
   test("курсор другого запроса отклоняется с INVALID_CURSOR", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, seedDocuments);
+      await cli.withDatabase(project, seedDocuments);
       const first = await cli.page(["document", "list", "--limit", "1"], entityValue);
 
       const error = await cli.error(
@@ -169,7 +211,7 @@ describe("Пагинация списков CLI", () => {
   test("курсор другого проекта отклоняется с INVALID_CURSOR", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, seedDocuments);
+      await cli.withDatabase(project, seedDocuments);
       const first = await cli.page(["document", "list", "--limit", "1"], entityValue);
       const cwd = join(cli.root, "other");
       cli.createProject(cwd);
@@ -187,10 +229,11 @@ describe("Пагинация списков CLI", () => {
   test("курсор прошлого поколения отклоняется с SNAPSHOT_CONFLICT", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, seedDocuments);
+      await cli.withDatabase(project, seedDocuments);
       const first = await cli.page(["document", "list", "--limit", "1"], entityValue);
-      cli.withDatabase(project, (db) =>
-        new TasksService(db).create({ title: "Новое поколение" }, "agent"),
+      await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({ title: "Новое поколение" }, "agent"),
       );
 
       const error = await cli.error(

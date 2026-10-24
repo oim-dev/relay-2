@@ -9,6 +9,7 @@ export function processRuntime(): CliRuntime {
   return {
     cwd: process.cwd(),
     env: process.env,
+    executablePath: process.execPath,
     /**
      * Читает stdin только при выборе «-»; ограниченные команды прекращают поток при превышении.
      */

@@ -6,8 +6,8 @@ import { TasksService } from "../../src/tasks/tasks";
 import { withEntityDatabase } from "./helpers/entity-fixture";
 
 describe("Связанные предметные пакеты", () => {
-  test("application → FI → SI → task сохраняет итоговых владельцев и не интерполирует Markdown", () => {
-    withEntityDatabase((db) => {
+  test("application → FI → SI → task сохраняет итоговых владельцев и не интерполирует Markdown", async () => {
+    await withEntityDatabase(async (db) => {
       const batch = new BatchService(db);
       const body = '# Договорённости\n\n`{"$ref":"feature"}` — буквальный текст.\n';
       const input = {
@@ -70,10 +70,10 @@ describe("Связанные предметные пакеты", () => {
         ],
       };
       const before = structuredClone(input);
-      const graph = spyOn(db, "listTaskGraph");
+      const loads = spyOn(db.commands, "load");
       const allRecords = spyOn(db, "list");
       try {
-        const result = batch.execute(input, { actor: "agent", operationKey: "booking" });
+        const result = await batch.execute(input, { actor: "agent", operationKey: "booking" });
 
         expect(result.status).toBe("committed");
         expect(result.items).toHaveLength(8);
@@ -127,18 +127,20 @@ describe("Связанные предметные пакеты", () => {
         expect(result.items[4]?.owner.revision).toBe(4);
         expect(JSON.stringify(result.items)).not.toContain("Договорённости");
         expect(input).toEqual(before);
-        expect(graph).toHaveBeenCalledTimes(1);
+        const selectors = loads.mock.calls.flatMap(([request]) => request.selectors);
+        expect(selectors.filter((selector) => selector.kind === "task-graph")).toHaveLength(1);
+        expect(selectors.filter((selector) => selector.kind === "kind")).toEqual([]);
         expect(allRecords).not.toHaveBeenCalled();
       } finally {
-        graph.mockRestore();
+        loads.mockRestore();
         allRecords.mockRestore();
       }
     });
   });
 
-  test("план → этап → задачи и критерии используют последовательные ревизии владельцев", () => {
-    withEntityDatabase((db) => {
-      const result = new BatchService(db).execute(
+  test("план → этап → задачи и критерии используют последовательные ревизии владельцев", async () => {
+    await withEntityDatabase(async (db) => {
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -229,25 +231,25 @@ describe("Связанные предметные пакеты", () => {
     });
   });
 
-  test("перенос использует локальную ревизию второго владельца после числового CAS и возвращает оба плана", () => {
-    withEntityDatabase((db) => {
+  test("перенос использует локальную ревизию второго владельца после числового CAS и возвращает оба плана", async () => {
+    await withEntityDatabase(async (db) => {
       const planning = new PlanningService(db);
-      const task = new TasksService(db).create({ title: "Перенести" }, "author");
-      const source = planning.create("work-plan", { title: "Исходный" }, "author");
-      const target = planning.create("work-plan", { title: "Целевой" }, "author");
-      const stagedSource = planning.stage(
+      const task = await new TasksService(db).create({ title: "Перенести" }, "author");
+      const source = await planning.create("work-plan", { title: "Исходный" }, "author");
+      const target = await planning.create("work-plan", { title: "Целевой" }, "author");
+      const stagedSource = await planning.stage(
         source.id,
         "create",
         { title: "Этап" },
         { actor: "author", ifRevision: source.revision },
       );
-      const stagedTarget = planning.stage(
+      const stagedTarget = await planning.stage(
         target.id,
         "create",
         { title: "Приёмка" },
         { actor: "author", ifRevision: target.revision },
       );
-      const included = planning.stageTask(
+      const included = await planning.stageTask(
         source.id,
         stagedSource.data.stages[0]?.id ?? "missing",
         task.id,
@@ -255,7 +257,7 @@ describe("Связанные предметные пакеты", () => {
         { actor: "author", ifRevision: stagedSource.revision },
       );
 
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -302,14 +304,18 @@ describe("Связанные предметные пакеты", () => {
     });
   });
 
-  test("замена участия возвращает неявно созданные и снятые реализации", () => {
-    withEntityDatabase((db) => {
+  test("замена участия возвращает неявно созданные и снятые реализации", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Поиск" }, "author");
-      const application = knowledge.create("application", { name: "Web", slug: "web" }, "author");
+      const feature = await knowledge.create("feature", { name: "Поиск" }, "author");
+      const application = await knowledge.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "author",
+      );
       const batch = new BatchService(db);
 
-      const created = batch.execute(
+      const created = await batch.execute(
         {
           version: 1,
           operations: [
@@ -324,7 +330,7 @@ describe("Связанные предметные пакеты", () => {
         { actor: "agent", operationKey: "participation" },
       );
       const current = knowledge.get("application", application.id);
-      const removed = batch.execute(
+      const removed = await batch.execute(
         {
           version: 1,
           operations: [

@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import type { HistoryCheckpoint, HistorySession } from "@relay/contracts";
 import type { ProjectDatabase } from "@relay/storage";
+import { CommandExecutor } from "../../src/batch/batch";
 import { HistoryService } from "../../src/history/history";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import {
@@ -30,8 +31,12 @@ const foreignMarker = "Содержание чужой истории не тр�
  * Выполняет реальный сценарий с проверкой отсутствия полного списка и декодирования чужого JSON.
  * Перехваты не заменяют данные SQLite; всегда восстанавливаются, включая предметный отказ.
  */
-function expectLocalHistoryReads<T>(db: ProjectDatabase, operation: () => T): T {
+async function expectLocalHistoryReads<T>(
+  db: ProjectDatabase,
+  operation: () => Promise<T>,
+): Promise<T> {
   const fullReads = spyOn(db, "list");
+  const loads = spyOn(db.commands, "load");
   /**
    * Сохраняет настоящий декодер JSON до наблюдения загружаемого содержания.
    */
@@ -44,25 +49,31 @@ function expectLocalHistoryReads<T>(db: ProjectDatabase, operation: () => T): T 
     return parse(text, reviver);
   });
   try {
-    const result = operation();
+    const result = await operation();
 
     expect(fullReads).not.toHaveBeenCalled();
+    expect(
+      loads.mock.calls
+        .flatMap(([request]) => request.selectors)
+        .some((selector) => selector.kind === "kind"),
+    ).toBe(false);
     expect(foreignJson).toEqual([]);
     return result;
   } finally {
     decoder.mockRestore();
+    loads.mockRestore();
     fullReads.mockRestore();
   }
 }
 
 /**
- * Подставляет UUID для первых выделений в синхронном сценарии, затем использует исходный генератор.
+ * Подставляет UUID для первых выделений до завершения async сценария, затем использует исходный генератор.
  * Нужен для воспроизводимой коллизии настоящих записей; глобальный генератор восстанавливается.
  */
-function withHistoryIds<T>(
+async function withHistoryIds<T>(
   ids: readonly ReturnType<Crypto["randomUUID"]>[],
-  operation: () => T,
-): T {
+  operation: () => Promise<T>,
+): Promise<T> {
   /**
    * Сохраняет штатный генератор для выделений после заданных тестом коллизий.
    */
@@ -72,7 +83,7 @@ function withHistoryIds<T>(
     () => ids[index++] ?? original(),
   );
   try {
-    return operation();
+    return await operation();
   } finally {
     generator.mockRestore();
   }
@@ -82,31 +93,126 @@ function withHistoryIds<T>(
  * Создаёт и завершает прямого ребёнка без собственных материалов через публичные переходы.
  * Ревизия родителя передаётся явно; ребёнок остаётся непринятым исходным намерением.
  */
-function completedHistoryChild(
+async function completedHistoryChild(
   history: HistoryService,
   parent: HistorySession,
   intent: HistoryCheckpoint,
-): HistorySession {
-  const child = forkHistorySession(history, parent, intent);
-  const attached = history.transition(
+): Promise<HistorySession> {
+  const child = await forkHistorySession(history, parent, intent);
+  const attached = await history.transition(
     child.id,
     "attach",
     {},
     { actor: "исполнитель-ребёнка", ifRevision: child.revision },
   );
-  return completeHistorySession(history, attached);
+  return await completeHistorySession(history, attached);
 }
 
 describe("Ограниченные чтения записи checkpoint", () => {
+  test.each([
+    "start",
+    "fork",
+    "attach",
+    "resume",
+    "takeover",
+    "pause",
+    "complete",
+    "cancel",
+  ] as const)("session.%s не читает каталог сессий или чужую историю", async (action) => {
+    await withHistoryFixture(async (history, { db }) => {
+      let owner = await history.start({ title: "Выбранная работа" }, "автор");
+      let ref = owner.id;
+      if (action === "fork" || action === "attach") {
+        const intent = await openHistoryIntent(history, owner);
+        owner = history.get(owner.id);
+        ref = intent.id;
+        if (action === "attach") {
+          owner = await forkHistorySession(history, owner, intent);
+          ref = owner.id;
+        }
+      } else if (action === "resume") {
+        owner = await history.transition(
+          owner.id,
+          "pause",
+          { runId: owner.data.currentRunId, reason: "Подготовить паузу" },
+          historyOwner(owner),
+        );
+      }
+      const foreign = await history.start({ title: foreignMarker }, "чужой");
+      const foreignIntent = await openHistoryIntent(history, foreign, foreignMarker);
+      const foreignBefore = history.get(foreign.id);
+      const input = {
+        start: { title: "Новый корень" },
+        fork: { title: "Ребёнок", runId: owner.data.currentRunId },
+        attach: {},
+        resume: {},
+        takeover: { reason: "Передача" },
+        pause: { runId: owner.data.currentRunId, reason: "Пауза" },
+        complete: { runId: owner.data.currentRunId, result: "Готово" },
+        cancel: { runId: owner.data.currentRunId, result: "Отменено" },
+      };
+
+      const result = await expectLocalHistoryReads(db, () =>
+        action === "start"
+          ? history.start(input.start, "автор")
+          : history.transition(ref, action, input[action], {
+              actor: "автор",
+              ifRevision: owner.revision,
+            }),
+      );
+
+      const statuses = {
+        start: "open",
+        fork: "pending",
+        attach: "open",
+        resume: "open",
+        takeover: "open",
+        pause: "paused",
+        complete: "completed",
+        cancel: "cancelled",
+      } as const;
+      expect(result.data.status).toBe(statuses[action]);
+      expect(history.get(result.id)).toEqual(result);
+      expect(history.get(foreign.id)).toEqual(foreignBefore);
+      expect(history.getCheckpoint(foreignIntent.id)).toEqual(foreignIntent);
+    });
+  });
+
+  test("несохранённые run и session ID зарезервированы между шагами одного batch", async () => {
+    await withHistoryFixture(async (history, { db }) => {
+      const runId = crypto.randomUUID();
+      const sessionId = crypto.randomUUID();
+      const secondRunId = crypto.randomUUID();
+      const secondSessionId = crypto.randomUUID();
+
+      const result = await withHistoryIds(
+        [runId, runId, sessionId, runId, secondRunId, secondSessionId],
+        () =>
+          new CommandExecutor(db).executeCommands(
+            [
+              { op: "session.start", input: { title: "Первый корень" } },
+              { op: "session.start", input: { title: "Второй корень" } },
+            ],
+            { actor: "автор" },
+          ),
+      );
+
+      expect(result.items.map((entry) => entry.id)).toEqual([sessionId, secondSessionId]);
+      expect(history.get(sessionId).data.currentRunId).toBe(runId);
+      expect(history.get(secondSessionId).data.currentRunId).toBe(secondRunId);
+      expect(db.count("work-session")).toBe(2);
+    });
+  });
+
   test.each(checkpointActions)(
     "$action не загружает чужую историю ради sequence и ID",
-    ({ action, kind }) => {
-      withHistoryFixture((history, { db }) => {
-        const session = history.start({ title: "Выбранная сессия" }, "автор");
-        const intent = openHistoryIntent(history, session);
-        const foreign = history.start({ title: foreignMarker }, "другой-автор");
-        const foreignIntent = openHistoryIntent(history, foreign, foreignMarker);
-        const foreignProgress = recordHistoryMaterial(
+    async ({ action, kind }) => {
+      await withHistoryFixture(async (history, { db }) => {
+        const session = await history.start({ title: "Выбранная сессия" }, "автор");
+        const intent = await openHistoryIntent(history, session);
+        const foreign = await history.start({ title: foreignMarker }, "другой-автор");
+        const foreignIntent = await openHistoryIntent(history, foreign, foreignMarker);
+        const foreignProgress = await recordHistoryMaterial(
           history,
           history.get(foreign.id),
           foreignIntent,
@@ -116,17 +222,19 @@ describe("Ограниченные чтения записи checkpoint", () => 
         const current = history.get(session.id);
         const generation = db.getGeneration();
 
-        const checkpoint = expectLocalHistoryReads(db, () =>
-          history.checkpoint(
-            action === "open" ? session.key : intent.id,
-            action,
-            {
-              runId: currentHistoryRun(current).id,
-              title: "Новый материал",
-              body: "Полное содержание выбранного материала.\n",
-            },
-            historyOwner(current),
-          ),
+        const checkpoint = await expectLocalHistoryReads(
+          db,
+          async () =>
+            await history.checkpoint(
+              action === "open" ? session.key : intent.id,
+              action,
+              {
+                runId: currentHistoryRun(current).id,
+                title: "Новый материал",
+                body: "Полное содержание выбранного материала.\n",
+              },
+              historyOwner(current),
+            ),
         );
 
         expect(checkpoint).toMatchObject({
@@ -157,31 +265,38 @@ describe("Ограниченные чтения записи checkpoint", () => 
 
   test.each(acceptingActions)(
     "%s принимает двух детей пакетом без адресного чтения каждого",
-    (action) => {
-      withHistoryFixture((history, { db }) => {
-        const parent = history.start({ title: "Родитель приёмки" }, "родитель");
-        const intent = openHistoryIntent(history, parent);
-        const first = completedHistoryChild(history, history.get(parent.id), intent);
-        const second = completedHistoryChild(history, history.get(parent.id), intent);
+    async (action) => {
+      await withHistoryFixture(async (history, { db }) => {
+        const parent = await history.start({ title: "Родитель приёмки" }, "родитель");
+        const intent = await openHistoryIntent(history, parent);
+        const first = await completedHistoryChild(history, history.get(parent.id), intent);
+        const second = await completedHistoryChild(history, history.get(parent.id), intent);
         const current = history.get(parent.id);
         const reads = spyOn(db, "get");
-        const batches = spyOn(db, "getMany");
+        const batches = spyOn(db.commands, "load");
         const children = [second.id, first.id];
         let checkpoint: HistoryCheckpoint;
         try {
-          checkpoint = expectLocalHistoryReads(db, () =>
-            recordHistoryMaterial(history, current, intent, action, {
-              acceptedSessionIds: children,
-            }),
-          );
+          checkpoint = await recordHistoryMaterial(history, current, intent, action, {
+            acceptedSessionIds: children,
+          });
 
           expect(reads.mock.calls.some(([ref]) => children.includes(ref))).toBe(false);
-          if (action === "save") {
-            expect(batches).toHaveBeenCalledTimes(1);
-            expect(batches).toHaveBeenCalledWith(children, "work-session");
-          } else {
-            expect(batches).not.toHaveBeenCalled();
-          }
+          const selections = batches.mock.calls.flatMap(([request]) => request.selectors);
+          const acceptedReads = selections.filter(
+            (selector) =>
+              selector.kind === "records" && selector.ids.some((id) => children.includes(id)),
+          );
+          expect(acceptedReads).toEqual(
+            action === "save"
+              ? [{ kind: "records", ids: children, entityKind: "work-session" }]
+              : [],
+          );
+          expect(
+            selections.some(
+              (selector) => selector.kind === "entity" && children.includes(selector.ref),
+            ),
+          ).toBe(false);
         } finally {
           batches.mockRestore();
           reads.mockRestore();
@@ -197,30 +312,37 @@ describe("Ограниченные чтения записи checkpoint", () => 
     },
   );
 
-  test("закрытие намерения учитывает прежнюю приёмку и не требует закрытия ребёнка соседнего намерения", () => {
-    withHistoryFixture((history, { db }) => {
-      const parent = history.start({ title: "Два независимых намерения" }, "родитель");
-      const intent = openHistoryIntent(history, parent);
-      const siblingIntent = openHistoryIntent(
+  test("закрытие намерения учитывает прежнюю приёмку и не требует закрытия ребёнка соседнего намерения", async () => {
+    await withHistoryFixture(async (history, { db }) => {
+      const parent = await history.start({ title: "Два независимых намерения" }, "родитель");
+      const intent = await openHistoryIntent(history, parent);
+      const siblingIntent = await openHistoryIntent(
         history,
         history.get(parent.id),
         "Соседнее намерение",
       );
-      const completed = completedHistoryChild(history, history.get(parent.id), intent);
+      const completed = await completedHistoryChild(history, history.get(parent.id), intent);
       const beforeFork = history.get(parent.id);
-      const pending = history.transition(
+      const pending = await history.transition(
         siblingIntent.id,
         "fork",
         { title: "Ребёнок соседнего намерения", runId: currentHistoryRun(beforeFork).id },
         historyOwner(beforeFork),
       );
-      const acceptance = recordHistoryMaterial(history, history.get(parent.id), intent, "save", {
-        acceptedSessionIds: [completed.id],
-      });
+      const acceptance = await recordHistoryMaterial(
+        history,
+        history.get(parent.id),
+        intent,
+        "save",
+        {
+          acceptedSessionIds: [completed.id],
+        },
+      );
       const current = history.get(parent.id);
 
-      const result = expectLocalHistoryReads(db, () =>
-        recordHistoryMaterial(history, current, intent, "complete"),
+      const result = await expectLocalHistoryReads(
+        db,
+        async () => await recordHistoryMaterial(history, current, intent, "complete"),
       );
 
       expect(result.data).toMatchObject({ kind: "result", intentId: intent.id, sequence: 4 });
@@ -232,25 +354,25 @@ describe("Ограниченные чтения записи checkpoint", () => 
     });
   });
 
-  test("ссылки на несколько целей читают содержание одним пакетом и сохраняют порядок снимков", () => {
-    withHistoryFixture((history, { db }) => {
+  test("ссылки на несколько целей читают содержание одним пакетом и сохраняют порядок снимков", async () => {
+    await withHistoryFixture(async (history, { db }) => {
       const knowledge = new KnowledgeService(db);
-      const first = knowledge.create(
+      const first = await knowledge.create(
         "document",
         { name: "Первый документ", body: "Первое основание материала." },
         "автор",
       );
-      const second = knowledge.create(
+      const second = await knowledge.create(
         "document",
         { name: "Второй документ", body: "Второе основание материала." },
         "автор",
       );
-      const session = history.start({ title: "Основания материала" }, "автор");
+      const session = await history.start({ title: "Основания материала" }, "автор");
       const reads = spyOn(db, "get");
-      const batches = spyOn(db, "getMany");
+      const batches = spyOn(db.commands, "load");
       let intent: HistoryCheckpoint;
       try {
-        intent = history.checkpoint(
+        intent = await history.checkpoint(
           session.id,
           "open",
           {
@@ -262,8 +384,16 @@ describe("Ограниченные чтения записи checkpoint", () => 
           historyOwner(session),
         );
 
-        expect(batches).toHaveBeenCalledTimes(1);
-        expect(batches).toHaveBeenCalledWith([second.id, first.id]);
+        const selections = batches.mock.calls.flatMap(([request]) => request.selectors);
+        expect(selections.filter((selector) => selector.kind === "records")).toEqual([
+          { kind: "records", ids: [second.id, first.id] },
+        ]);
+        expect(
+          selections.some(
+            (selector) =>
+              selector.kind === "entity" && [first.id, second.id].includes(selector.ref),
+          ),
+        ).toBe(false);
         expect(reads.mock.calls.some(([ref]) => ref === first.id || ref === second.id)).toBe(false);
       } finally {
         batches.mockRestore();
@@ -278,15 +408,20 @@ describe("Ограниченные чтения записи checkpoint", () => 
     });
   });
 
-  test("одинаковый save после записи другим соединением создаёт новый материал со свежим sequence", () => {
-    withHistoryFixture((history, { connect }) => {
+  test("одинаковый save после записи другим соединением создаёт новый материал со свежим sequence", async () => {
+    await withHistoryFixture(async (history, { connect }) => {
       const second = new HistoryService(connect());
-      const session = history.start({ title: "Продолжение без кеша снимков" }, "автор");
-      const intent = openHistoryIntent(history, session);
-      const first = recordHistoryMaterial(history, history.get(session.id), intent, "save");
-      const other = recordHistoryMaterial(second, second.get(session.id), intent, "save");
+      const session = await history.start({ title: "Продолжение без кеша снимков" }, "автор");
+      const intent = await openHistoryIntent(history, session);
+      const first = await recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      const other = await recordHistoryMaterial(second, second.get(session.id), intent, "save");
 
-      const repeated = recordHistoryMaterial(history, history.get(session.id), intent, "save");
+      const repeated = await recordHistoryMaterial(
+        history,
+        history.get(session.id),
+        intent,
+        "save",
+      );
 
       expect(repeated.data.sequence).toBe(4);
       expect(repeated.data.sessionRevision).toBe(5);
@@ -297,11 +432,11 @@ describe("Ограниченные чтения записи checkpoint", () => 
     });
   });
 
-  test("ошибочный sessionId существующего результата не скрывает закрытие исходного intent", () => {
-    withHistoryFixture((history, { db }) => {
-      const session = history.start({ title: "Владелец намерения" }, "автор");
-      const intent = openHistoryIntent(history, session);
-      const foreign = history.start({ title: "Ошибочная сессия результата" }, "автор");
+  test("ошибочный sessionId существующего результата не скрывает закрытие исходного intent", async () => {
+    await withHistoryFixture(async (history, { db }) => {
+      const session = await history.start({ title: "Владелец намерения" }, "автор");
+      const intent = await openHistoryIntent(history, session);
+      const foreign = await history.start({ title: "Ошибочная сессия результата" }, "автор");
       const id = crypto.randomUUID();
       // Повреждаем только связь результата с сессией; намерение по-прежнему явно указано.
       db.insert({
@@ -319,7 +454,10 @@ describe("Ограниченные чтения записи checkpoint", () => 
       const current = history.get(session.id);
       const before = snapshotHistoryStorage(db);
 
-      expectHistoryError(() => recordHistoryMaterial(history, current, intent, "save"), "CONFLICT");
+      await expectHistoryError(
+        async () => await recordHistoryMaterial(history, current, intent, "save"),
+        "CONFLICT",
+      );
 
       expect(snapshotHistoryStorage(db)).toEqual(before);
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
@@ -328,11 +466,11 @@ describe("Ограниченные чтения записи checkpoint", () => 
 
   test.each(corruptedChildLinks)(
     "повреждённый %s ребёнка не скрывает его при закрытии намерения",
-    (field) => {
-      withHistoryFixture((history, { db }) => {
-        const session = history.start({ title: "Родитель повреждённой связи" }, "автор");
-        const intent = openHistoryIntent(history, session);
-        const child = forkHistorySession(history, history.get(session.id), intent);
+    async (field) => {
+      await withHistoryFixture(async (history, { db }) => {
+        const session = await history.start({ title: "Родитель повреждённой связи" }, "автор");
+        const intent = await openHistoryIntent(history, session);
+        const child = await forkHistorySession(history, history.get(session.id), intent);
         // Одна сторона происхождения остаётся валидной и должна привести к повреждённому ребёнку.
         db.update(
           { ...child, revision: child.revision + 1, data: { ...child.data, [field]: null } },
@@ -341,8 +479,8 @@ describe("Ограниченные чтения записи checkpoint", () => 
         const current = history.get(session.id);
         const before = snapshotHistoryStorage(db);
 
-        expectHistoryError(
-          () => recordHistoryMaterial(history, current, intent, "complete"),
+        await expectHistoryError(
+          async () => await recordHistoryMaterial(history, current, intent, "complete"),
           "CORRUPT_DATA",
         );
 
@@ -351,23 +489,26 @@ describe("Ограниченные чтения записи checkpoint", () => 
     },
   );
 
-  test("UUID завершённого участия чужой сессии остаётся занят без загрузки её содержания", () => {
-    withHistoryFixture((history, { db }) => {
-      const session = history.start({ title: "Выдать ID материала" }, "автор");
+  test("UUID завершённого участия чужой сессии остаётся занят без загрузки её содержания", async () => {
+    await withHistoryFixture(async (history, { db }) => {
+      const session = await history.start({ title: "Выдать ID материала" }, "автор");
       const collision = crypto.randomUUID();
       const available = crypto.randomUUID();
-      const foreign = withHistoryIds([collision], () =>
-        history.start({ title: foreignMarker }, "другой-автор"),
+      const foreign = await withHistoryIds(
+        [collision],
+        async () => await history.start({ title: foreignMarker }, "другой-автор"),
       );
-      const paused = history.transition(
+      const paused = await history.transition(
         foreign.id,
         "pause",
         { runId: currentHistoryRun(foreign).id, reason: "Закончить участие" },
         historyOwner(foreign),
       );
 
-      const intent = withHistoryIds([collision, available], () =>
-        expectLocalHistoryReads(db, () => openHistoryIntent(history, session)),
+      const intent = await withHistoryIds(
+        [collision, available],
+        async () =>
+          await expectLocalHistoryReads(db, async () => await openHistoryIntent(history, session)),
       );
 
       expect(currentHistoryRun(foreign).id).toBe(collision);
@@ -381,28 +522,33 @@ describe("Ограниченные чтения записи checkpoint", () => 
 
   test.each(addressPrefixes)(
     "занятый алиас %s<UUID> отклоняет кандидат ID без чтения чужой карточки",
-    (prefix) => {
-      withHistoryFixture((history, { db }) => {
-        const session = history.start({ title: "Адреса нового материала" }, "автор");
+    async (prefix) => {
+      await withHistoryFixture(async (history, { db }) => {
+        const session = await history.start({ title: "Адреса нового материала" }, "автор");
         const collision = crypto.randomUUID();
         const available = crypto.randomUUID();
         const knowledge = new KnowledgeService(db);
-        const document = knowledge.create(
+        const document = await knowledge.create(
           "document",
           { name: foreignMarker, body: "Содержание цели занятого адреса." },
           "автор",
         );
-        const renamed = knowledge.rename("document", document.id, `${prefix}${collision}`, {
+        const renamed = await knowledge.rename("document", document.id, `${prefix}${collision}`, {
           actor: "автор",
           ifRevision: document.revision,
         });
-        const current = knowledge.rename("document", document.id, "DOC-OTHER", {
+        const current = await knowledge.rename("document", document.id, "DOC-OTHER", {
           actor: "автор",
           ifRevision: renamed.revision,
         });
 
-        const intent = withHistoryIds([collision, available], () =>
-          expectLocalHistoryReads(db, () => openHistoryIntent(history, session)),
+        const intent = await withHistoryIds(
+          [collision, available],
+          async () =>
+            await expectLocalHistoryReads(
+              db,
+              async () => await openHistoryIntent(history, session),
+            ),
         );
 
         expect(intent.id).toBe(available);

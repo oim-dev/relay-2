@@ -7,6 +7,19 @@ import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { RelayError, type EntityRecord } from "@relay/contracts";
 import { APPLICATION_ID, SCHEMA, SCHEMA_VERSION } from "../sqlite/schema";
 import { BATCH_RECEIPT_SCHEMA } from "../sqlite/batch-schema";
+import { REPLICATION_SCHEMA, REPLICATION_BACKFILL } from "../sqlite/replication-schema";
+import { flushReplicationQueue } from "../replication/replication-store";
+import { PROJECT_WRITE_TRIGGERS } from "../sqlite/entity-triggers";
+import {
+  migrateComponents,
+  enqueueComponentBaseline,
+  assertLegacyOwnerVersions,
+} from "../components/component-migration";
+import { upgradeReplicationV4 } from "../replication/replication-migration";
+import { COMMAND_SCHEMA } from "../sqlite/command-schema";
+import { assertSqlText } from "../entities/entity-sql-text";
+import { assertLegacyTextEncoding } from "../entities/entity-legacy-text";
+import { upgradeCommentTextStorage } from "../entities/comment-text";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
 import { SQLITE_BUSY_TIMEOUT_MS } from "../sqlite/sqlite.constants";
 import { projectDatabaseMessages } from "./project-database.messages";
@@ -23,6 +36,7 @@ import type {
  * Существующий файл не изменяется, включая гонку двух одновременных инициализаций.
  */
 export function reserveProjectFile(path: string, project: ProjectMetadata): void {
+  assertSqlText(project.id, "projectId");
   for (const field of ["id", "name", "slug"] as const) {
     if (typeof project[field] !== "string" || !project[field].trim()) {
       throw new RelayError(
@@ -88,7 +102,7 @@ export function configureProjectWal(connection: Database): void {
 /**
  * Проверяет заголовок и корневую сущность существующей базы без её переинициализации.
  * Возвращает постоянный ID проекта; чужая или несовместимая база отклоняется до включения WAL.
- * Совместимая v1 автоматически получает журнал v2 в собственной атомарной технической миграции.
+ * Совместимые v1/v2/v3 получают нормализованную v4 в собственной атомарной технической миграции.
  */
 export function readProjectId(connection: Database, path: string): string {
   const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
@@ -106,7 +120,7 @@ export function readProjectId(connection: Database, path: string): string {
   if (!state) {
     throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.projectMissing, 1, { path });
   }
-  if (version?.user_version === 1) {
+  if (version?.user_version !== SCHEMA_VERSION) {
     migrateProjectSchema(connection, path);
   }
   return state.project_id;
@@ -116,7 +130,7 @@ export function readProjectId(connection: Database, path: string): string {
  * Отклоняет неизвестную техническую версию до записи и после ожидания замка миграции.
  */
 function requireSupportedSchema(version: number | undefined, path: string): void {
-  if (version !== 1 && version !== SCHEMA_VERSION) {
+  if (version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) {
     throw new RelayError(
       "SCHEMA_VERSION_UNSUPPORTED",
       projectDatabaseMessages.unsupportedSchema,
@@ -131,7 +145,7 @@ function requireSupportedSchema(version: number | undefined, path: string): void
 }
 
 /**
- * Под замком записи повторяет проверку версии и добавляет журнал v2 без изменения данных v1.
+ * Под замком записи повторяет проверку версии и добавляет журнал/outbox без изменения данных v1/v2.
  * Конкурентный open может уже завершить миграцию; DDL и user_version откатываются вместе.
  */
 function migrateProjectSchema(connection: Database, path: string): void {
@@ -139,8 +153,33 @@ function migrateProjectSchema(connection: Database, path: string): void {
   try {
     const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
     requireSupportedSchema(version?.user_version, path);
+    if (version?.user_version !== SCHEMA_VERSION) {
+      assertLegacyTextEncoding(connection);
+    }
+    if (version?.user_version === 3) {
+      assertLegacyOwnerVersions(connection);
+    }
     if (version?.user_version === 1) {
       connection.exec(BATCH_RECEIPT_SCHEMA);
+    }
+    const previous = version?.user_version;
+    if (previous === 1 || previous === 2) {
+      connection.exec(REPLICATION_SCHEMA);
+      for (const [name, sql] of Object.entries(PROJECT_WRITE_TRIGGERS)) {
+        connection.exec(`DROP TRIGGER ${name}`);
+        connection.exec(sql);
+      }
+    }
+    if (previous !== SCHEMA_VERSION) {
+      migrateComponents(connection);
+      upgradeReplicationV4(connection);
+      upgradeCommentTextStorage(connection);
+      connection.exec(COMMAND_SCHEMA);
+      if (previous === 1 || previous === 2) {
+        connection.exec(REPLICATION_BACKFILL);
+        enqueueComponentBaseline(connection);
+        flushReplicationQueue(connection, true);
+      }
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     }
     connection.exec("COMMIT");
@@ -155,6 +194,7 @@ function migrateProjectSchema(connection: Database, path: string): void {
  * До commit вызывающий обязан вставить сущность проекта для отложенного FK.
  */
 export function initializeProjectSchema(connection: Database, projectId: string): void {
+  assertSqlText(projectId, "projectId");
   connection.exec(SCHEMA);
   connection.exec(
     `PRAGMA application_id = ${APPLICATION_ID}; PRAGMA user_version = ${SCHEMA_VERSION};`,

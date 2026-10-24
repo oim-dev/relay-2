@@ -20,18 +20,19 @@ import type {
 } from "./history-fixture.types";
 
 /**
- * Создаёт пустую файловую SQLite и сервис истории для синхронного теста.
+ * Создаёт пустую файловую SQLite и сервис истории, дожидаясь завершения теста до очистки.
  * Дополнительные соединения независимы; все соединения и каталог удаляются даже при отказе.
  * Предметные сессии и материалы создаёт сам тест, встроенных утверждений нет.
  */
-export function withHistoryFixture(
-  operation: (history: HistoryService, database: HistoryDatabaseFixture) => void,
-): void {
+export async function withHistoryFixture(
+  operation: (history: HistoryService, database: HistoryDatabaseFixture) => void | Promise<void>,
+): Promise<void> {
   const root = resolve(
     import.meta.dir,
     "../../../..",
     ".artifacts",
     new Date().toISOString().slice(0, 10),
+    "git-sync-implementation/commands/history",
   );
   mkdirSync(root, { recursive: true });
   const directory = mkdtempSync(join(root, "history-integration-"));
@@ -44,7 +45,7 @@ export function withHistoryFixture(
       slug: "history",
     });
     connections.push(db);
-    operation(new HistoryService(db), {
+    await operation(new HistoryService(db), {
       db,
       path,
       /**
@@ -91,7 +92,7 @@ export function openHistoryIntent(
   history: HistoryService,
   session: HistorySession,
   title = "Исследовать контракт",
-): HistoryCheckpoint {
+): Promise<HistoryCheckpoint> {
   return history.checkpoint(
     session.key,
     "open",
@@ -115,7 +116,7 @@ export function recordHistoryMaterial(
   intent: HistoryCheckpoint,
   action: Exclude<HistoryCheckpointAction, "open">,
   references: HistoryMaterialReferences = {},
-): HistoryCheckpoint {
+): Promise<HistoryCheckpoint> {
   return history.checkpoint(
     intent.id,
     action,
@@ -137,7 +138,7 @@ export function forkHistorySession(
   history: HistoryService,
   parent: HistorySession,
   intent: HistoryCheckpoint,
-): HistorySession {
+): Promise<HistorySession> {
   return history.transition(
     intent.key,
     "fork",
@@ -157,7 +158,7 @@ export function forkHistorySession(
 export function completeHistorySession(
   history: HistoryService,
   session: HistorySession,
-): HistorySession {
+): Promise<HistorySession> {
   return history.transition(
     session.id,
     "complete",
@@ -167,12 +168,15 @@ export function completeHistorySession(
 }
 
 /**
- * Проверяет тип и предметный код синхронного отказа, возвращая ошибку для проверки деталей.
+ * Дожидается отказа, проверяет класс и предметный код, возвращая ошибку для проверки деталей.
  * Успешный вызов или постороннее исключение всегда проваливают тест.
  */
-export function expectHistoryError(operation: () => unknown, code: RelayError["code"]): RelayError {
+export async function expectHistoryError(
+  operation: () => unknown,
+  code: RelayError["code"],
+): Promise<RelayError> {
   try {
-    operation();
+    await operation();
   } catch (error) {
     expect(error).toBeInstanceOf(RelayError);
     if (!(error instanceof RelayError)) {
@@ -236,7 +240,10 @@ export function insertCorruptedHistoryCheckpoint(
  * Триггер удаляется и техническое соединение закрывается при любом исходе callback.
  * Встроенных проверок нет: ожидаемый отказ и состояние отката утверждает сам тест.
  */
-export function withHistorySessionUpdateFailure(path: string, operation: () => void): void {
+export async function withHistorySessionUpdateFailure(
+  path: string,
+  operation: () => void | Promise<void>,
+): Promise<void> {
   const connection = new Database(path, { create: false, readwrite: true });
   try {
     connection.exec(`
@@ -245,7 +252,7 @@ export function withHistorySessionUpdateFailure(path: string, operation: () => v
       BEGIN SELECT RAISE(ABORT, 'Проверка отката составной записи'); END;
     `);
     try {
-      operation();
+      await operation();
     } finally {
       connection.exec("DROP TRIGGER history_fail_session");
     }

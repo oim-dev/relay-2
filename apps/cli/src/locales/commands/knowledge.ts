@@ -163,7 +163,7 @@ export const knowledgeCommandMessages = {
     product: {
       description: "Создать паспорт продукта",
       details:
-        "Создаёт единственный паспорт в выбранном проекте; повторное создание отклоняется. Требуется непустое name. summary — краткая аннотация, description — полное назначение, аудитория, границы и результат в Markdown. Автор задаётся через --actor или RELAY_ACTOR. Для правки существующего паспорта используйте product get и product update.",
+        "Создаёт единственный паспорт в выбранном проекте; повторное создание отклоняется. Требуется непустое name. summary — краткая аннотация, description — полное назначение, аудитория, границы и результат в Markdown. Автор задаётся через --actor или RELAY_ACTOR. --expected-version относится к существующему seed-паспорту продукта; его токен можно получить через get PRODUCT --with-versions. Для правки заполненного паспорта используйте product get и product update.",
       examples: [
         {
           description: "Описать продукт",
@@ -216,7 +216,7 @@ export const knowledgeCommandMessages = {
     implementation: {
       description: "Создать реализацию требования в приложении",
       details:
-        "Обязательны title, application и target — фича или сценарий. Для реализации сценария сначала включите его фичу в участие приложения. Пара приложение/цель уникальна; ранее снятое участие возвращается через application participation replace.\n\ndescription описывает работу и ограничения по вкладу именно этого приложения, а не краткую аннотацию общего требования. По умолчанию status=none. Создание обновляет состав и ревизию приложения; собственное содержание реализации меняется под её ревизией.",
+        "Обязательны title, application и target — фича или сценарий. Для реализации сценария сначала включите его фичу в участие приложения. Пара приложение/цель уникальна; ранее снятое участие возвращается через application participation replace.\n\ndescription описывает работу и ограничения по вкладу именно этого приложения, а не краткую аннотацию общего требования. По умолчанию status=none. Создание обновляет состав и ревизию приложения; --expected-version относится к этому приложению. Его aggregateVersion получите через get APP-1 --with-versions. Собственное содержание реализации меняется под её предусловием.",
       examples: [
         {
           description: "Описать вклад приложения в фичу",
@@ -318,7 +318,7 @@ export const knowledgeCommandMessages = {
     document: {
       description: "Изменить переданные поля документа",
       details:
-        "Передайте хотя бы одно поле и revision из document get. Неуказанные поля сохраняются, body остаётся непустым Markdown. --targets или --relations заменяют весь набор прикреплений; одновременно их передавать нельзя. Для добавления одной связи используйте document link.\n\n--input '{\"targets\":[]}' очищает прикрепления; --input '{\"sectionId\":null}' снимает раздел. --pinned=false снимает закрепление. Весь JSON-ввод несовместим с отдельными предметными полями.",
+        "Передайте хотя бы одно поле и предусловие документа: локальную revision либо переносимый aggregateVersion. Неуказанные поля сохраняются, body остаётся непустым Markdown. --targets или --relations заменяют весь набор прикреплений; одновременно их передавать нельзя. Для добавления одной связи используйте document link.\n\n--input '{\"targets\":[]}' очищает прикрепления; --input '{\"sectionId\":null}' снимает раздел. --pinned=false снимает закрепление. Весь JSON-ввод несовместим с отдельными предметными полями.",
       examples: [
         {
           description: "Обновить полное тело документа",
@@ -329,6 +329,12 @@ export const knowledgeCommandMessages = {
           description: "Снять раздел и закрепление",
           command:
             'relay document update DOC-1 --input \'{"sectionId":null,"pinned":false}\' --if-revision 1 --actor human',
+        },
+        {
+          description:
+            "Применить aggregateVersion документа из get --with-versions; подставьте прочитанный токен",
+          command:
+            "relay document update DOC-1 --body-file ./rules.md --expected-version 'aggregate-version-from-get' --actor human",
         },
       ],
     },

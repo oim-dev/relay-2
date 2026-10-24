@@ -89,12 +89,14 @@ describe("Атомарный пакет через CLI", () => {
   test("смешанный create/update передаёт ревизии и восстанавливает исходную квитанцию после новых запусков", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const original = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create(
-          "document",
-          { name: "Старая редакция", body: "Исходный текст", documentStatus: "active" },
-          "fixture",
-        ),
+      const original = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Старая редакция", body: "Исходный текст", documentStatus: "active" },
+            "fixture",
+          ),
       );
       const input = JSON.stringify({
         version: 1,
@@ -172,13 +174,15 @@ describe("Атомарный пакет через CLI", () => {
         cli.withDatabase(project, (db) => new KnowledgeService(db).list("document")),
       ).toHaveLength(2);
 
-      cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).update(
-          "document",
-          original.id,
-          { body: "Позднее изменение" },
-          { actor: "fixture", ifRevision: original.revision + 1 },
-        ),
+      await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).update(
+            "document",
+            original.id,
+            { body: "Позднее изменение" },
+            { actor: "fixture", ifRevision: original.revision + 1 },
+          ),
       );
       const afterChange = objectValue(
         (await cli.success(["batch", "result", "publish", "--return", "full"])).data,
@@ -221,10 +225,14 @@ describe("Атомарный пакет через CLI", () => {
   test("устаревшая числовая ifRevision сохраняет REVISION_CONFLICT и не подменяется свежей", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) => {
+      const document = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const initial = knowledge.create("document", { name: "Правила", body: "Было" }, "fixture");
-        return knowledge.update(
+        const initial = await knowledge.create(
+          "document",
+          { name: "Правила", body: "Было" },
+          "fixture",
+        );
+        return await knowledge.update(
           "document",
           initial.id,
           { body: "Актуально" },

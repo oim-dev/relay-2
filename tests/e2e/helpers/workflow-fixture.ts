@@ -1,34 +1,79 @@
 import { expect } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ProcessResult, RecordResult, WorkflowEnvironment } from "./workflow-fixture.types";
 
-const binary = resolve(import.meta.dir, "../../../apps/cli/dist/relay");
-const artifacts = resolve(
+const executableSuffix = process.platform === "win32" ? ".exe" : "";
+const binary = resolve(import.meta.dir, `../../../apps/cli/dist/relay${executableSuffix}`);
+const gitSyncBinary = resolve(
+  import.meta.dir,
+  `../../../apps/git-sync/dist/relay-git-sync${executableSuffix}`,
+);
+const today = new Date();
+
+/**
+ * Общий каталог артефактов даты запуска по локальному календарю, как в date +%F.
+ */
+export const workflowArtifactsDirectory = resolve(
   import.meta.dir,
   "../../../.artifacts",
-  new Date().toISOString().slice(0, 10),
+  [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-"),
 );
-const processDeadlineMs = 10_000;
+const processDeadlineMs = 30_000;
 
 /**
  * Создаёт окружение без пользовательского HOME и RELAY_HOME.
  * Каждый вызов invoke запускает новый бинарник, чтобы маршрут проверял сохранённое состояние.
+ * parent позволяет объединить несколько независимых HOME под одним каталогом артефактов.
  * Владение каталогом передаётся вызывающему коду: close обязателен в finally.
  */
-export async function createWorkflowEnvironment(): Promise<WorkflowEnvironment> {
-  await mkdir(artifacts, { recursive: true });
-  const root = await mkdtemp(join(artifacts, "local-workflow-"));
+export async function createWorkflowEnvironment(
+  parent = workflowArtifactsDirectory,
+): Promise<WorkflowEnvironment> {
+  await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(join(parent, "local-workflow-"));
   const home = join(root, "home");
+  const temporary = join(root, "tmp");
   try {
-    await mkdir(home);
+    await Promise.all([mkdir(home), mkdir(temporary)]);
+    // Глубокий каталог артефактов не должен упираться в ограничение путей Git for Windows.
+    await writeFile(join(home, ".gitconfig"), "[core]\n\tlongpaths = true\n");
   } catch (error) {
     await rm(root, { recursive: true, force: true });
     throw error;
   }
 
+  const nativeVariables = Object.fromEntries(
+    ["SystemRoot", "ComSpec", "WINDIR", "PATHEXT"].flatMap((name) => {
+      const value = process.env[name] ?? process.env[name.toUpperCase()];
+      return value === undefined ? [] : [[name, value]];
+    }),
+  );
+  const variables = {
+    ...nativeVariables,
+    HOME: home,
+    USERPROFILE: home,
+    APPDATA: join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: join(home, "AppData", "Local"),
+    RELAY_HOME: join(home, ".relay"),
+    RELAY_GIT_SYNC_BIN: gitSyncBinary,
+    PATH: process.env.PATH ?? process.env.Path ?? "",
+    TEMP: temporary,
+    TMP: temporary,
+    TMPDIR: temporary,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
+  };
+  const pending = new Set<Promise<number>>();
+
   return {
     root,
+    binary,
+    variables,
     /**
      * Выполняет команду с изолированным окружением и читает оба потока параллельно.
      * Незавершённый процесс останавливается до возврата управления вызывающему коду.
@@ -36,12 +81,13 @@ export async function createWorkflowEnvironment(): Promise<WorkflowEnvironment> 
     async invoke(cwd: string, argv: readonly string[], stdin?: string): Promise<ProcessResult> {
       const child = Bun.spawn([binary, ...argv], {
         cwd,
-        env: { HOME: home, RELAY_HOME: join(home, ".relay") },
+        env: variables,
         stdin: stdin === undefined ? "ignore" : new Blob([stdin]),
         stdout: "pipe",
         stderr: "pipe",
         timeout: processDeadlineMs,
       });
+      pending.add(child.exited);
       try {
         const [code, stdout, stderr] = await Promise.all([
           child.exited,
@@ -54,12 +100,15 @@ export async function createWorkflowEnvironment(): Promise<WorkflowEnvironment> 
           child.kill();
           await child.exited;
         }
+        pending.delete(child.exited);
       }
     },
     /**
-     * Удаляет временные проекты и их базы после окончания маршрута.
+     * Дожидается остальных ограниченных deadline вызовов при отказе конкурентного шага,
+     * затем удаляет временные проекты и их базы.
      */
     async close(): Promise<void> {
+      await Promise.allSettled([...pending]);
       await rm(root, { recursive: true, force: true });
     },
   };

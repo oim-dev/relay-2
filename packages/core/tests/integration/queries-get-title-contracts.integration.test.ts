@@ -24,11 +24,11 @@ const corruptedProjectNames = [
 describe("Предметные правила названий в full и summary", () => {
   test.each(historyTitles)(
     "история сохраняет допустимый $name из SQLite в обоих представлениях",
-    ({ title }) => {
-      withEntityDatabase((db) => {
+    async ({ title }) => {
+      await withEntityDatabase(async (db) => {
         const history = new HistoryService(db);
-        const initial = history.start({ title }, "tester");
-        const checkpoint = history.checkpoint(
+        const initial = await history.start({ title }, "tester");
+        const checkpoint = await history.checkpoint(
           initial.id,
           "open",
           {
@@ -85,10 +85,10 @@ describe("Предметные правила названий в full и summar
     },
   );
 
-  test("знание сохраняет краевые пробелы, NUL и название длиннее лимита планирования", () => {
-    withEntityDatabase((db) => {
+  test("знание сохраняет краевые пробелы, NUL и название длиннее лимита планирования", async () => {
+    await withEntityDatabase(async (db) => {
       const title = " До\0" + "Ф".repeat(161) + " ";
-      const feature = new KnowledgeService(db).create("feature", { name: title }, "tester");
+      const feature = await new KnowledgeService(db).create("feature", { name: title }, "tester");
       const queries = new QueryService(db);
 
       const full = queries.getMany([feature.key]);
@@ -114,15 +114,15 @@ describe("Предметные правила названий в full и summar
   for (const kind of planningKinds) {
     test.each(corruptedPlanningTitles)(
       `${kind}: $name отклоняется обоими чтениями после допустимых 160 символов`,
-      ({ title }) => {
-        withEntityDatabase((db) => {
+      async ({ title }) => {
+        await withEntityDatabase(async (db) => {
           const planning = new PlanningService(db);
           const validTitle = "П".repeat(160);
-          const plan = planning.create("work-plan", { title: validTitle }, "tester");
+          const plan = await planning.create("work-plan", { title: validTitle }, "tester");
           const record =
             kind === "work-plan"
               ? plan
-              : planning.create(
+              : await planning.create(
                   "release",
                   {
                     title: validTitle,
@@ -131,7 +131,7 @@ describe("Предметные правила названий в full и summar
                   },
                   "tester",
                 );
-          const other = new TasksService(db).create({ title: "Соседняя" }, "tester");
+          const other = await new TasksService(db).create({ title: "Соседняя" }, "tester");
           const queries = new QueryService(db);
 
           const validFull = queries.getMany([record.key]);
@@ -175,10 +175,10 @@ describe("Предметные правила названий в full и summar
 
   test.each(corruptedProjectNames)(
     "имя проекта: $name не нормализуется и остаётся CORRUPT_DATA",
-    ({ title }) => {
-      withEntityDatabase((db) => {
+    async ({ title }) => {
+      await withEntityDatabase(async (db) => {
         const project = new KnowledgeService(db).get("project");
-        const task = new TasksService(db).create({}, "tester");
+        const task = await new TasksService(db).create({}, "tester");
         const corrupted = {
           ...project,
           revision: project.revision + 1,

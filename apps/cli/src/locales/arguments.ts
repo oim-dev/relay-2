@@ -2,7 +2,21 @@
  * Справка и диагностики общих источников ввода CLI.
  */
 export const argumentMessages = {
-  revision: "Прочитанная ревизия изменяемого владельца (обязательно)",
+  /**
+   * Объясняет обязательную пару локального/переносимого предусловий одного владельца.
+   */
+  versionPreconditionRequired: (revision: string, version: string): string =>
+    `Передайте --${revision} либо --${version}; при одновременной передаче Core проверит оба предусловия`,
+  /**
+   * Не разрешает пустую строку вместо прочитанного переносимого токена.
+   */
+  invalidVersionToken: (flag: string): string =>
+    `--${flag} принимает непустой непрозрачный токен aggregateVersion владельца`,
+  expectedAddressesShape:
+    "--expected-addresses принимает JSON-массив объектов {ref, expectedId} с непустыми строками, без дополнительных полей",
+  revision: "Прочитанная локальная ревизия владельца; обязательна без --expected-version",
+  expectedVersion:
+    "Прочитанный aggregateVersion владельца из get --with-versions; непрозрачный токен",
   pageSize: "Размер страницы (1–100)",
   cursor: "Курсор продолжения того же запроса",
   reference: "Ключ, алиас или постоянный ID",

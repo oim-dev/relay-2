@@ -17,7 +17,7 @@ import type {
   EntityPage,
   EntityPageRequest,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { TasksService } from "../tasks/tasks";
 import { taskRecord } from "../tasks/task-data";
@@ -54,7 +54,7 @@ function matches(record: Readonly<PlanningRecord>, q: string): boolean {
  */
 export class PlanningQueries {
   /* База текущего проекта, предоставляющая согласованные снимки и транзакции. */
-  protected readonly db: ProjectDatabase;
+  protected readonly db: ProjectStore;
 
   /* Общий владелец разрешения ID, ключей и алиасов сущностей. */
   protected readonly entities: EntityService;
@@ -65,7 +65,7 @@ export class PlanningQueries {
   /**
    * Подключает чтения к открытой базе проекта без получения владения её жизненным циклом.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore) {
     this.db = db;
     this.entities = new EntityService(db);
     this.tasks = new TasksService(db);

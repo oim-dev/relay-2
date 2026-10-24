@@ -333,10 +333,10 @@ function stageAt(record: WorkPlanRecord, index = 0): PlanStage {
  * Проверяет предметный тип и код отказа, возвращая ошибку для дополнительных утверждений.
  * Сохранность записей остаётся видна в тесте.
  */
-function fails(operation: () => unknown, code: string): RelayError {
+async function fails(operation: () => unknown, code: string): Promise<RelayError> {
   let error: unknown;
   try {
-    operation();
+    await operation();
   } catch (caught) {
     error = caught;
   }
@@ -352,11 +352,15 @@ function fails(operation: () => unknown, code: string): RelayError {
  * Создаёт отдельный пустой проект в файловой SQLite и очищает его после сценария,
  * включая отказ. Дополнительные соединения закрывает вызывающий тест.
  */
-function fixture(
-  operation: (db: ProjectDatabase, service: PlanningService, tasks: TasksService) => void,
-): void {
+async function fixture(
+  operation: (db: ProjectDatabase, service: PlanningService, tasks: TasksService) => Promise<void>,
+): Promise<void> {
   const root = fileURLToPath(new URL("../../../../.artifacts/", import.meta.url));
-  const parent = join(root, new Date().toISOString().slice(0, 10));
+  const parent = join(
+    root,
+    new Date().toISOString().slice(0, 10),
+    "git-sync-implementation/commands/planning",
+  );
   mkdirSync(parent, { recursive: true });
   const directory = mkdtempSync(join(parent, "planning-integration-"));
   let db: ProjectDatabase | undefined;
@@ -366,7 +370,7 @@ function fixture(
       name: "Планирование",
       slug: "planning",
     });
-    operation(db, new PlanningService(db), new TasksService(db));
+    await operation(db, new PlanningService(db), new TasksService(db));
   } finally {
     db?.close();
     rmSync(directory, { recursive: true, force: true });
@@ -376,9 +380,9 @@ function fixture(
 /**
  * Создаёт черновик с целью и одним пустым этапом, сохраняя полные Markdown-тексты.
  */
-function planWithStage(service: PlanningService, title = "План"): WorkPlanRecord {
-  const plan = service.create("work-plan", { title, goal: markdown }, actor);
-  return service.stage(
+async function planWithStage(service: PlanningService, title = "План"): Promise<WorkPlanRecord> {
+  const plan = await service.create("work-plan", { title, goal: markdown }, actor);
+  return await service.stage(
     plan.id,
     "create",
     { title: "Этап", outcome: markdown, completionConditions: markdown },
@@ -389,54 +393,57 @@ function planWithStage(service: PlanningService, title = "План"): WorkPlanRe
 /**
  * Включает задачу в первый этап по ревизии переданного плана и возвращает новую запись.
  */
-function include(
+async function include(
   service: PlanningService,
   plan: WorkPlanRecord,
   task: EntityRecord,
-): WorkPlanRecord {
-  return service.stageTask(plan.id, stageAt(plan).id, task.key, false, write(plan));
+): Promise<WorkPlanRecord> {
+  return await service.stageTask(plan.id, stageAt(plan).id, task.key, false, write(plan));
 }
 
 /**
  * Создаёт минимальный выпущенный релиз: одна готовая задача, завершённый план и выпуск.
  * Ревизии передаются явно на каждом шаге, последующих скрытых изменений нет.
  */
-function publishedRelease(service: PlanningService, tasks: TasksService): ReleaseRecord {
-  const task = tasks.create({ title: "Готовая работа", column: "done" }, actor);
-  const initialPlan = include(service, planWithStage(service), task);
-  const plan = service.transition(
+async function publishedRelease(
+  service: PlanningService,
+  tasks: TasksService,
+): Promise<ReleaseRecord> {
+  const task = await tasks.create({ title: "Готовая работа", column: "done" }, actor);
+  const initialPlan = await include(service, await planWithStage(service), task);
+  const plan = await service.transition(
     "work-plan",
     initialPlan.id,
     "complete",
     { result: markdown },
     write(initialPlan),
   );
-  const release = service.create(
+  const release = await service.create(
     "release",
     { title: "Выпуск", version: "1", planIds: [plan.id] },
     actor,
   );
-  return service.transition("release", release.id, "publish", {}, write(release));
+  return await service.transition("release", release.id, "publish", {}, write(release));
 }
 
 /**
  * Создаёт открытый план с указанным числом готовых задач. Маркеры в описаниях и
  * комментариях позволяют обнаружить лишнее декодирование полных карточек.
  */
-function planWithCompletedTasks(
+async function planWithCompletedTasks(
   service: PlanningService,
   tasks: TasksService,
   title: string,
   count: number,
-): WorkPlanRecord {
-  let plan = planWithStage(service, title);
+): Promise<WorkPlanRecord> {
+  let plan = await planWithStage(service, title);
   for (let index = 0; index < count; index++) {
-    const task = tasks.create(
+    const task = await tasks.create(
       { title: `${title}: работа ${index + 1}`, description: descriptionMarker, column: "done" },
       actor,
     );
-    tasks.comment(task.id, commentMarker, actor);
-    plan = include(service, plan, task);
+    await tasks.comment(task.id, commentMarker, actor);
+    plan = await include(service, plan, task);
   }
   return plan;
 }
@@ -445,21 +452,27 @@ function planWithCompletedTasks(
  * Подготавливает два завершённых плана с текстовыми маркерами и запланированный релиз.
  * Подготовка выполняется до перехвата чтений графа, чтобы измерять только действие теста.
  */
-function releaseWithCompletedPlans(
+async function releaseWithCompletedPlans(
   service: PlanningService,
   tasks: TasksService,
-): CompletedPlanRelease {
-  let first = planWithCompletedTasks(service, tasks, "Первый", 2);
-  let second = planWithCompletedTasks(service, tasks, "Второй", 1);
-  first = service.transition("work-plan", first.id, "complete", { result: "Готово" }, write(first));
-  second = service.transition(
+): Promise<CompletedPlanRelease> {
+  let first = await planWithCompletedTasks(service, tasks, "Первый", 2);
+  let second = await planWithCompletedTasks(service, tasks, "Второй", 1);
+  first = await service.transition(
+    "work-plan",
+    first.id,
+    "complete",
+    { result: "Готово" },
+    write(first),
+  );
+  second = await service.transition(
     "work-plan",
     second.id,
     "complete",
     { result: "Готово" },
     write(second),
   );
-  const release = service.create(
+  const release = await service.create(
     "release",
     {
       title: "Выпуск",
@@ -473,10 +486,14 @@ function releaseWithCompletedPlans(
 
 /**
  * Проверяет одно чтение графа и отсутствие декодирования текстов и комментариев задач
- * в синхронной операции. Возвращает результат и всегда восстанавливает оба перехвата.
+ * в sync чтении либо async команде. Дожидается результата до восстановления перехватов.
  */
-function expectSingleGraphRead<T>(db: ProjectDatabase, operation: () => T): T {
+async function expectSingleGraphRead<T>(
+  db: ProjectDatabase,
+  operation: () => T | Promise<T>,
+): Promise<T> {
   const graphReads = spyOn(db, "listTaskGraph");
+  const commandReads = spyOn(db.commands, "load");
   const parse = JSON.parse;
   const decoded: string[] = [];
   const decoder = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
@@ -484,9 +501,14 @@ function expectSingleGraphRead<T>(db: ProjectDatabase, operation: () => T): T {
     return parse(text, reviver);
   });
   try {
-    const result = operation();
+    const result = await operation();
 
-    expect(graphReads).toHaveBeenCalledTimes(1);
+    expect(
+      graphReads.mock.calls.length +
+        commandReads.mock.calls.flatMap(([request]) =>
+          request.selectors.filter((selector) => selector.kind === "task-graph"),
+        ).length,
+    ).toBe(1);
     expect(
       decoded.some((text) => text.includes(descriptionMarker) || text.includes(commentMarker)),
     ).toBe(false);
@@ -494,15 +516,16 @@ function expectSingleGraphRead<T>(db: ProjectDatabase, operation: () => T): T {
   } finally {
     decoder.mockRestore();
     graphReads.mockRestore();
+    commandReads.mockRestore();
   }
 }
 
 describe("Чтение планов и релизов в SQLite", () => {
-  test("обычные страницы планов и релизов читают окно Storage с полным total", () => {
-    fixture((db, service) => {
-      const second = service.create("work-plan", { title: "Бета" }, actor);
-      const first = service.create("work-plan", { title: "Альфа" }, actor);
-      const release = service.create(
+  test("обычные страницы планов и релизов читают окно Storage с полным total", async () => {
+    await fixture(async (db, service) => {
+      const second = await service.create("work-plan", { title: "Бета" }, actor);
+      const first = await service.create("work-plan", { title: "Альфа" }, actor);
+      const release = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [first.id] },
         actor,
@@ -543,10 +566,10 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("фильтр плана применяется до окна и сохраняет total отобранного состава", () => {
-    fixture((_db, service) => {
-      service.create("work-plan", { title: "Бета" }, actor);
-      const first = service.create("work-plan", { title: "Альфа" }, actor);
+  test("фильтр плана применяется до окна и сохраняет total отобранного состава", async () => {
+    await fixture(async (_db, service) => {
+      await service.create("work-plan", { title: "Бета" }, actor);
+      const first = await service.create("work-plan", { title: "Альфа" }, actor);
 
       const page = service.listPage(
         "work-plan",
@@ -558,27 +581,27 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("неизвестный статус отклоняется при чтении страницы плана", () => {
-    fixture((_db, service) => {
-      fails(
-        () =>
+  test("неизвестный статус отклоняется при чтении страницы плана", async () => {
+    await fixture(async (_db, service) => {
+      await fails(
+        async () =>
           service.listPage("work-plan", { status: "banana" }, { offset: 0, limit: 1, sort: "key" }),
         "INVALID_ARGUMENT",
       );
     });
   });
 
-  test("поиск по содержанию этапа учитывает статус плана", () => {
-    fixture((_db, service) => {
-      const initial = service.create("work-plan", { title: "Черновик" }, actor);
-      const draft = service.stage(
+  test("поиск по содержанию этапа учитывает статус плана", async () => {
+    await fixture(async (_db, service) => {
+      const initial = await service.create("work-plan", { title: "Черновик" }, actor);
+      const draft = await service.stage(
         initial.id,
         "create",
         { title: "Этап", outcome: "Полный Markdown" },
         write(initial),
       );
-      const historical = planWithStage(service, "История");
-      service.transition(
+      const historical = await planWithStage(service, "История");
+      await service.transition(
         "work-plan",
         historical.id,
         "cancel",
@@ -592,10 +615,10 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("поиск по типизированному адресу находит закрытый план", () => {
-    fixture((_db, service) => {
-      const historical = service.create("work-plan", { title: "История" }, actor);
-      const cancelled = service.transition(
+  test("поиск по типизированному адресу находит закрытый план", async () => {
+    await fixture(async (_db, service) => {
+      const historical = await service.create("work-plan", { title: "История" }, actor);
+      const cancelled = await service.transition(
         "work-plan",
         historical.id,
         "cancel",
@@ -609,10 +632,10 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("фильтр planned возвращает запланированный релиз", () => {
-    fixture((_db, service) => {
-      const draft = service.create("work-plan", { title: "План" }, actor);
-      const release = service.create(
+  test("фильтр planned возвращает запланированный релиз", async () => {
+    await fixture(async (_db, service) => {
+      const draft = await service.create("work-plan", { title: "План" }, actor);
+      const release = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [draft.id] },
         actor,
@@ -624,25 +647,29 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test.each(invalidStatuses)("$name отклоняется при чтении списка", ({ kind, status }) => {
-    fixture((db, service) => {
-      const plan = service.create("work-plan", { title: "Сохранённый план" }, actor);
+  test.each(invalidStatuses)("$name отклоняется при чтении списка", async ({ kind, status }) => {
+    await fixture(async (db, service) => {
+      const plan = await service.create("work-plan", { title: "Сохранённый план" }, actor);
       const current =
         kind === "work-plan"
           ? plan
-          : service.create("release", { title: "Выпуск", version: "1", planIds: [plan.id] }, actor);
+          : await service.create(
+              "release",
+              { title: "Выпуск", version: "1", planIds: [plan.id] },
+              actor,
+            );
       const generation = db.getGeneration();
 
-      fails(() => service.list(kind, { status }), "INVALID_ARGUMENT");
+      await fails(async () => service.list(kind, { status }), "INVALID_ARGUMENT");
 
       expect(service.get(kind, current.id)).toEqual(current);
       expect(db.getGeneration()).toBe(generation);
     });
   });
 
-  test("список этапов возвращает их порядок и ревизию плана", () => {
-    fixture((_db, service) => {
-      const plan = planWithStage(service);
+  test("список этапов возвращает их порядок и ревизию плана", async () => {
+    await fixture(async (_db, service) => {
+      const plan = await planWithStage(service);
 
       const composition = service.listStages(plan.key);
 
@@ -654,9 +681,9 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("чтение этапа возвращает содержание и ревизию плана", () => {
-    fixture((_db, service) => {
-      const plan = planWithStage(service);
+  test("чтение этапа возвращает содержание и ревизию плана", async () => {
+    await fixture(async (_db, service) => {
+      const plan = await planWithStage(service);
       const stage = stageAt(plan);
 
       const composition = service.getStage(plan.id, stage.id);
@@ -665,10 +692,10 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("состав этапа возвращает задачи и ревизию плана-владельца", () => {
-    fixture((_db, service, tasks) => {
-      const task = tasks.create({ title: "Работа" }, actor);
-      const plan = include(service, planWithStage(service), task);
+  test("состав этапа возвращает задачи и ревизию плана-владельца", async () => {
+    await fixture(async (_db, service, tasks) => {
+      const task = await tasks.create({ title: "Работа" }, actor);
+      const plan = await include(service, await planWithStage(service), task);
 
       const composition = service.stageTasks(plan.key, stageAt(plan).id);
 
@@ -676,18 +703,18 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("memberships включает исторический и текущий планы с их собственными ревизиями", () => {
-    fixture((_db, service, tasks) => {
-      const task = tasks.create({ title: "Работа" }, actor);
-      const first = include(service, planWithStage(service, "Первый"), task);
-      const history = service.transition(
+  test("memberships включает исторический и текущий планы с их собственными ревизиями", async () => {
+    await fixture(async (_db, service, tasks) => {
+      const task = await tasks.create({ title: "Работа" }, actor);
+      const first = await include(service, await planWithStage(service, "Первый"), task);
+      const history = await service.transition(
         "work-plan",
         first.id,
         "cancel",
         { result: "Пересмотр" },
         write(first),
       );
-      const current = include(service, planWithStage(service, "Текущий"), task);
+      const current = await include(service, await planWithStage(service, "Текущий"), task);
 
       const memberships = service.memberships(task.key);
 
@@ -702,10 +729,10 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("состав релиза возвращает планы и ревизию релиза-владельца", () => {
-    fixture((_db, service) => {
-      const current = service.create("work-plan", { title: "Текущий" }, actor);
-      const release = service.create(
+  test("состав релиза возвращает планы и ревизию релиза-владельца", async () => {
+    await fixture(async (_db, service) => {
+      const current = await service.create("work-plan", { title: "Текущий" }, actor);
+      const release = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [current.key] },
         actor,
@@ -721,18 +748,18 @@ describe("Чтение планов и релизов в SQLite", () => {
     });
   });
 
-  test("несуществующий этап отклоняется как NOT_FOUND", () => {
-    fixture((_db, service) => {
-      const plan = planWithStage(service);
+  test("несуществующий этап отклоняется как NOT_FOUND", async () => {
+    await fixture(async (_db, service) => {
+      const plan = await planWithStage(service);
 
-      fails(() => service.getStage(plan.id, "missing"), "NOT_FOUND");
+      await fails(async () => service.getStage(plan.id, "missing"), "NOT_FOUND");
     });
   });
 
-  test("состав этапа и задачи читаются из одного снимка при конкурентной записи после чтения плана", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Работа", description: "До записи" }, actor);
-      const plan = include(service, planWithStage(service), task);
+  test("состав этапа и задачи читаются из одного снимка при конкурентной записи после чтения плана", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create({ title: "Работа", description: "До записи" }, actor);
+      const plan = await include(service, await planWithStage(service), task);
       const writer = ProjectDatabase.open(db.path);
       const originalGet = db.get.bind(db);
       let changed = false;
@@ -741,13 +768,24 @@ describe("Чтение планов и релизов в SQLite", () => {
         if (record?.id === plan.id && !changed) {
           changed = true;
           writer.transaction(() => {
-            new PlanningService(writer).update(
-              "work-plan",
-              plan.id,
-              { summary: "После записи" },
-              write(plan),
+            // Синхронный читатель удерживает snapshot; конкурентную запись моделируем
+            // готовыми строками Storage, а не async сервисом внутри sync callback.
+            writer.update(
+              {
+                ...plan,
+                revision: plan.revision + 1,
+                data: { ...plan.data, summary: "После записи" },
+              },
+              plan.revision,
             );
-            new TasksService(writer).update(task.id, { description: "После записи" }, write(task));
+            writer.update(
+              {
+                ...task,
+                revision: task.revision + 1,
+                data: { ...task.data, description: "После записи" },
+              },
+              task.revision,
+            );
           });
         }
         return record;
@@ -774,10 +812,10 @@ describe("Чтение планов и релизов в SQLite", () => {
 describe("Повреждение сохранённых составов планирования", () => {
   test.each(corruptedPlanCases)(
     "$damageName: $operationName отклоняется без записи",
-    ({ damage, run }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Работа" }, actor);
-        const plan = include(service, planWithStage(service), task);
+    async ({ damage, run }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Работа" }, actor);
+        const plan = await include(service, await planWithStage(service), task);
         // Намеренно повреждаем сохранённую форму через Storage, обходя предметный API.
         const corrupted = {
           ...plan,
@@ -787,7 +825,7 @@ describe("Повреждение сохранённых составов пла�
         db.update(corrupted, plan.revision);
         const generation = db.getGeneration();
 
-        fails(() => run(service, plan, corrupted, task), "CORRUPT_DATA");
+        await fails(async () => run(service, plan, corrupted, task), "CORRUPT_DATA");
 
         expect(db.get(plan.id)).toEqual(corrupted);
         expect(db.getGeneration()).toBe(generation);
@@ -797,10 +835,10 @@ describe("Повреждение сохранённых составов пла�
 
   test.each(corruptedReleaseOperations)(
     "повреждённый состав релиза: $name отклоняется без записи",
-    ({ run }) => {
-      fixture((db, service) => {
-        const plan = planWithStage(service);
-        const release = service.create(
+    async ({ run }) => {
+      await fixture(async (db, service) => {
+        const plan = await planWithStage(service);
+        const release = await service.create(
           "release",
           { title: "Выпуск", version: "1", planIds: [plan.id] },
           actor,
@@ -814,7 +852,7 @@ describe("Повреждение сохранённых составов пла�
         db.update(corrupted, release.revision);
         const generation = db.getGeneration();
 
-        fails(() => run(service, corrupted), "CORRUPT_DATA");
+        await fails(async () => run(service, corrupted), "CORRUPT_DATA");
 
         expect(db.get(release.id)).toEqual(corrupted);
         expect(db.getGeneration()).toBe(generation);
@@ -824,11 +862,13 @@ describe("Повреждение сохранённых составов пла�
 });
 
 describe("Готовность составов планирования", () => {
-  test("progress плана с несколькими задачами читает один граф без текстов и журналов задач", () => {
-    fixture((db, service, tasks) => {
-      const plan = planWithCompletedTasks(service, tasks, "Первый", 2);
+  test("progress плана с несколькими задачами читает один граф без текстов и журналов задач", async () => {
+    await fixture(async (db, service, tasks) => {
+      const plan = await planWithCompletedTasks(service, tasks, "Первый", 2);
 
-      const progress = expectSingleGraphRead(db, () => service.progress("work-plan", plan.id));
+      const progress = await expectSingleGraphRead(db, async () =>
+        service.progress("work-plan", plan.id),
+      );
 
       expect(progress).toMatchObject({
         completed: true,
@@ -840,12 +880,20 @@ describe("Готовность составов планирования", () =>
 
   test.each(completedPlanSizes)(
     "complete плана с $name читает один граф без текстов и журналов задач",
-    ({ count }) => {
-      fixture((db, service, tasks) => {
-        const plan = planWithCompletedTasks(service, tasks, "План", count);
+    async ({ count }) => {
+      await fixture(async (db, service, tasks) => {
+        const plan = await planWithCompletedTasks(service, tasks, "План", count);
 
-        const completed = expectSingleGraphRead(db, () =>
-          service.transition("work-plan", plan.id, "complete", { result: "Готово" }, write(plan)),
+        const completed = await expectSingleGraphRead(
+          db,
+          async () =>
+            await service.transition(
+              "work-plan",
+              plan.id,
+              "complete",
+              { result: "Готово" },
+              write(plan),
+            ),
         );
 
         expect(completed.data.status).toBe("completed");
@@ -854,11 +902,13 @@ describe("Готовность составов планирования", () =>
     },
   );
 
-  test("progress релиза с несколькими планами читает один общий граф без текстов и журналов задач", () => {
-    fixture((db, service, tasks) => {
-      const { first, second, release } = releaseWithCompletedPlans(service, tasks);
+  test("progress релиза с несколькими планами читает один общий граф без текстов и журналов задач", async () => {
+    await fixture(async (db, service, tasks) => {
+      const { first, second, release } = await releaseWithCompletedPlans(service, tasks);
 
-      const progress = expectSingleGraphRead(db, () => service.progress("release", release.id));
+      const progress = await expectSingleGraphRead(db, async () =>
+        service.progress("release", release.id),
+      );
 
       expect(progress).toMatchObject({
         completed: true,
@@ -872,12 +922,13 @@ describe("Готовность составов планирования", () =>
     });
   });
 
-  test("publish релиза с несколькими планами читает один общий граф без текстов и журналов задач", () => {
-    fixture((db, service, tasks) => {
-      const { release } = releaseWithCompletedPlans(service, tasks);
+  test("publish релиза с несколькими планами читает один общий граф без текстов и журналов задач", async () => {
+    await fixture(async (db, service, tasks) => {
+      const { release } = await releaseWithCompletedPlans(service, tasks);
 
-      const published = expectSingleGraphRead(db, () =>
-        service.transition("release", release.id, "publish", {}, write(release)),
+      const published = await expectSingleGraphRead(
+        db,
+        async () => await service.transition("release", release.id, "publish", {}, write(release)),
       );
 
       expect(published.data.status).toBe("released");
@@ -886,10 +937,13 @@ describe("Готовность составов планирования", () =>
 });
 
 describe("Сохранение содержания и порядка этапов", () => {
-  test("полные тексты, ссылки ID и порядок этапов сохраняются после повторного открытия", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Существующая задача", description: markdown }, actor);
-      let plan = service.create(
+  test("полные тексты, ссылки ID и порядок этапов сохраняются после повторного открытия", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create(
+        { title: "Существующая задача", description: markdown },
+        actor,
+      );
+      let plan = await service.create(
         "work-plan",
         {
           title: "Перенос",
@@ -911,30 +965,45 @@ describe("Сохранение содержания и порядка этапо
         { kind: "project", id: db.projectId },
         { kind: "product", id: new EntityService(db).get("PRODUCT", "product").id },
       ]);
-      plan = service.stage(plan.key, "create", { title: "Первый", outcome: markdown }, write(plan));
+      plan = await service.stage(
+        plan.key,
+        "create",
+        { title: "Первый", outcome: markdown },
+        write(plan),
+      );
       const first = stageAt(plan).id;
-      plan = service.stage(plan.id, "create", { title: "Второй", before: first }, write(plan));
+      plan = await service.stage(
+        plan.id,
+        "create",
+        { title: "Второй", before: first },
+        write(plan),
+      );
       const second = stageAt(plan).id;
 
       expect(plan.data.stages.map((stage) => stage.id)).toEqual([second, first]);
 
-      plan = service.stage(plan.id, "move", { stageId: second, direction: "down" }, write(plan));
+      plan = await service.stage(
+        plan.id,
+        "move",
+        { stageId: second, direction: "down" },
+        write(plan),
+      );
 
       expect(plan.data.stages.map((stage) => stage.id)).toEqual([first, second]);
 
-      plan = service.stage(plan.id, "move", { stageId: first, before: null }, write(plan));
+      plan = await service.stage(plan.id, "move", { stageId: first, before: null }, write(plan));
 
       expect(plan.data.stages.map((stage) => stage.id)).toEqual([second, first]);
 
-      plan = service.stage(
+      plan = await service.stage(
         plan.id,
         "update",
         { stageId: first, completionConditions: markdown },
         write(plan),
       );
-      plan = service.stageTask(plan.id, first, task.key, false, write(plan));
-      plan = service.stage(plan.id, "remove", { stageId: second }, write(plan));
-      plan = service.update("work-plan", plan.key, { summary: "Уточнено" }, write(plan));
+      plan = await service.stageTask(plan.id, first, task.key, false, write(plan));
+      plan = await service.stage(plan.id, "remove", { stageId: second }, write(plan));
+      plan = await service.update("work-plan", plan.key, { summary: "Уточнено" }, write(plan));
       const renamedTask = new EntityService(db).rename(
         task.id,
         "task",
@@ -965,14 +1034,15 @@ describe("Сохранение содержания и порядка этапо
 });
 
 describe("Включения задач и ревизии планов", () => {
-  test("удаление непустого этапа отклоняется без изменения плана и задачи", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Работа" }, actor);
-      const plan = include(service, planWithStage(service), task);
+  test("удаление непустого этапа отклоняется без изменения плана и задачи", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create({ title: "Работа" }, actor);
+      const plan = await include(service, await planWithStage(service), task);
       const generation = db.getGeneration();
 
-      fails(
-        () => service.stage(plan.id, "remove", { stageId: stageAt(plan).id }, write(plan)),
+      await fails(
+        async () =>
+          await service.stage(plan.id, "remove", { stageId: stageAt(plan).id }, write(plan)),
         "STAGE_NOT_EMPTY",
       );
 
@@ -984,19 +1054,20 @@ describe("Включения задач и ревизии планов", () => {
 
   test.each(membershipTargets)(
     "включение в $name отклоняется при существующем открытом включении",
-    ({ target }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Общая работа" }, actor);
-        let first = include(service, planWithStage(service, "Первый"), task);
-        first = service.stage(first.id, "create", { title: "Другой этап" }, write(first));
-        const second = planWithStage(service, "Второй");
+    async ({ target }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Общая работа" }, actor);
+        let first = await include(service, await planWithStage(service, "Первый"), task);
+        first = await service.stage(first.id, "create", { title: "Другой этап" }, write(first));
+        const second = await planWithStage(service, "Второй");
         const before = db.getGeneration();
 
         if (target === "plan") {
-          fails(() => include(service, second, task), "MEMBERSHIP_CONFLICT");
+          await fails(async () => await include(service, second, task), "MEMBERSHIP_CONFLICT");
         } else {
-          fails(
-            () => service.stageTask(first.id, stageAt(first, 1).id, task.id, false, write(first)),
+          await fails(
+            async () =>
+              await service.stageTask(first.id, stageAt(first, 1).id, task.id, false, write(first)),
             "MEMBERSHIP_CONFLICT",
           );
         }
@@ -1009,20 +1080,20 @@ describe("Включения задач и ревизии планов", () => {
     },
   );
 
-  test("отмена освобождает текущее включение, сохраняя исторический состав и задачу", () => {
-    fixture((_db, service, tasks) => {
-      const task = tasks.create({ title: "Общая работа" }, actor);
-      let first = include(service, planWithStage(service, "Первый"), task);
-      let second = planWithStage(service, "Второй");
+  test("отмена освобождает текущее включение, сохраняя исторический состав и задачу", async () => {
+    await fixture(async (_db, service, tasks) => {
+      const task = await tasks.create({ title: "Общая работа" }, actor);
+      let first = await include(service, await planWithStage(service, "Первый"), task);
+      let second = await planWithStage(service, "Второй");
 
-      first = service.transition(
+      first = await service.transition(
         "work-plan",
         first.id,
         "cancel",
         { result: markdown },
         write(first),
       );
-      second = include(service, second, task);
+      second = await include(service, second, task);
 
       expect(stageAt(first).taskIds).toEqual([task.id]);
       expect(stageAt(second).taskIds).toEqual([task.id]);
@@ -1033,11 +1104,11 @@ describe("Включения задач и ревизии планов", () => {
 
   test.each(closedPlanOperations)(
     "$name отменённого плана отклоняется без изменения истории",
-    ({ run }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Историческая работа" }, actor);
-        const initial = include(service, planWithStage(service), task);
-        const plan = service.transition(
+    async ({ run }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Историческая работа" }, actor);
+        const initial = await include(service, await planWithStage(service), task);
+        const plan = await service.transition(
           "work-plan",
           initial.id,
           "cancel",
@@ -1046,7 +1117,7 @@ describe("Включения задач и ревизии планов", () => {
         );
         const generation = db.getGeneration();
 
-        fails(() => run(service, plan, task), "PLAN_READ_ONLY");
+        await fails(async () => run(service, plan, task), "PLAN_READ_ONLY");
 
         expect(service.get("work-plan", plan.id)).toEqual(plan);
         expect(tasks.get(task.id)).toEqual(task);
@@ -1057,14 +1128,14 @@ describe("Включения задач и ревизии планов", () => {
 
   test.each(stalePlanOperations)(
     "$name с устаревшей ревизией отклоняется после записи другого соединения",
-    ({ run }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Задача" }, actor);
-        const initial = include(service, planWithStage(service), task);
+    async ({ run }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Задача" }, actor);
+        const initial = await include(service, await planWithStage(service), task);
         const connection = ProjectDatabase.open(db.path);
         try {
           const concurrent = new PlanningService(connection);
-          const current = concurrent.update(
+          const current = await concurrent.update(
             "work-plan",
             initial.id,
             { summary: "Другой автор" },
@@ -1072,10 +1143,16 @@ describe("Включения задач и ревизии планов", () => {
           );
           const generation = db.getGeneration();
 
-          fails(() => run(service, initial, task), "REVISION_CONFLICT");
+          await fails(async () => run(service, initial, task), "REVISION_CONFLICT");
 
           expect(
-            service.stageTask(current.id, stageAt(current).id, task.id, false, write(current)),
+            await service.stageTask(
+              current.id,
+              stageAt(current).id,
+              task.id,
+              false,
+              write(current),
+            ),
           ).toEqual(current);
           expect(db.getGeneration()).toBe(generation);
           expect(service.get("work-plan", current.id)).toEqual(current);
@@ -1088,13 +1165,13 @@ describe("Включения задач и ревизии планов", () => {
 
   test.each(staleTransferOwners)(
     "перенос с устаревшей ревизией $name сохраняет оба плана",
-    ({ owner }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Переносимая работа" }, actor);
-        const source = include(service, planWithStage(service, "Источник"), task);
-        let target = planWithStage(service, "Получатель");
+    async ({ owner }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Переносимая работа" }, actor);
+        const source = await include(service, await planWithStage(service, "Источник"), task);
+        let target = await planWithStage(service, "Получатель");
         const staleTarget = target;
-        target = service.update(
+        target = await service.update(
           "work-plan",
           target.id,
           { summary: "Новая ревизия" },
@@ -1108,9 +1185,9 @@ describe("Включения задач и ревизии планов", () => {
         };
         const generation = db.getGeneration();
 
-        fails(
-          () =>
-            service.transfer(source.id, input, {
+        await fails(
+          async () =>
+            await service.transfer(source.id, input, {
               ...write(source),
               ifRevision: owner === "source" ? source.revision - 1 : source.revision,
               targetRevision: owner === "target" ? staleTarget.revision : target.revision,
@@ -1126,11 +1203,11 @@ describe("Включения задач и ревизии планов", () => {
     },
   );
 
-  test("отказ второй SQL-записи переноса откатывает оба плана, после снятия отказа перенос сохраняется", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Переносимая работа" }, actor);
-      const source = include(service, planWithStage(service, "Источник"), task);
-      const target = planWithStage(service, "Получатель");
+  test("отказ второй SQL-записи переноса откатывает оба плана, после снятия отказа перенос сохраняется", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create({ title: "Переносимая работа" }, actor);
+      const source = await include(service, await planWithStage(service, "Источник"), task);
+      const target = await planWithStage(service, "Получатель");
       const input = {
         task: task.key,
         targetPlan: target.key,
@@ -1145,9 +1222,9 @@ describe("Включения задач и ревизии планов", () => {
         sql.exec(`CREATE TRIGGER reject_transfer BEFORE UPDATE ON entities
           WHEN OLD.id = '${target.id}' BEGIN SELECT RAISE(ABORT, 'Отказ второй записи'); END`);
 
-        const failure = fails(
-          () =>
-            service.transfer(source.id, input, {
+        const failure = await fails(
+          async () =>
+            await service.transfer(source.id, input, {
               ...write(source),
               targetRevision: target.revision,
             }),
@@ -1164,7 +1241,7 @@ describe("Включения задач и ревизии планов", () => {
         sql.close();
       }
 
-      const saved = service.transfer(source.id, input, {
+      const saved = await service.transfer(source.id, input, {
         ...write(source),
         targetRevision: target.revision,
       });
@@ -1182,11 +1259,11 @@ describe("Включения задач и ревизии планов", () => {
 
   test.each(invalidSamePlanTransfers)(
     "$name отклоняет перенос между этапами одного плана без записи",
-    ({ reason, targetRevisionDelta, code }) => {
-      fixture((db, service, tasks) => {
-        const task = tasks.create({ title: "Задача" }, actor);
-        let plan = include(service, planWithStage(service), task);
-        plan = service.stage(plan.id, "create", { title: "Получатель" }, write(plan));
+    async ({ reason, targetRevisionDelta, code }) => {
+      await fixture(async (db, service, tasks) => {
+        const task = await tasks.create({ title: "Задача" }, actor);
+        let plan = await include(service, await planWithStage(service), task);
+        plan = await service.stage(plan.id, "create", { title: "Получатель" }, write(plan));
         const input = {
           task: task.id,
           targetPlan: plan.id,
@@ -1195,9 +1272,9 @@ describe("Включения задач и ревизии планов", () => {
         };
         const before = db.getGeneration();
 
-        fails(
-          () =>
-            service.transfer(plan.id, input, {
+        await fails(
+          async () =>
+            await service.transfer(plan.id, input, {
               ...write(plan),
               targetRevision: plan.revision + targetRevisionDelta,
             }),
@@ -1211,11 +1288,11 @@ describe("Включения задач и ревизии планов", () => {
     },
   );
 
-  test("перенос между этапами одного плана сохраняет одну ревизию, а повтор остаётся no-op", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Задача" }, actor);
-      let plan = include(service, planWithStage(service), task);
-      plan = service.stage(plan.id, "create", { title: "Получатель" }, write(plan));
+  test("перенос между этапами одного плана сохраняет одну ревизию, а повтор остаётся no-op", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create({ title: "Задача" }, actor);
+      let plan = await include(service, await planWithStage(service), task);
+      plan = await service.stage(plan.id, "create", { title: "Получатель" }, write(plan));
       const input = {
         task: task.id,
         targetPlan: plan.id,
@@ -1224,7 +1301,7 @@ describe("Включения задач и ревизии планов", () => {
       };
       const options = { ...write(plan), targetRevision: plan.revision };
 
-      const saved = service.transfer(plan.id, input, options);
+      const saved = await service.transfer(plan.id, input, options);
 
       expect(saved.source).toEqual(saved.target);
       expect(saved.target.revision).toBe(plan.revision + 1);
@@ -1232,7 +1309,7 @@ describe("Включения задач и ревизии планов", () => {
       expect(tasks.get(task.id)).toEqual(task);
       const generation = db.getGeneration();
 
-      const repeated = service.transfer(plan.id, input, {
+      const repeated = await service.transfer(plan.id, input, {
         ...write(saved.target),
         targetRevision: saved.target.revision,
       });
@@ -1244,26 +1321,35 @@ describe("Включения задач и ревизии планов", () => {
 });
 
 describe("Переходы состояния планов", () => {
-  test("начало плана с целью и пустым этапом отклоняется без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
+  test("начало плана с целью и пустым этапом отклоняется без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
       const generation = db.getGeneration();
 
-      fails(() => service.transition("work-plan", plan.id, "start", {}, write(plan)), "NOT_READY");
+      await fails(
+        async () => await service.transition("work-plan", plan.id, "start", {}, write(plan)),
+        "NOT_READY",
+      );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(generation);
     });
   });
 
-  test("пустой план нельзя завершить и его прогресс остаётся нулевым", () => {
-    fixture((db, service) => {
-      const plan = service.create("work-plan", { title: "Черновик" }, actor);
+  test("пустой план нельзя завершить и его прогресс остаётся нулевым", async () => {
+    await fixture(async (db, service) => {
+      const plan = await service.create("work-plan", { title: "Черновик" }, actor);
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.transition("work-plan", plan.id, "complete", { result: markdown }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition(
+            "work-plan",
+            plan.id,
+            "complete",
+            { result: markdown },
+            write(plan),
+          ),
         "NOT_READY",
       );
 
@@ -1276,21 +1362,24 @@ describe("Переходы состояния планов", () => {
     });
   });
 
-  test("состав без цели не допускает начало плана, добавление цели разрешает переход", () => {
-    fixture((db, service, tasks) => {
-      let plan = service.create("work-plan", { title: "Черновик" }, actor);
-      plan = service.stage(plan.id, "create", { title: "Этап" }, write(plan));
-      const task = tasks.create({ title: "Работа" }, actor);
-      plan = include(service, plan, task);
+  test("состав без цели не допускает начало плана, добавление цели разрешает переход", async () => {
+    await fixture(async (db, service, tasks) => {
+      let plan = await service.create("work-plan", { title: "Черновик" }, actor);
+      plan = await service.stage(plan.id, "create", { title: "Этап" }, write(plan));
+      const task = await tasks.create({ title: "Работа" }, actor);
+      plan = await include(service, plan, task);
       const generation = db.getGeneration();
 
-      fails(() => service.transition("work-plan", plan.id, "start", {}, write(plan)), "NOT_READY");
+      await fails(
+        async () => await service.transition("work-plan", plan.id, "start", {}, write(plan)),
+        "NOT_READY",
+      );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(generation);
 
-      plan = service.update("work-plan", plan.id, { goal: markdown }, write(plan));
-      plan = service.transition("work-plan", plan.id, "start", {}, write(plan));
+      plan = await service.update("work-plan", plan.id, { goal: markdown }, write(plan));
+      plan = await service.transition("work-plan", plan.id, "start", {}, write(plan));
 
       expect(plan.data.status).toBe("active");
       expect(plan.data.startedAt).toBeString();
@@ -1298,15 +1387,16 @@ describe("Переходы состояния планов", () => {
     });
   });
 
-  test("пробельный результат отмены отклоняется без изменения активного плана", () => {
-    fixture((db, service, tasks) => {
-      const task = tasks.create({ title: "Работа" }, actor);
-      const initial = include(service, planWithStage(service), task);
-      const plan = service.transition("work-plan", initial.id, "start", {}, write(initial));
+  test("пробельный результат отмены отклоняется без изменения активного плана", async () => {
+    await fixture(async (db, service, tasks) => {
+      const task = await tasks.create({ title: "Работа" }, actor);
+      const initial = await include(service, await planWithStage(service), task);
+      const plan = await service.transition("work-plan", initial.id, "start", {}, write(initial));
       const generation = db.getGeneration();
 
-      fails(
-        () => service.transition("work-plan", plan.id, "cancel", { result: "\n " }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition("work-plan", plan.id, "cancel", { result: "\n " }, write(plan)),
         "VALIDATION_ERROR",
       );
 
@@ -1316,21 +1406,27 @@ describe("Переходы состояния планов", () => {
     });
   });
 
-  test("готовность задачи к закрытию и выполненные критерии ещё не означают выполнение плана", () => {
-    fixture((db, service, tasks) => {
-      let task = tasks.create(
+  test("готовность задачи к закрытию и выполненные критерии ещё не означают выполнение плана", async () => {
+    await fixture(async (db, service, tasks) => {
+      let task = await tasks.create(
         {
           title: "Работа с критерием",
           acceptanceCriteria: [{ title: "Проверено внешним инструментом" }],
         },
         actor,
       );
-      const plan = include(service, planWithStage(service), task);
+      const plan = await include(service, await planWithStage(service), task);
       const initialGeneration = db.getGeneration();
 
-      fails(
-        () =>
-          service.transition("work-plan", plan.id, "complete", { result: markdown }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition(
+            "work-plan",
+            plan.id,
+            "complete",
+            { result: markdown },
+            write(plan),
+          ),
         "NOT_READY",
       );
 
@@ -1340,43 +1436,49 @@ describe("Переходы состояния планов", () => {
       if (!criterion) {
         throw new Error("В подготовленной задаче отсутствует критерий");
       }
-      task = tasks.criterion(task.id, "complete", { id: criterion.id }, write(task));
-      task = tasks.move(task.id, { column: "review" }, write(task));
+      task = await tasks.criterion(task.id, "complete", { id: criterion.id }, write(task));
+      task = await tasks.move(task.id, { column: "review" }, write(task));
 
       expect(tasks.progress(task.id)).toMatchObject({ completed: false, canComplete: true });
       expect(service.progress("work-plan", plan.id).completed).toBe(false);
       const readyGeneration = db.getGeneration();
 
-      fails(
-        () =>
-          service.transition("work-plan", plan.id, "complete", { result: markdown }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition(
+            "work-plan",
+            plan.id,
+            "complete",
+            { result: markdown },
+            write(plan),
+          ),
         "NOT_READY",
       );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(readyGeneration);
 
-      tasks.move(task.id, { column: "done" }, write(task));
+      await tasks.move(task.id, { column: "done" }, write(task));
 
       expect(service.progress("work-plan", plan.id).completed).toBe(true);
     });
   });
 
-  test("done без актуальных зависимостей и детей не завершает план; пустой этап не блокирует", () => {
-    fixture((db, service, tasks) => {
-      let dependency = tasks.create({ title: "Внешняя зависимость", column: "done" }, actor);
-      let parent = tasks.create(
+  test("done без актуальных зависимостей и детей не завершает план; пустой этап не блокирует", async () => {
+    await fixture(async (db, service, tasks) => {
+      let dependency = await tasks.create({ title: "Внешняя зависимость", column: "done" }, actor);
+      let parent = await tasks.create(
         { title: "Собственная задача", dependencies: [dependency.id] },
         actor,
       );
-      let child = tasks.create(
+      let child = await tasks.create(
         { title: "Дочерняя работа", parent: parent.id, column: "done" },
         actor,
       );
-      parent = tasks.move(parent.id, { column: "done" }, write(parent));
-      let plan = include(service, planWithStage(service), parent);
-      plan = service.stage(plan.id, "create", { title: "Пустой этап" }, write(plan));
-      dependency = tasks.move(dependency.id, { column: "ready" }, write(dependency));
+      parent = await tasks.move(parent.id, { column: "done" }, write(parent));
+      let plan = await include(service, await planWithStage(service), parent);
+      plan = await service.stage(plan.id, "create", { title: "Пустой этап" }, write(plan));
+      dependency = await tasks.move(dependency.id, { column: "ready" }, write(dependency));
       const before = db.getGeneration();
       expect(service.progress("work-plan", plan.id)).toMatchObject({
         completed: false,
@@ -1384,29 +1486,41 @@ describe("Переходы состояния планов", () => {
       });
       expect(service.progress("work-plan", plan.id).blockers).toContain(dependency.id);
 
-      fails(
-        () =>
-          service.transition("work-plan", plan.id, "complete", { result: markdown }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition(
+            "work-plan",
+            plan.id,
+            "complete",
+            { result: markdown },
+            write(plan),
+          ),
         "NOT_READY",
       );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(before);
 
-      dependency = tasks.move(dependency.id, { column: "done" }, write(dependency));
-      child = tasks.move(child.id, { column: "in-progress" }, write(child));
+      dependency = await tasks.move(dependency.id, { column: "done" }, write(dependency));
+      child = await tasks.move(child.id, { column: "in-progress" }, write(child));
       const reopenedGeneration = db.getGeneration();
 
-      fails(
-        () =>
-          service.transition("work-plan", plan.id, "complete", { result: markdown }, write(plan)),
+      await fails(
+        async () =>
+          await service.transition(
+            "work-plan",
+            plan.id,
+            "complete",
+            { result: markdown },
+            write(plan),
+          ),
         "NOT_READY",
       );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(reopenedGeneration);
 
-      child = tasks.move(child.id, { column: "done" }, write(child));
+      child = await tasks.move(child.id, { column: "done" }, write(child));
       const ready = service.progress("work-plan", plan.id);
 
       expect(ready).toMatchObject({
@@ -1416,7 +1530,7 @@ describe("Переходы состояния планов", () => {
       expect(ready.stages).toMatchObject([{ completed: true }, { completed: false }]);
       expect(plan.data.status).toBe("draft");
 
-      plan = service.transition(
+      plan = await service.transition(
         "work-plan",
         plan.id,
         "complete",
@@ -1430,15 +1544,15 @@ describe("Переходы состояния планов", () => {
       expect(plan.data.closedAt).toBeString();
       const completedGeneration = db.getGeneration();
 
-      fails(
-        () => service.update("work-plan", plan.id, { summary: "Нельзя" }, write(plan)),
+      await fails(
+        async () => await service.update("work-plan", plan.id, { summary: "Нельзя" }, write(plan)),
         "PLAN_READ_ONLY",
       );
 
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       expect(db.getGeneration()).toBe(completedGeneration);
 
-      const next = include(service, planWithStage(service, "Следующий план"), parent);
+      const next = await include(service, await planWithStage(service, "Следующий план"), parent);
 
       expect(stageAt(next).taskIds).toEqual([parent.id]);
       expect(stageAt(service.get("work-plan", plan.id)).taskIds).toEqual([parent.id]);
@@ -1447,20 +1561,20 @@ describe("Переходы состояния планов", () => {
 });
 
 describe("Публикация и перепланирование релизов", () => {
-  test("релиз требует завершённых планов с актуально выполненными задачами и сохраняет факт выпуска после reopen", () => {
-    fixture((db, service, tasks) => {
-      let task = tasks.create({ title: "Первая работа", column: "done" }, actor);
-      const otherTask = tasks.create({ title: "Вторая работа", column: "done" }, actor);
-      let first = include(service, planWithStage(service, "Первый"), task);
-      let second = include(service, planWithStage(service, "Второй"), otherTask);
-      first = service.transition(
+  test("релиз требует завершённых планов с актуально выполненными задачами и сохраняет факт выпуска после reopen", async () => {
+    await fixture(async (db, service, tasks) => {
+      let task = await tasks.create({ title: "Первая работа", column: "done" }, actor);
+      const otherTask = await tasks.create({ title: "Вторая работа", column: "done" }, actor);
+      let first = await include(service, await planWithStage(service, "Первый"), task);
+      let second = await include(service, await planWithStage(service, "Второй"), otherTask);
+      first = await service.transition(
         "work-plan",
         first.id,
         "complete",
         { result: markdown },
         write(first),
       );
-      let release = service.create(
+      let release = await service.create(
         "release",
         {
           title: "Выпуск",
@@ -1478,8 +1592,8 @@ describe("Публикация и перепланирование релизо�
       expect(release.data).not.toHaveProperty("applicationId");
       const beforeIncompletePlan = db.getGeneration();
 
-      fails(
-        () => service.transition("release", release.id, "publish", {}, write(release)),
+      await fails(
+        async () => await service.transition("release", release.id, "publish", {}, write(release)),
         "NOT_READY",
       );
 
@@ -1490,7 +1604,7 @@ describe("Публикация и перепланирование релизо�
         completed: false,
         counts: { total: 2, completed: 1 },
       });
-      second = service.transition(
+      second = await service.transition(
         "work-plan",
         second.id,
         "complete",
@@ -1500,11 +1614,11 @@ describe("Публикация и перепланирование релизо�
 
       expect(service.progress("release", release.id).completed).toBe(true);
       expect(service.get("release", release.id).data.status).toBe("planned");
-      task = tasks.move(task.id, { column: "in-progress" }, write(task));
+      task = await tasks.move(task.id, { column: "in-progress" }, write(task));
       const generation = db.getGeneration();
 
-      fails(
-        () => service.transition("release", release.id, "publish", {}, write(release)),
+      await fails(
+        async () => await service.transition("release", release.id, "publish", {}, write(release)),
         "NOT_READY",
       );
 
@@ -1513,8 +1627,8 @@ describe("Публикация и перепланирование релизо�
       expect(service.progress("work-plan", first.id).completed).toBe(false);
       expect(db.getGeneration()).toBe(generation);
 
-      task = tasks.move(task.id, { column: "done" }, write(task));
-      release = service.transition(
+      task = await tasks.move(task.id, { column: "done" }, write(task));
+      release = await service.transition(
         "release",
         release.id,
         "publish",
@@ -1527,7 +1641,7 @@ describe("Публикация и перепланирование релизо�
       expect(release.data.releasedBy).toBe("publisher");
       expect(service.get("work-plan", second.id)).toEqual(second);
 
-      tasks.move(task.id, { column: "ready" }, write(task));
+      await tasks.move(task.id, { column: "ready" }, write(task));
       const afterReopen = db.getGeneration();
 
       expect(service.progress("release", release.id).completed).toBe(false);
@@ -1539,13 +1653,13 @@ describe("Публикация и перепланирование релизо�
 
   test.each(releaseReadOnlyActions)(
     "$name выпущенного релиза отклоняется без записи",
-    ({ action }) => {
-      fixture((db, service, tasks) => {
-        const release = publishedRelease(service, tasks);
+    async ({ action }) => {
+      await fixture(async (db, service, tasks) => {
+        const release = await publishedRelease(service, tasks);
         const generation = db.getGeneration();
 
-        fails(
-          () => service.transition("release", release.id, action, {}, write(release)),
+        await fails(
+          async () => await service.transition("release", release.id, action, {}, write(release)),
           "RELEASE_READ_ONLY",
         );
 
@@ -1555,13 +1669,13 @@ describe("Публикация и перепланирование релизо�
     },
   );
 
-  test("изменение версии выпущенного релиза отклоняется без записи", () => {
-    fixture((db, service, tasks) => {
-      const release = publishedRelease(service, tasks);
+  test("изменение версии выпущенного релиза отклоняется без записи", async () => {
+    await fixture(async (db, service, tasks) => {
+      const release = await publishedRelease(service, tasks);
       const generation = db.getGeneration();
 
-      fails(
-        () => service.update("release", release.id, { version: "2.0" }, write(release)),
+      await fails(
+        async () => await service.update("release", release.id, { version: "2.0" }, write(release)),
         "RELEASE_READ_ONLY",
       );
 
@@ -1570,16 +1684,16 @@ describe("Публикация и перепланирование релизо�
     });
   });
 
-  test("одинаковая версия разрешена у независимых релизов", () => {
-    fixture((_db, service) => {
-      const plan = service.create("work-plan", { title: "План" }, actor);
-      const first = service.create(
+  test("одинаковая версия разрешена у независимых релизов", async () => {
+    await fixture(async (_db, service) => {
+      const plan = await service.create("work-plan", { title: "План" }, actor);
+      const first = await service.create(
         "release",
         { title: "Первый выпуск", version: "1.0", planIds: [plan.id] },
         actor,
       );
 
-      const second = service.create(
+      const second = await service.create(
         "release",
         { title: "Второй выпуск", version: "1.0", planIds: [plan.key] },
         actor,
@@ -1591,68 +1705,73 @@ describe("Публикация и перепланирование релизо�
     });
   });
 
-  test("отменённый релиз перепланируется явно, а устаревший повтор отклоняется до no-op", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
-      let release = service.create(
+  test("отменённый релиз перепланируется явно, а устаревший повтор отклоняется до no-op", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
+      let release = await service.create(
         "release",
         { title: "Выпуск", version: "1.0", planIds: [plan.id] },
         actor,
       );
-      release = service.transition("release", release.id, "cancel", {}, write(release));
-      release = service.update("release", release.id, { description: markdown }, write(release));
+      release = await service.transition("release", release.id, "cancel", {}, write(release));
+      release = await service.update(
+        "release",
+        release.id,
+        { description: markdown },
+        write(release),
+      );
 
       expect(release.data.status).toBe("cancelled");
       expect(service.get("work-plan", plan.id)).toEqual(plan);
       const beforeInvalidTransition = db.getGeneration();
 
-      fails(
-        () => service.transition("release", release.id, "publish", {}, write(release)),
+      await fails(
+        async () => await service.transition("release", release.id, "publish", {}, write(release)),
         "INVALID_TRANSITION",
       );
 
       expect(service.get("release", release.id)).toEqual(release);
       expect(db.getGeneration()).toBe(beforeInvalidTransition);
       const cancelled = release;
-      release = service.transition("release", release.id, "plan", {}, write(release));
+      release = await service.transition("release", release.id, "plan", {}, write(release));
 
       expect(release.data.status).toBe("planned");
       const beforeStaleRetry = db.getGeneration();
 
-      fails(
-        () => service.transition("release", release.id, "plan", {}, write(cancelled)),
+      await fails(
+        async () => await service.transition("release", release.id, "plan", {}, write(cancelled)),
         "REVISION_CONFLICT",
       );
 
       expect(service.get("release", release.id)).toEqual(release);
       expect(db.getGeneration()).toBe(beforeStaleRetry);
 
-      const unchanged = service.transition("release", release.id, "plan", {}, write(release));
+      const unchanged = await service.transition("release", release.id, "plan", {}, write(release));
 
       expect(unchanged).toEqual(release);
       expect(db.getGeneration()).toBe(beforeStaleRetry);
     });
   });
 
-  test("изменение состава релиза сохраняет прежний отменённый план и разрешает новый открытый", () => {
-    fixture((db, service) => {
-      const initialPlan = service.create("work-plan", { title: "Прежний план" }, actor);
-      const release = service.create(
+  test("изменение состава релиза сохраняет прежний отменённый план и разрешает новый открытый", async () => {
+    await fixture(async (db, service) => {
+      const initialPlan = await service.create("work-plan", { title: "Прежний план" }, actor);
+      const release = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [initialPlan.id] },
         actor,
       );
-      const cancelled = service.transition(
+      const cancelled = await service.transition(
         "work-plan",
         initialPlan.id,
         "cancel",
         { result: "Состав работы пересмотрен" },
         write(initialPlan),
       );
-      const current = service.create("work-plan", { title: "Новый план" }, actor);
+      const current = await service.create("work-plan", { title: "Новый план" }, actor);
       const generation = db.getGeneration();
 
-      const updated = service.update(
+      const updated = await service.update(
         "release",
         release.id,
         { planIds: [current.key, cancelled.key] },
@@ -1668,16 +1787,16 @@ describe("Публикация и перепланирование релизо�
     });
   });
 
-  test("новое включение отменённого плана в релиз отклоняется без изменения прежнего состава", () => {
-    fixture((db, service) => {
-      const current = service.create("work-plan", { title: "Текущий план" }, actor);
-      const release = service.create(
+  test("новое включение отменённого плана в релиз отклоняется без изменения прежнего состава", async () => {
+    await fixture(async (db, service) => {
+      const current = await service.create("work-plan", { title: "Текущий план" }, actor);
+      const release = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [current.id] },
         actor,
       );
-      const initialPlan = service.create("work-plan", { title: "Не включённый план" }, actor);
-      const cancelled = service.transition(
+      const initialPlan = await service.create("work-plan", { title: "Не включённый план" }, actor);
+      const cancelled = await service.transition(
         "work-plan",
         initialPlan.id,
         "cancel",
@@ -1686,9 +1805,9 @@ describe("Публикация и перепланирование релизо�
       );
       const generation = db.getGeneration();
 
-      const failure = fails(
-        () =>
-          service.update(
+      const failure = await fails(
+        async () =>
+          await service.update(
             "release",
             release.id,
             { planIds: [current.key, cancelled.key] },
@@ -1705,22 +1824,22 @@ describe("Публикация и перепланирование релизо�
     });
   });
 
-  test("перепланирование релиза с прежним отменённым планом отклоняется без изменения записей", () => {
-    fixture((db, service) => {
-      const initialPlan = service.create("work-plan", { title: "План выпуска" }, actor);
-      const initialRelease = service.create(
+  test("перепланирование релиза с прежним отменённым планом отклоняется без изменения записей", async () => {
+    await fixture(async (db, service) => {
+      const initialPlan = await service.create("work-plan", { title: "План выпуска" }, actor);
+      const initialRelease = await service.create(
         "release",
         { title: "Выпуск", version: "1", planIds: [initialPlan.id] },
         actor,
       );
-      const plan = service.transition(
+      const plan = await service.transition(
         "work-plan",
         initialPlan.id,
         "cancel",
         { result: "Работа отменена" },
         write(initialPlan),
       );
-      const release = service.transition(
+      const release = await service.transition(
         "release",
         initialRelease.id,
         "cancel",
@@ -1729,8 +1848,8 @@ describe("Публикация и перепланирование релизо�
       );
       const generation = db.getGeneration();
 
-      const failure = fails(
-        () => service.transition("release", release.id, "plan", {}, write(release)),
+      const failure = await fails(
+        async () => await service.transition("release", release.id, "plan", {}, write(release)),
         "INVALID_PLAN",
       );
 
@@ -1743,24 +1862,30 @@ describe("Публикация и перепланирование релизо�
 });
 
 describe("Проверка внешнего ввода планирования", () => {
-  test.each(invalidPlanInputs)("$name отклоняется при создании плана без записи", ({ input }) => {
-    fixture((db, service) => {
+  test.each(invalidPlanInputs)(
+    "$name отклоняется при создании плана без записи",
+    async ({ input }) => {
+      await fixture(async (db, service) => {
+        const generation = db.getGeneration();
+
+        await fails(
+          async () => await service.create("work-plan", input, actor),
+          "VALIDATION_ERROR",
+        );
+
+        expect(service.list("work-plan")).toEqual([]);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test("повтор области проекта через ID и ключ отклоняется без записи", async () => {
+    await fixture(async (db, service) => {
       const generation = db.getGeneration();
 
-      fails(() => service.create("work-plan", input, actor), "VALIDATION_ERROR");
-
-      expect(service.list("work-plan")).toEqual([]);
-      expect(db.getGeneration()).toBe(generation);
-    });
-  });
-
-  test("повтор области проекта через ID и ключ отклоняется без записи", () => {
-    fixture((db, service) => {
-      const generation = db.getGeneration();
-
-      fails(
-        () =>
-          service.create(
+      await fails(
+        async () =>
+          await service.create(
             "work-plan",
             {
               title: "План",
@@ -1781,14 +1906,14 @@ describe("Проверка внешнего ввода планирования"
 
   test.each(invalidReleaseFields)(
     "$name отклоняется при создании релиза без записи",
-    ({ input }) => {
-      fixture((db, service) => {
-        const plan = planWithStage(service);
+    async ({ input }) => {
+      await fixture(async (db, service) => {
+        const plan = await planWithStage(service);
         const before = db.getGeneration();
 
-        fails(
-          () =>
-            service.create(
+        await fails(
+          async () =>
+            await service.create(
               "release",
               {
                 title: "Выпуск",
@@ -1808,14 +1933,14 @@ describe("Проверка внешнего ввода планирования"
     },
   );
 
-  test("повтор плана через ID и ключ отклоняет создание релиза без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
+  test("повтор плана через ID и ключ отклоняет создание релиза без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.create(
+      await fails(
+        async () =>
+          await service.create(
             "release",
             {
               title: "Выпуск",
@@ -1833,20 +1958,19 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("превышение лимита планов отклоняет создание релиза без записи", () => {
-    fixture((db, service) => {
+  test("превышение лимита планов отклоняет создание релиза без записи", async () => {
+    await fixture(async (db, service) => {
       // Все ссылки валидны и уникальны: отказ должен вызваться размером состава, а не дублем.
-      const plans = db.transaction(() =>
-        Array.from({ length: 201 }, (_value, index) =>
-          service.create("work-plan", { title: `План ${index + 1}` }, actor),
-        ),
-      );
+      const plans: WorkPlanRecord[] = [];
+      for (let index = 0; index < 201; index++) {
+        plans.push(await service.create("work-plan", { title: `План ${index + 1}` }, actor));
+      }
       const savedPlans = service.list("work-plan");
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.create(
+      await fails(
+        async () =>
+          await service.create(
             "release",
             {
               title: "Выпуск",
@@ -1864,13 +1988,17 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("несуществующий план отклоняет создание релиза без записи", () => {
-    fixture((db, service) => {
+  test("несуществующий план отклоняет создание релиза без записи", async () => {
+    await fixture(async (db, service) => {
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.create("release", { title: "Выпуск", version: "1", planIds: ["MISSING"] }, actor),
+      await fails(
+        async () =>
+          await service.create(
+            "release",
+            { title: "Выпуск", version: "1", planIds: ["MISSING"] },
+            actor,
+          ),
         "NOT_FOUND",
       );
 
@@ -1879,14 +2007,19 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("прямая запись taskIds отклоняет изменение этапа без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
+  test("прямая запись taskIds отклоняет изменение этапа без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.stage(plan.id, "update", { stageId: stageAt(plan).id, taskIds: [] }, write(plan)),
+      await fails(
+        async () =>
+          await service.stage(
+            plan.id,
+            "update",
+            { stageId: stageAt(plan).id, taskIds: [] },
+            write(plan),
+          ),
         "VALIDATION_ERROR",
       );
 
@@ -1895,14 +2028,14 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("конфликт before и direction отклоняет перенос этапа без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
+  test("конфликт before и direction отклоняет перенос этапа без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.stage(
+      await fails(
+        async () =>
+          await service.stage(
             plan.id,
             "move",
             { stageId: stageAt(plan).id, before: null, direction: "up" },
@@ -1916,13 +2049,19 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("неположительная ревизия отклоняет изменение плана без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
+  test("неположительная ревизия отклоняет изменение плана без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
       const generation = db.getGeneration();
 
-      fails(
-        () => service.update("work-plan", plan.id, { title: "Изменено" }, { actor, ifRevision: 0 }),
+      await fails(
+        async () =>
+          await service.update(
+            "work-plan",
+            plan.id,
+            { title: "Изменено" },
+            { actor, ifRevision: 0 },
+          ),
         "VALIDATION_ERROR",
       );
 
@@ -1931,10 +2070,10 @@ describe("Проверка внешнего ввода планирования"
     });
   });
 
-  test("отменённый план отклоняет создание релиза без записи", () => {
-    fixture((db, service) => {
-      const plan = planWithStage(service);
-      const cancelled = service.transition(
+  test("отменённый план отклоняет создание релиза без записи", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
+      const cancelled = await service.transition(
         "work-plan",
         plan.id,
         "cancel",
@@ -1943,9 +2082,9 @@ describe("Проверка внешнего ввода планирования"
       );
       const generation = db.getGeneration();
 
-      fails(
-        () =>
-          service.create(
+      await fails(
+        async () =>
+          await service.create(
             "release",
             { title: "Выпуск", version: "1", planIds: [cancelled.id] },
             actor,
@@ -1961,14 +2100,14 @@ describe("Проверка внешнего ввода планирования"
 
   test.each(sparseInputCases)(
     "$name, $shape: $actionName отклоняется без изменения данных, ревизий и поколения",
-    ({ field, kind, hasFirst, action }) => {
-      fixture((db, service) => {
-        const plan = planWithStage(service);
+    async ({ field, kind, hasFirst, action }) => {
+      await fixture(async (db, service) => {
+        const plan = await planWithStage(service);
         const creation =
           kind === "release"
             ? { title: "Выпуск", version: "1", planIds: [plan.id] }
             : { title: "План" };
-        const current = kind === "release" ? service.create(kind, creation, actor) : plan;
+        const current = kind === "release" ? await service.create(kind, creation, actor) : plan;
         const records = db.list();
         const generation = db.getGeneration();
         // Пустые позиции массива намеренно не заполняются: это внешний неверный ввод.
@@ -1988,14 +2127,14 @@ describe("Проверка внешнего ввода планирования"
         }
 
         if (action === "create") {
-          fails(
-            () => service.create(kind, { ...creation, [field]: sparse }, actor),
+          await fails(
+            async () => await service.create(kind, { ...creation, [field]: sparse }, actor),
             "VALIDATION_ERROR",
           );
         } else {
-          fails(
-            () =>
-              service.update(
+          await fails(
+            async () =>
+              await service.update(
                 kind,
                 current.id,
                 { summary: "Не сохранять", [field]: sparse },
@@ -2010,7 +2149,7 @@ describe("Проверка внешнего ввода планирования"
         expect(db.getGeneration()).toBe(generation);
         expect(service.progress(kind, current.id).completed).toBe(false);
 
-        const updated = service.update(
+        const updated = await service.update(
           kind,
           current.id,
           { title: "Допустимое изменение" },
@@ -2027,9 +2166,9 @@ describe("Проверка внешнего ввода планирования"
 describe("Повреждённые ссылки составов планирования", () => {
   test.each(brokenCompositionOperations)(
     "отсутствующая задача: $name отклоняется без изменения записей",
-    ({ run }) => {
-      fixture((db, service) => {
-        const initial = planWithStage(service);
+    async ({ run }) => {
+      await fixture(async (db, service) => {
+        const initial = await planWithStage(service);
         // Намеренная битая ссылка сохраняется низкоуровневым fixture Storage.
         const plan = {
           ...initial,
@@ -2043,14 +2182,14 @@ describe("Повреждённые ссылки составов планиро�
           },
         };
         db.update(plan, initial.revision);
-        const release = service.create(
+        const release = await service.create(
           "release",
           { title: "Выпуск", version: "1", planIds: [plan.id] },
           actor,
         );
         const before = db.getGeneration();
 
-        fails(() => run(service, plan, release), "NOT_FOUND");
+        await fails(async () => run(service, plan, release), "NOT_FOUND");
 
         expect(db.getGeneration()).toBe(before);
         expect(service.get("work-plan", plan.id)).toEqual(plan);

@@ -31,12 +31,12 @@ const nestedLists = [
  * Создаёт две зависимости в порядке, обратном созданию, и журнал одной из целей.
  * Соединением и очисткой владеет вызывающая fixture.
  */
-function seedDependencies(db: ProjectDatabase): TaskReadFixture {
+async function seedDependencies(db: ProjectDatabase): Promise<TaskReadFixture> {
   const tasks = new TasksService(db);
-  const first = tasks.create({ title: "Первая созданная" }, "fixture");
-  const initial = tasks.create({ title: "Вторая созданная" }, "fixture");
-  const second = tasks.comment(initial.id, "## Обсуждение\n\n  подробности\n", "рецензент");
-  const task = tasks.create({ dependencies: [second.id, first.id] }, "fixture");
+  const first = await tasks.create({ title: "Первая созданная" }, "fixture");
+  const initial = await tasks.create({ title: "Вторая созданная" }, "fixture");
+  const second = await tasks.comment(initial.id, "## Обсуждение\n\n  подробности\n", "рецензент");
+  const task = await tasks.create({ dependencies: [second.id, first.id] }, "fixture");
   return { task, items: [second, first] };
 }
 
@@ -44,9 +44,9 @@ function seedDependencies(db: ProjectDatabase): TaskReadFixture {
  * Создаёт два критерия с полным текстом; отметка первого повышает ревизию владельца.
  * Соединением и очисткой владеет вызывающая fixture.
  */
-function seedCriteria(db: ProjectDatabase): TaskReadFixture {
+async function seedCriteria(db: ProjectDatabase): Promise<TaskReadFixture> {
   const tasks = new TasksService(db);
-  const initial = tasks.create(
+  const initial = await tasks.create(
     {
       title: "Приёмка",
       acceptanceCriteria: [
@@ -58,7 +58,7 @@ function seedCriteria(db: ProjectDatabase): TaskReadFixture {
   );
   const [criterion] = initial.data.acceptanceCriteria;
   assert(criterion);
-  const task = tasks.criterion(
+  const task = await tasks.criterion(
     initial.id,
     "complete",
     { id: criterion.id },
@@ -71,11 +71,11 @@ function seedCriteria(db: ProjectDatabase): TaskReadFixture {
  * Создаёт два независимых комментария с разными авторами и допустимым пустым заголовком.
  * Соединением и очисткой владеет вызывающая fixture.
  */
-function seedComments(db: ProjectDatabase): TaskReadFixture {
+async function seedComments(db: ProjectDatabase): Promise<TaskReadFixture> {
   const tasks = new TasksService(db);
-  const initial = tasks.create({ title: "Обсуждение" }, "fixture");
-  tasks.comment(initial.id, "## Первый\n\n  точный отступ\n", "первый автор");
-  const task = tasks.comment(initial.id, "Второй комментарий", "второй автор", "Ответ");
+  const initial = await tasks.create({ title: "Обсуждение" }, "fixture");
+  await tasks.comment(initial.id, "## Первый\n\n  точный отступ\n", "первый автор");
+  const task = await tasks.comment(initial.id, "Второй комментарий", "второй автор", "Ответ");
   return { task, items: task.data.comments };
 }
 
@@ -85,7 +85,7 @@ describe("Вложенные чтения задач через CLI", () => {
     async ({ group, ownerField, seed, fullReads }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const { task, items } = cli.withDatabase(project, seed);
+        const { task, items } = await cli.withDatabase(project, seed);
         const [first, second] = items.map(objectValue);
         assert(first && second);
         const generation = cli.withDatabase(project, (db) => db.getGeneration());
@@ -136,8 +136,10 @@ describe("Вложенные чтения задач через CLI", () => {
           expect(db.getGeneration()).toBe(generation);
         });
 
-        const appended = cli.withDatabase(project, (db) =>
-          new TasksService(db).comment(task.id, "После страницы", "новый автор"),
+        const appended = await cli.withDatabase(
+          project,
+          async (db) =>
+            await new TasksService(db).comment(task.id, "После страницы", "новый автор"),
         );
         const error = await cli.error([...command, "--cursor", cursor], 4);
 
@@ -155,7 +157,7 @@ describe("Вложенные чтения задач через CLI", () => {
   test("criterion get сохраняет ключ, ревизию и полный критерий после одного чтения задачи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { task } = cli.withDatabase(project, seedCriteria);
+      const { task } = await cli.withDatabase(project, seedCriteria);
       const [criterion] = task.data.acceptanceCriteria;
       assert(criterion);
       const generation = cli.withDatabase(project, (db) => db.getGeneration());
@@ -187,8 +189,11 @@ describe("Вложенные чтения задач через CLI", () => {
   test("criterion get отклоняет критерий чужой задачи с прежним NOT_FOUND и сохраняет данные", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { task: other } = cli.withDatabase(project, seedCriteria);
-      const owner = cli.withDatabase(project, (db) => new TasksService(db).create({}, "fixture"));
+      const { task: other } = await cli.withDatabase(project, seedCriteria);
+      const owner = await cli.withDatabase(
+        project,
+        async (db) => await new TasksService(db).create({}, "fixture"),
+      );
       const [criterion] = other.data.acceptanceCriteria;
       assert(criterion);
       const generation = cli.withDatabase(project, (db) => db.getGeneration());

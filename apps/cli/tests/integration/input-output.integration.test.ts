@@ -79,12 +79,14 @@ describe("Файлы и JSON на входе CLI", () => {
   test("stdin обновления сохраняет значимые начальный и завершающий переводы строк", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create(
-          "document",
-          { name: "Исходный", body: "Заменяемый текст" },
-          "fixture",
-        ),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Исходный", body: "Заменяемый текст" },
+            "fixture",
+          ),
       );
       const body = "\n# stdin\n";
 
@@ -111,12 +113,14 @@ describe("Файлы и JSON на входе CLI", () => {
     async ({ argv, stdin }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const document = cli.withDatabase(project, (db) =>
-          new KnowledgeService(db).create(
-            "document",
-            { name: "Закреплённый", pinned: true, summary: "Исходное описание", body: "Тело" },
-            "fixture",
-          ),
+        const document = await cli.withDatabase(
+          project,
+          async (db) =>
+            await new KnowledgeService(db).create(
+              "document",
+              { name: "Закреплённый", pinned: true, summary: "Исходное описание", body: "Тело" },
+              "fixture",
+            ),
         );
 
         const updated = await cli.entity(
@@ -207,8 +211,14 @@ describe("Полное и краткое представление CLI", () => 
   test("полный get в JSON сохраняет длинный Markdown и исходные управляющие символы", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("document", { name: "Длинный", body: unsafeBody }, "agent"),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Длинный", body: unsafeBody },
+            "agent",
+          ),
       );
 
       const result = await cli.entity(["document", "get", document.key]);
@@ -220,8 +230,14 @@ describe("Полное и краткое представление CLI", () => 
   test("полный get в text обезвреживает терминальные контролы без обрезки Markdown", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("document", { name: "Длинный", body: unsafeBody }, "agent"),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Длинный", body: unsafeBody },
+            "agent",
+          ),
       );
 
       const text = await cli.invoke(["document", "get", document.key]);
@@ -237,8 +253,14 @@ describe("Полное и краткое представление CLI", () => 
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const body = "Полное скрытое содержание документа";
-      const document = cli.withDatabase(project, (db) =>
-        new KnowledgeService(db).create("document", { name: "Краткая карточка", body }, "agent"),
+      const document = await cli.withDatabase(
+        project,
+        async (db) =>
+          await new KnowledgeService(db).create(
+            "document",
+            { name: "Краткая карточка", body },
+            "agent",
+          ),
       );
 
       const text = await cli.invoke(["document", "list"]);

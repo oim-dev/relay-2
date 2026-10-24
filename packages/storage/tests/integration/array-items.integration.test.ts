@@ -77,6 +77,61 @@ describe("Наличие объекта в верхнеуровневом JSON-�
       expect(exists).toBe(true);
       expect(query).toHaveBeenCalledTimes(1);
       expect(decoder).not.toHaveBeenCalled();
+      expect(
+        query.mock.results.flatMap((result) =>
+          result.type === "return" ? result.value.columnNames : [],
+        ),
+      ).toEqual(["1"]);
+    } finally {
+      decoder.mockRestore();
+      query.mockRestore();
+    }
+  });
+
+  test("находит normalized run и отвергает отсутствующий тем же узким одиночным SQL", () => {
+    const session = createSession({
+      title: "НЕ-ЗАГРУЖАТЬ-СОДЕРЖАНИЕ",
+      runs: [
+        {
+          id: "normalized-run",
+          key: "RUN-normalized-run",
+          actor: "author",
+          state: "active",
+          reason: "НЕ-ЗАГРУЖАТЬ-ПРИЧИНУ",
+          operator: null,
+          client: null,
+          sourceSessionId: null,
+          predecessorRunId: null,
+          startedAt: "2026-10-24T01:00:00.000Z",
+          endedAt: null,
+          endReason: null,
+        },
+      ],
+    });
+    db.insert(session);
+    fixture.withRaw((raw) => {
+      expect(
+        raw
+          .query("SELECT json_type(data,'$.runs') AS shape FROM entities WHERE id=?")
+          .get(session.id),
+      ).toEqual({ shape: null });
+    });
+    const query = spyOn(Database.prototype, "query");
+    const decoder = spyOn(JSON, "parse");
+    try {
+      expect(db.hasArrayItemByField("work-session", "runs", "id", "normalized-run")).toBe(true);
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(decoder).not.toHaveBeenCalled();
+      expect(
+        query.mock.results.flatMap((result) =>
+          result.type === "return" ? result.value.columnNames : [],
+        ),
+      ).toEqual(["1"]);
+      query.mockClear();
+
+      expect(db.hasArrayItemByField("work-session", "runs", "id", "missing-run")).toBe(false);
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(decoder).not.toHaveBeenCalled();
     } finally {
       decoder.mockRestore();
       query.mockRestore();

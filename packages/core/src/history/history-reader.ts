@@ -1,27 +1,11 @@
-import {
-  RelayError,
-  type EntityRecord,
-  type HistoryCheckpoint,
-  type HistoryContext,
-  type HistoryOperator,
-  type HistoryReference,
-  type HistorySession,
-  type ProjectEntity,
-} from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { HistoryCheckpoint, HistoryContext, HistorySession } from "@relay/contracts";
+import type { ProjectStore } from "@relay/storage";
 import { EntityService } from "../entities/entities";
-import { entityMessages } from "../entities/entity.messages";
-import { EntityReader } from "../projections/entity-reader";
 import { decodeHistoryCheckpoint, decodeHistorySession } from "./history-data";
 import { historyFilters, invalidHistoryInput } from "./history-input";
 import type { HistoryFilters, HistoryIntentsOptions } from "./history-input.types";
-import { historyInputMessages, historyStateMessages } from "./history-messages";
-import {
-  historyConflict,
-  historySubtree,
-  openHistoryIntents,
-  unfinishedSession,
-} from "./history-rules";
+import { historyInputMessages } from "./history-messages";
+import { historySubtree, openHistoryIntents, unfinishedSession } from "./history-rules";
 
 /**
  * Проверяет фильтры сессии после разрешения ссылки родителя в текущем снимке.
@@ -57,39 +41,20 @@ function sortHistoryCheckpoints(checkpoints: HistoryCheckpoint[]): HistoryCheckp
 }
 
 /**
- * Выбирает предметное название проверенной цели; отсутствующее имя продукта заменяется ключом.
- */
-function historyReferenceTitle(target: Readonly<ProjectEntity>): string {
-  switch (target.kind) {
-    case "product":
-      return target.data.name ?? target.key;
-    case "project":
-    case "feature":
-    case "scenario":
-    case "application":
-    case "board":
-    case "document":
-      return target.data.name;
-    default:
-      return target.data.title;
-  }
-}
-
-/**
  * Декодированные запросы истории и разрешение ссылок без записи в БД.
- * Составные пользовательские чтения удерживают snapshot; низкоуровневые выборки для записи
- * вызываются внутри транзакции HistoryService. Между операциями данные не кешируются.
+ * Составные пользовательские чтения удерживают snapshot. Между операциями данные не кешируются;
+ * загрузкой оснований записи владеет отдельный async command loader.
  */
 export class HistoryReader {
   /* БД проекта; временем жизни соединения управляет вызывающая сторона. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
   /* Общий resolver адресов сессий и материалов. */
   private readonly entities: EntityService;
 
   /**
    * Создаёт читатель существующего соединения без его открытия или передачи владения.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore) {
     this.db = db;
     this.entities = new EntityService(db);
   }
@@ -234,91 +199,5 @@ export class HistoryReader {
         children: this.sessions().filter((entry) => entry.data.parentSessionId === session.id),
       };
     });
-  }
-
-  /**
-   * Разрешает адреса общим resolver и одним пакетом читает содержание целей в текущей транзакции.
-   * Разные адреса одной записи запрещены; повреждение любой цели прерывает запись материала.
-   */
-  references(references: readonly string[]): HistoryReference[] {
-    if (references.length === 0) {
-      return [];
-    }
-    const ids = new Set<string>();
-    const identities = references.map((reference) => {
-      const identity = this.entities.resolve(reference);
-      if (ids.has(identity.id)) {
-        invalidHistoryInput(historyInputMessages.duplicateReference);
-      }
-      ids.add(identity.id);
-      return identity;
-    });
-    const records = new Map(this.db.getMany([...ids]).map((record) => [record.id, record]));
-    const reader = new EntityReader(this.db);
-    return identities.map((identity) => {
-      const record = records.get(identity.id);
-      if (record === undefined) {
-        throw new RelayError("CORRUPT_DATA", entityMessages.missingResolvedRecord, 1, {
-          id: identity.id,
-        });
-      }
-      const target = reader.decode(record);
-      return {
-        id: target.id,
-        kind: target.kind,
-        key: target.key,
-        title: historyReferenceTitle(target),
-      };
-    });
-  }
-
-  /**
-   * Читает принимаемых детей одним пакетом постоянных ID, переиспользуя уже выбранных детей.
-   * Неверный адрес диагностируется общим resolver; ключи и типизированные ссылки запрещены.
-   * Известные сессии и пакет должны принадлежать текущей транзакции, межоперационного кеша нет.
-   */
-  acceptedSessions(
-    ids: readonly string[],
-    knownSessions: readonly HistorySession[] = [],
-  ): HistorySession[] {
-    const known = new Map(knownSessions.map((session) => [session.id, session]));
-    const missing = ids.filter((id) => !known.has(id));
-    const records = new Map<string, EntityRecord>(
-      missing.length === 0
-        ? []
-        : this.db.getMany(missing, "work-session").map((record) => [record.id, record]),
-    );
-    return ids.map((id) => {
-      const child = known.get(id);
-      if (child !== undefined) {
-        return child;
-      }
-      const record = records.get(id);
-      if (record === undefined) {
-        const identity = this.entities.resolve(id, "work-session");
-        if (identity.id !== id) {
-          invalidHistoryInput(historyInputMessages.acceptedIdRequired);
-        }
-        throw new RelayError("CORRUPT_DATA", entityMessages.missingResolvedRecord, 1, { id });
-      }
-      return decodeHistorySession(record);
-    });
-  }
-
-  /**
-   * Копирует пользователя участия, создавшего pending-ребёнка, а не текущего участия родителя.
-   * Отсутствие пользователя сохраняется как null; потерянный создатель даёт CONFLICT.
-   */
-  inheritedOperator(session: Readonly<HistorySession>): HistoryOperator | null {
-    const parentId = session.data.parentSessionId;
-    if (parentId === null) {
-      historyConflict(historyStateMessages.creatorRunMissing);
-    }
-    const parent = this.session(parentId);
-    const creator = parent.data.runs.find((entry) => entry.id === session.data.createdByRunId);
-    if (!creator) {
-      historyConflict(historyStateMessages.creatorRunMissing);
-    }
-    return creator.operator === null ? null : { ...creator.operator, source: "inherited" };
   }
 }

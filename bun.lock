@@ -37,6 +37,7 @@
         "@relay/contracts": "workspace:*",
         "@relay/core": "workspace:*",
         "@relay/project-runtime": "workspace:*",
+        "@relay/storage": "workspace:*",
       },
       "devDependencies": {
         "@relay/typescript-config": "workspace:*",

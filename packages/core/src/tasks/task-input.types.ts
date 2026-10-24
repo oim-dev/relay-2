@@ -4,7 +4,7 @@ import type { TASK_CRITERION_ACTIONS, TASK_FILTER_VALUES } from "./task-constant
 export type { TaskTextOptions } from "./task-text.types";
 
 /**
- * Проверенные поля создания; ссылки ещё требуют разрешения в транзакции проекта.
+ * Проверенные поля создания; ссылки ещё требуют разрешения в согласованном command context.
  */
 export interface CreateTaskInput {
   /* Пользовательская ссылка на доску; по умолчанию BOARD-PRODUCT. */
@@ -23,8 +23,8 @@ export interface CreateTaskInput {
   readonly related: readonly string[];
   /* Пользовательские ссылки целей; допустимость определяется доской. */
   readonly targets: readonly string[];
-  /* Новые невыполненные критерии с отдельными UUID в порядке ввода. */
-  readonly acceptanceCriteria: readonly TaskCriterion[];
+  /* Проверенные тексты новых критериев; ID выделяет loader после разбора ввода. */
+  readonly acceptanceCriteria: readonly TaskCriterionContent[];
 }
 
 /**
@@ -133,6 +133,19 @@ export interface ChangeTaskCriterionState {
 export type TaskCriterionChange = AddTaskCriterion | UpdateTaskCriterion | ChangeTaskCriterionState;
 
 /**
+ * Разобранная команда до выделения постоянного ID добавляемого критерия.
+ */
+export type ParsedTaskCriterionChange =
+  | {
+      /* Добавление нового критерия с ещё не выделенной идентичностью. */
+      readonly action: "add";
+      /* Проверенные тексты без отметки выполнения. */
+      readonly content: TaskCriterionContent;
+    }
+  | UpdateTaskCriterion
+  | ChangeTaskCriterionState;
+
+/**
  * Проверенная команда изменения одной направленной связи задачи.
  */
 export interface TaskLinkChange {
@@ -140,7 +153,7 @@ export interface TaskLinkChange {
   readonly field: "dependencies" | "related";
   /* Добавление идемпотентно; удаление отсутствующей связи также является no-op. */
   readonly action: "add" | "remove";
-  /* Проверенная пользовательская ссылка; постоянный ID разрешается в транзакции. */
+  /* Проверенная пользовательская ссылка; постоянный ID разрешает явный loader. */
   readonly target: string;
 }
 

@@ -94,8 +94,8 @@ function historyTransitionFields(action: string): Args {
 
 /**
  * Добавляет в реестр команды поручений, участия и материалов без открытия проекта.
- * Core владеет состояниями, авторами и ревизиями; реестр объединяет действия обработчика
- * в транзакцию записи либо согласованный снимок чтения.
+ * Core владеет состояниями, авторами, ревизиями и async commit; CLI ожидает запись
+ * вне SQLite-транзакции, а синхронные чтения объединяет согласованным снимком.
  */
 export function registerHistoryCommands(registry: CommandRegistry): void {
   registry.group("session", messages.session);
@@ -144,7 +144,8 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
      * Возвращает поручение, атомарно созданное Core вместе с первым участием.
      * Поля оператора выбираются из явного ввода или окружения до предметной проверки.
      */
-    run: (i): Result => result(i.history.start(historyInput(i, true), i.actor)),
+    run: async (i): Promise<Result> =>
+      result(await i.history.start(historyInput(i, true), i.actor)),
   });
   registry.add("session history", {
     ...messages.history,
@@ -175,9 +176,9 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
        * Возвращает поручение после атомарного перехода Core; повтор не считается no-op.
        * Для fork ревизия принадлежит родителю намерения, для остальных действий — выбранной сессии.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.history.transition(
+          await i.history.transition(
             i.text("ref"),
             action,
             historyInput(i, usesParticipationInput(action)),
@@ -253,8 +254,8 @@ export function registerHistoryCommands(registry: CommandRegistry): void {
        * Возвращает новый материал, записанный Core атомарно с повышением ревизии сессии.
        * ifRevision относится к сессии, исходный checkpoint не изменяется; повтор не является no-op.
        */
-      run: (i): Result =>
-        result(i.history.checkpoint(i.text("ref"), action, historyInput(i), i.write)),
+      run: async (i): Promise<Result> =>
+        result(await i.history.checkpoint(i.text("ref"), action, historyInput(i), i.write)),
     });
   }
 }

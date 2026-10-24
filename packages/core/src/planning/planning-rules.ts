@@ -39,11 +39,28 @@ export function assertPlanningWritable(
       actualRevision: entity.revision,
     });
   }
+  assertPlanningMutable(entity);
+}
+
+/**
+ * Общий запрет изменения закрытого плана и выпущенного релиза, включая явный no-op.
+ * Используется после локального CAS и при проверке переносимого готового эффекта.
+ */
+export function assertPlanningMutable(entity: Readonly<PlanningRecord>): void {
   if (entity.kind === "work-plan" && !openPlan(entity)) {
     throw new RelayError("PLAN_READ_ONLY", planningMessages.planReadOnly, 4);
   }
   if (entity.kind === "release" && entity.data.status === "released") {
     throw new RelayError("RELEASE_READ_ONLY", planningMessages.releaseReadOnly, 4);
+  }
+}
+
+/**
+ * Разрешает удаление только пустого этапа; его исторический состав не теряется молча.
+ */
+export function assertStageEmpty(stage: Readonly<PlanStage>): void {
+  if (stage.taskIds.length > 0) {
+    throw new RelayError("STAGE_NOT_EMPTY", planningMessages.stageNotEmpty, 4);
   }
 }
 

@@ -61,6 +61,17 @@ export function aliasField(other: string): BatchFieldContract {
 }
 
 /**
+ * Описывает совместимые переносимое/локальное предусловия: хотя бы одно обязательно, оба проверяются.
+ */
+export function preconditionField(other: string): BatchFieldContract {
+  return {
+    presence: messages.requiredPrecondition(other),
+    omission: messages.omittedPrecondition(other),
+    nullable: false,
+  };
+}
+
+/**
  * Связывает декларативные поля и пример с публичным descriptor, не вызывая валидаторы или БД.
  * ref и ifRevision берутся из требований каталога; условное число ревизии не читается из проекта.
  */

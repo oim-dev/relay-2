@@ -3,11 +3,11 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { ProjectDatabase } from "@relay/storage";
 import { BatchService } from "../../src/batch/batch";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
-import { expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import { expectAsyncRelayError, withEntityDatabase } from "./helpers/entity-fixture";
 
 describe("Первоначальная квитанция и повторная доставка", () => {
-  test("проверка ключа удерживает writer-lock, а повтор после commit возвращает исходный результат", () => {
-    withEntityDatabase((db) => {
+  test("загрузка свободна от writer-lock, commit удерживает его, а повтор возвращает исходный результат", async () => {
+    await withEntityDatabase(async (db) => {
       const input = {
         version: 1,
         operations: [{ op: "document.create", input: { name: "Публикация", body: "Текст" } }],
@@ -15,48 +15,112 @@ describe("Первоначальная квитанция и повторная 
       const options = { actor: "agent", operationKey: "competing-delivery" };
       // У второго SQLite-писателя нет ожидания: проверяем удержание lock, а не штатный busy timeout.
       const competitor = new Database(db.path, { create: false, readwrite: true });
-      /**
-       * Сохраняет настоящее чтение квитанции; spy служит только точным барьером второго писателя.
-       */
-      const readReceipt: ProjectDatabase["getBatchReceipt"] = db.getBatchReceipt.bind(db);
+      const load = db.commands.load.bind(db.commands);
+      const commit = db.commands.commit.bind(db.commands);
+      const transaction = db.transaction.bind(db);
+      let loadedOutsideLock = false;
+      let committing = false;
       let attempted = false;
       let rejected: unknown;
-      const receiptRead = spyOn(db, "getBatchReceipt").mockImplementationOnce((key) => {
-        const receipt = readReceipt(key);
-        attempted = true;
-        try {
-          competitor.exec("BEGIN IMMEDIATE");
-        } catch (error) {
-          rejected = error;
-        } finally {
-          if (competitor.inTransaction) {
-            competitor.exec("ROLLBACK");
-          }
-        }
-        return receipt;
+      const reads = spyOn(db.commands, "load").mockImplementation(async (request) => {
+        const result = await load(request);
+        competitor.exec("BEGIN IMMEDIATE; ROLLBACK;");
+        loadedOutsideLock = true;
+        return result;
       });
+      const commits = spyOn(db.commands, "commit").mockImplementation(async (plan) => {
+        committing = true;
+        try {
+          return await commit(plan);
+        } finally {
+          committing = false;
+        }
+      });
+      const writerLock = spyOn(db, "transaction").mockImplementation((operation) =>
+        transaction(() => {
+          if (committing && !attempted) {
+            // Callback выполняется под настоящим BEGIN IMMEDIATE, до проверки receipt/guards.
+            attempted = true;
+            try {
+              competitor.exec("BEGIN IMMEDIATE");
+            } catch (error) {
+              rejected = error;
+            } finally {
+              if (competitor.inTransaction) {
+                competitor.exec("ROLLBACK");
+              }
+            }
+          }
+          return operation();
+        }),
+      );
       try {
-        const committed = new BatchService(db).execute(input, options);
+        const committed = await new BatchService(db).execute(input, options);
         const generation = db.getGeneration();
 
+        expect(loadedOutsideLock).toBe(true);
         expect(attempted).toBe(true);
         expect(rejected).toMatchObject({ code: "SQLITE_BUSY" });
         competitor.exec("BEGIN IMMEDIATE; ROLLBACK;");
-        const replayed = new BatchService(db).execute(input, options);
+        const replayed = await new BatchService(db).execute(input, options);
         expect(replayed).toEqual({ ...committed, replayed: true });
         expect(db.list("document")).toEqual([...committed.entities]);
         expect(db.getGeneration()).toBe(generation);
       } finally {
-        receiptRead.mockRestore();
+        reads.mockRestore();
+        commits.mockRestore();
+        writerLock.mockRestore();
         competitor.close();
       }
     });
   });
 
-  test("reopen и последующие правки не меняют результат и не повторяют разрешение адресов/CAS", () => {
-    withEntityDatabase((db) => {
+  test("доставка между load и commit возвращает выигравшую квитанцию без второго создания", async () => {
+    await withEntityDatabase(async (db) => {
+      const input = {
+        version: 1,
+        operations: [{ op: "document.create", input: { name: "Публикация", body: "Текст" } }],
+      };
+      const options = { actor: "agent", operationKey: "racing-delivery" };
+      const competitor = ProjectDatabase.open(db.path);
+      const commit = db.commands.commit.bind(db.commands);
+      const winner = new BatchService(competitor);
+      let winningGeneration: number | undefined;
+      const delivery = spyOn(db.commands, "commit").mockImplementationOnce(async (plan) => {
+        // Первый executor уже рассчитал effects и IDs, но ещё не вошёл в writer lock.
+        await winner.execute(input, options);
+        winningGeneration = competitor.getGeneration();
+        return commit(plan);
+      });
+      try {
+        const replayed = await new BatchService(db).execute(input, options);
+        const receipt = winner.getResult(options.operationKey);
+
+        if (winningGeneration === undefined) {
+          throw new Error("Конкурентная доставка не завершила commit");
+        }
+        expect(delivery).toHaveBeenCalledTimes(1);
+        expect(replayed.replayed).toBe(true);
+        expect(replayed).toEqual(receipt);
+        expect(db.list("document")).toEqual([...receipt.entities]);
+        expect(db.getGeneration()).toBe(winningGeneration);
+        const next = await new KnowledgeService(db).create(
+          "document",
+          { name: "Следующий", body: "Без двойного расходования ключа" },
+          "agent",
+        );
+        expect(next.key).toBe("DOC-2");
+      } finally {
+        delivery.mockRestore();
+        competitor.close();
+      }
+    });
+  });
+
+  test("reopen и последующие правки не меняют результат и не повторяют разрешение адресов/CAS", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const existing = knowledge.create(
+      const existing = await knowledge.create(
         "document",
         { name: "Первая редакция", body: "Первый текст" },
         "author",
@@ -77,7 +141,7 @@ describe("Первоначальная квитанция и повторная 
           },
         ],
       };
-      const first = new BatchService(db).execute(input, {
+      const first = await new BatchService(db).execute(input, {
         actor: "agent",
         operationKey: "publication",
       });
@@ -85,13 +149,13 @@ describe("Первоначальная квитанция и повторная 
       if (created === undefined) {
         throw new Error("Созданная запись отсутствует в квитанции");
       }
-      knowledge.update(
+      await knowledge.update(
         "document",
         created.id,
         { body: "Новый текущий текст" },
         { actor: "editor", ifRevision: created.revision },
       );
-      knowledge.update(
+      await knowledge.update(
         "document",
         existing.id,
         { body: "Правка после архивирования" },
@@ -106,9 +170,14 @@ describe("Первоначальная квитанция и повторная 
         const entityReads = spyOn(reopened, "get");
         const selectionReads = spyOn(reopened, "getMany");
         const projectReads = spyOn(reopened, "list");
+        const portReads = spyOn(reopened.commands, "load");
+        const commits = spyOn(reopened.commands, "commit");
         const batch = new BatchService(reopened);
         try {
-          const replayed = batch.execute(input, { actor: "agent", operationKey: "publication" });
+          const replayed = await batch.execute(input, {
+            actor: "agent",
+            operationKey: "publication",
+          });
           const recovered = batch.getResult("publication");
 
           expect(replayed).toEqual({ ...first, replayed: true });
@@ -118,6 +187,10 @@ describe("Первоначальная квитанция и повторная 
           expect(entityReads).not.toHaveBeenCalled();
           expect(selectionReads).not.toHaveBeenCalled();
           expect(projectReads).not.toHaveBeenCalled();
+          expect(portReads.mock.calls.flatMap(([request]) => request.selectors)).toEqual([
+            { kind: "receipt", operationKey: "publication" },
+          ]);
+          expect(commits).not.toHaveBeenCalled();
           expect(reopened.getGeneration()).toBe(generation);
           expect(reopened.count()).toBe(count);
         } finally {
@@ -125,6 +198,8 @@ describe("Первоначальная квитанция и повторная 
           entityReads.mockRestore();
           selectionReads.mockRestore();
           projectReads.mockRestore();
+          portReads.mockRestore();
+          commits.mockRestore();
         }
       } finally {
         reopened.close();
@@ -132,22 +207,22 @@ describe("Первоначальная квитанция и повторная 
     });
   });
 
-  test("порядок свойств незначим, но автор, поля defaults, адреса и локальные имена значимы", () => {
-    withEntityDatabase((db) => {
+  test("порядок свойств незначим, но автор, поля defaults, адреса и локальные имена значимы", async () => {
+    await withEntityDatabase(async (db) => {
       const batch = new BatchService(db);
       const input = {
         version: 1,
         operations: [{ op: "task.create", as: "task", input: { title: "Задача" } }],
       };
-      const first = batch.execute(input, { actor: "agent", operationKey: "identity" });
+      const first = await batch.execute(input, { actor: "agent", operationKey: "identity" });
 
-      const reordered = batch.execute(
+      const reordered = await batch.execute(
         { operations: [{ input: { title: "Задача" }, as: "task", op: "task.create" }], version: 1 },
         { actor: "agent", operationKey: "identity" },
       );
 
       expect(reordered).toEqual({ ...first, replayed: true });
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           batch.execute(
             { version: 1, operations: [{ op: "unknown.operation" }] },
@@ -155,11 +230,11 @@ describe("Первоначальная квитанция и повторная 
           ),
         "CONFLICT",
       );
-      expectRelayError(
+      await expectAsyncRelayError(
         () => batch.execute(input, { actor: "other", operationKey: "identity" }),
         "CONFLICT",
       );
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           batch.execute(
             {
@@ -172,7 +247,7 @@ describe("Первоначальная квитанция и повторная 
           ),
         "CONFLICT",
       );
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           batch.execute(
             {
@@ -187,15 +262,15 @@ describe("Первоначальная квитанция и повторная 
     });
   });
 
-  test("отсутствующий input отличается от явного пустого input", () => {
-    withEntityDatabase((db) => {
+  test("отсутствующий input отличается от явного пустого input", async () => {
+    await withEntityDatabase(async (db) => {
       const batch = new BatchService(db);
-      batch.execute(
+      await batch.execute(
         { version: 1, operations: [{ op: "task.create" }] },
         { actor: "agent", operationKey: "empty" },
       );
 
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           batch.execute(
             { version: 1, operations: [{ op: "task.create", input: {} }] },
@@ -208,10 +283,10 @@ describe("Первоначальная квитанция и повторная 
     });
   });
 
-  test("структурированные scope и relations сохраняют ID, квитанция сохраняет старый раздел", () => {
-    withEntityDatabase((db) => {
+  test("структурированные scope и relations сохраняют ID, квитанция сохраняет старый раздел", async () => {
+    await withEntityDatabase(async (db) => {
       const batch = new BatchService(db);
-      const first = batch.execute(
+      const first = await batch.execute(
         {
           version: 1,
           operations: [
@@ -242,7 +317,7 @@ describe("Первоначальная квитанция и повторная 
       const document = first.entities.find((entity) => entity.kind === "document");
       const knowledge = new KnowledgeService(db);
       const project = knowledge.get("project");
-      knowledge.changeSection(
+      await knowledge.changeSection(
         "remove",
         { id: "specs" },
         { actor: "editor", ifRevision: project.revision },

@@ -67,19 +67,40 @@ class CliFixture {
   }
 
   /**
-   * Передаёт синхронной операции отдельное соединение и закрывает его даже при отказе.
-   * Соединение нельзя сохранять за пределами callback или передавать асинхронной работе.
+   * Передаёт async-подготовке отдельное соединение и закрывает его только после settlement Promise.
+   * Callback обязан await каждый writer; внешней SQLite-транзакции у fixture нет.
+   */
+  withDatabase<T>(
+    project: ProjectLocation,
+    operation: (db: ProjectDatabase) => Promise<T>,
+  ): Promise<T>;
+  /**
+   * Синхронное чтение/подготовка сохраняет прежний немедленный результат и синхронное закрытие.
    */
   withDatabase<T>(
     project: ProjectLocation,
     operation: (db: ProjectDatabase) => T & (T extends PromiseLike<unknown> ? never : unknown),
-  ): T {
+  ): T;
+  /**
+   * Владеет ресурсом независимо от синхронного или асинхронного исхода callback.
+   */
+  withDatabase<T>(
+    project: ProjectLocation,
+    operation: (db: ProjectDatabase) => T | Promise<T>,
+  ): T | Promise<T> {
     const db = ProjectDatabase.open(project.databasePath);
+    let value: T | Promise<T>;
     try {
-      return operation(db);
-    } finally {
+      value = operation(db);
+    } catch (error) {
       db.close();
+      throw error;
     }
+    if (value instanceof Promise) {
+      return value.finally(() => db.close());
+    }
+    db.close();
+    return value;
   }
 
   /**

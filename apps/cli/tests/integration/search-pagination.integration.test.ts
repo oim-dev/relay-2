@@ -41,16 +41,16 @@ describe("Проверка курсора до вычисления поиска
     async ({ query, changeData, exitCode, code }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        cli.withDatabase(project, (db) => {
+        await cli.withDatabase(project, async (db) => {
           const knowledge = new KnowledgeService(db);
-          knowledge.create("feature", { name: "Поиск первый" }, "fixture");
-          knowledge.create("feature", { name: "Поиск второй" }, "fixture");
+          await knowledge.create("feature", { name: "Поиск первый" }, "fixture");
+          await knowledge.create("feature", { name: "Поиск второй" }, "fixture");
         });
         const first = await cli.page(["search", "--q", "Поиск", "--limit", "1"], entityValue);
         const cursor = stringValue(first.meta.page.nextCursor);
         if (changeData) {
-          cli.withDatabase(project, (db) => {
-            new KnowledgeService(db).create("feature", { name: "Новая запись" }, "fixture");
+          await cli.withDatabase(project, async (db) => {
+            await new KnowledgeService(db).create("feature", { name: "Новая запись" }, "fixture");
           });
         }
         const search = spyOn(QueryService.prototype, "search");
@@ -69,11 +69,11 @@ describe("Проверка курсора до вычисления поиска
   test("действительное продолжение вычисляет поиск один раз и возвращает следующее окно", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const expected = cli.withDatabase(project, (db) => {
+      const expected = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
         return [
-          knowledge.create("feature", { name: "Поиск первый" }, "fixture"),
-          knowledge.create("feature", { name: "Поиск второй" }, "fixture"),
+          await knowledge.create("feature", { name: "Поиск первый" }, "fixture"),
+          await knowledge.create("feature", { name: "Поиск второй" }, "fixture"),
         ];
       });
       const first = await cli.page(["search", "--q", "Поиск", "--limit", "1"], entityValue);

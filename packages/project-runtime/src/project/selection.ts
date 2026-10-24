@@ -99,7 +99,7 @@ function resolveWorkspaceProject(
  * Выбирает проверенный проектный конфиг по единым правилам cwd, явного пути и workspace.
  * Параметры проверяются до чтения файлов; базы ещё не открываются. Частичный выбор наружу не выходит.
  */
-function selectProjectConfig(options: RuntimeOptions): SelectedProjectConfig {
+export function selectProjectConfig(options: RuntimeOptions): SelectedProjectConfig {
   validateOptions(options);
   const path = explicitConfig(options) ?? findConfig(options.cwd, options.project !== undefined);
   if (!path) {

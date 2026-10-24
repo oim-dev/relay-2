@@ -1,4 +1,23 @@
 import type { HistorySession } from "@relay/contracts";
+import { decodeHistoryCheckpoint, decodeHistorySession } from "../history/history-data";
+import {
+  historyCheckpointInput,
+  historyStartInput,
+  historyTransitionInput,
+  invalidHistoryInput,
+} from "../history/history-input";
+import {
+  allocateHistoryId,
+  loadHistoryCheckpoint,
+  loadHistoryTransition,
+} from "../history/history-command-load";
+import {
+  calculateHistoryCheckpoint,
+  calculateHistoryStart,
+  calculateHistoryTransition,
+} from "../history/history-command-calculate";
+import { checkHistoryRevision } from "../history/history-rules";
+import { historyInputMessages } from "../history/history-messages";
 import { batchAction } from "./batch-action";
 import { batchIdentity, type BatchStepContext } from "./batch-context";
 import { batchMessages } from "./batch.messages";
@@ -49,8 +68,17 @@ export function historyBatchActions(): BatchAction<BatchStepContext>[] {
       {
         description: batchMessages.descriptions.history,
       },
-      (context) => {
-        const session = context.history.start(context.input, context.actor);
+      async (context) => {
+        const input = historyStartInput(context.input);
+        const runId = await allocateHistoryId(context.commands);
+        const id = await allocateHistoryId(context.commands);
+        const delta = calculateHistoryStart(
+          input,
+          { id, actor: context.actor, now: context.commands.timestamp },
+          runId,
+        );
+        context.commands.apply(delta.effects);
+        const session = delta.result;
         context.created(session);
         return sessionResult(context, session);
       },
@@ -74,20 +102,34 @@ export function historyBatchActions(): BatchAction<BatchStepContext>[] {
           ref: true,
           revisionOwner: action === "fork" ? "parent-session" : "work-session",
         },
-        (context) => {
-          const ref = context.ref(action === "fork" ? "work-checkpoint" : "work-session");
-          const ownerRef =
-            action === "fork" ? context.history.getCheckpoint(ref).data.sessionId : ref;
-          const owner = context.history.get(ownerRef);
-          const session = context.history.transition(
-            ref,
-            action,
-            context.input,
-            context.write(owner),
+        async (context) => {
+          const input = historyTransitionInput(action, context.input);
+          const ref = await context.ref(action === "fork" ? "work-checkpoint" : "work-session");
+          const intent =
+            action === "fork"
+              ? decodeHistoryCheckpoint(await context.commands.get(ref, "work-checkpoint"))
+              : null;
+          const owner = decodeHistorySession(
+            await context.commands.get(intent?.data.sessionId ?? ref, "work-session"),
           );
+          if (typeof context.step.ifRevision === "number") {
+            checkHistoryRevision(owner, context.step.ifRevision);
+          }
+          const write = context.write(owner);
+          const state = await loadHistoryTransition(context.commands, owner, intent, input);
+          const id = ["fork", "attach", "resume", "takeover"].includes(action)
+            ? await allocateHistoryId(context.commands)
+            : null;
+          const delta = calculateHistoryTransition(state, input, write, {
+            id,
+            actor: context.actor,
+            now: context.commands.timestamp,
+          });
+          context.commands.apply(delta.effects);
+          const session = delta.result;
           if (action === "fork") {
             context.created(session);
-            return sessionResult(context, session, context.history.get(owner.id));
+            return sessionResult(context, session, delta.owner);
           }
           return sessionResult(context, session);
         },
@@ -119,19 +161,39 @@ export function historyBatchActions(): BatchAction<BatchStepContext>[] {
             { path: "acceptedSessionIds.*", kinds: ["work-session"] },
           ],
         },
-        (context) => {
-          const ref = context.ref(action === "open" ? "work-session" : "work-checkpoint");
-          const ownerRef =
-            action === "open" ? ref : context.history.getCheckpoint(ref).data.sessionId;
-          const owner = context.history.get(ownerRef);
-          const checkpoint = context.history.checkpoint(
-            ref,
-            action,
-            context.input,
-            context.write(owner),
+        async (context) => {
+          const input = historyCheckpointInput(action, context.input);
+          const originalAccepted = context.step.input.acceptedSessionIds;
+          if (context.implicitCreation && Array.isArray(originalAccepted)) {
+            for (const [index, original] of originalAccepted.entries()) {
+              if (typeof original === "string" && original !== input.acceptedSessionIds[index]) {
+                invalidHistoryInput(historyInputMessages.acceptedIdRequired);
+              }
+            }
+          }
+          const ref = await context.ref(action === "open" ? "work-session" : "work-checkpoint");
+          const intent =
+            action === "open"
+              ? null
+              : decodeHistoryCheckpoint(await context.commands.get(ref, "work-checkpoint"));
+          const owner = decodeHistorySession(
+            await context.commands.get(intent?.data.sessionId ?? ref, "work-session"),
           );
+          if (typeof context.step.ifRevision === "number") {
+            checkHistoryRevision(owner, context.step.ifRevision);
+          }
+          const write = context.write(owner);
+          const state = await loadHistoryCheckpoint(context.commands, owner, intent, action, input);
+          const id = await allocateHistoryId(context.commands);
+          const delta = calculateHistoryCheckpoint(state, action, input, write, {
+            id,
+            actor: context.actor,
+            now: context.commands.timestamp,
+          });
+          context.commands.apply(delta.effects);
+          const checkpoint = delta.result;
           context.created(checkpoint);
-          const updatedOwner = context.history.get(owner.id);
+          const updatedOwner = delta.owner;
           return context.result(checkpoint, updatedOwner, [
             { name: "session", ...batchIdentity(updatedOwner) },
           ]);

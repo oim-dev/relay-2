@@ -326,12 +326,18 @@ export const planningCommandMessages = {
   stageTaskTransfer: {
     description: "Атомарно перенести задачу между этапами или планами",
     details:
-      "Аргументы по порядку: исходный план, задача, ID целевого этапа. Обязательны --target-plan, --target-revision и непустая reason через --reason либо --reason-file. --if-revision относится к исходному плану; --target-revision — к целевому.\n\nДля переноса внутри одного плана укажите его же в --target-plan и одинаковые ревизии. Планы должны быть открыты. Перенос включения атомарен, сама задача не меняется. ID этапов доступны через plan stage list, исходное включение — plan task memberships.",
+      "Аргументы по порядку: исходный план, задача, ID целевого этапа. Обязательны --target-plan и непустая reason через --reason либо --reason-file. Для исходного плана передайте --if-revision или --expected-version; для целевого — --target-revision или --target-version. Если переданы обе формы предусловия владельца, проверяются обе.\n\nДля переноса внутри одного плана укажите его же в --target-plan; оба предусловия описывают одно исходное состояние. При использовании локального CAS передавайте одинаковые ревизии. Планы должны быть открыты. Перенос включения атомарен, сама задача не меняется. ID этапов доступны через plan stage list, исходное включение — plan task memberships.",
     examples: [
       {
         description: "Перенести задачу в этап другого плана",
         command:
           "relay plan stage task transfer PLN-1 PRODUCT-1 target-stage-id --target-plan PLN-2 --if-revision 3 --target-revision 2 --reason 'Проверка выделена в отдельный план.' --actor human",
+      },
+      {
+        description:
+          "Перенести по aggregateVersion обоих планов из get --with-versions; подставьте прочитанные токены",
+        command:
+          "relay plan stage task transfer PLN-1 PRODUCT-1 target-stage-id --target-plan PLN-2 --expected-version 'source-aggregate-version' --target-version 'target-aggregate-version' --reason 'Проверка выделена в отдельный план.' --actor human",
       },
     ],
   },
@@ -388,6 +394,7 @@ export const planningCommandMessages = {
     transferredTask: "Переносимая задача",
     targetStageId: "ID целевого этапа",
     targetPlan: "Целевой план",
-    targetRevision: "Прочитанная ревизия целевого плана (обязательно)",
+    targetRevision: "Прочитанная локальная ревизия целевого плана",
+    targetVersion: "Прочитанный aggregateVersion целевого плана; непрозрачный переносимый токен",
   },
 } as const;

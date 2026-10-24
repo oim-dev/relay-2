@@ -1,9 +1,37 @@
-import { PLAN_SCOPE_KINDS } from "@relay/contracts";
+import { PLAN_SCOPE_KINDS, type PlanningKind } from "@relay/contracts";
 import { planFields, releaseFields, stageFields } from "../planning/planning.constants";
+import { decodePlan, decodePlanning } from "../planning/planning-data";
+import { assertPlanningWritable } from "../planning/planning-rules";
+import {
+  parsePlanTransition,
+  parseReleaseTransition,
+  parseStageChange,
+  parseTransfer,
+} from "../planning/planning-input";
+import {
+  allocatePlanningCreation,
+  loadPlanningFields,
+  loadPlanningGraph,
+  loadPlanningMembership,
+  loadReleasePlans,
+} from "../planning/planning-command-load";
+import {
+  calculatePlanningCreation,
+  calculatePlanningUpdate,
+} from "../planning/planning-command-calculate";
+import {
+  calculatePlanTransition,
+  calculateReleaseTransition,
+} from "../planning/planning-command-lifecycle";
+import {
+  calculatePlanningStage,
+  calculatePlanningMembership,
+  calculatePlanningTransfer,
+} from "../planning/planning-command-membership";
 import { batchAction } from "./batch-action";
 import { batchIdentity, type BatchStepContext } from "./batch-context";
 import { batchMessages } from "./batch.messages";
-import type { BatchAction, BatchAddressField } from "./batch.types";
+import type { BatchAction, BatchAddressField, BatchOutcome } from "./batch.types";
 
 const stageInputFields = {
   create: [...stageFields, "before"],
@@ -13,8 +41,99 @@ const stageInputFields = {
 } as const;
 
 /**
- * Объявляет предметные действия планирования; этапы адресуются только внутри своего плана.
- * Проверки составов и готовности остаются у PlanningService в том же состоянии транзакции.
+ * Загружает владельца и основания перехода, затем один раз рассчитывает точный эффект.
+ * Переходы готовности используют общий taskGraphCache выбранного состояния overlay.
+ */
+async function transitionPlanning(
+  context: BatchStepContext,
+  kind: PlanningKind,
+  action: string,
+): Promise<BatchOutcome> {
+  const current = decodePlanning(
+    await context.commands.get(await context.ref(kind), kind),
+    context.commands.projectId,
+  );
+  const write = context.write(current);
+  assertPlanningWritable(current, write);
+  if (current.kind === "work-plan") {
+    const change = parsePlanTransition(action, context.input);
+    const graph =
+      change.action === "complete" ? await loadPlanningGraph(context.commands, [current]) : [];
+    const delta = calculatePlanTransition(
+      current,
+      change,
+      graph,
+      context.commands.taskGraphCache,
+      write,
+      context.commands.timestamp,
+    );
+    context.commands.apply(delta.effects);
+    return context.result(delta.record);
+  }
+  const change = parseReleaseTransition(action, context.input);
+  const plans =
+    (change === "publish" && current.data.status === "planned") ||
+    (change === "plan" && current.data.status === "cancelled")
+      ? await loadReleasePlans(context.commands, current.data.planIds)
+      : [];
+  const graph = change === "publish" ? await loadPlanningGraph(context.commands, plans) : [];
+  const delta = calculateReleaseTransition(
+    current,
+    change,
+    plans,
+    graph,
+    context.commands.taskGraphCache,
+    write,
+    context.commands.timestamp,
+  );
+  context.commands.apply(delta.effects);
+  return context.result(delta.record);
+}
+
+/**
+ * Загружает обе стороны переноса, задачу и все её включения. Исходные CAS и переносимые
+ * токены проверяются независимо для каждой стороны, в том числе при совпадении ID.
+ */
+async function transferPlanning(context: BatchStepContext): Promise<BatchOutcome> {
+  const {
+    targetRevision: _targetRevision,
+    targetVersion: _targetVersion,
+    ...input
+  } = context.input;
+  const fields = parseTransfer(input);
+  const source = decodePlan(
+    await context.commands.get(await context.ref("work-plan"), "work-plan"),
+    context.commands.projectId,
+  );
+  const target = decodePlan(
+    await context.commands.get(fields.targetPlan, "work-plan"),
+    context.commands.projectId,
+  );
+  const write = context.write(source);
+  const targetWrite = context.writeRevision(
+    target,
+    context.input.targetRevision,
+    "input.targetRevision",
+    context.input.targetVersion,
+  );
+  assertPlanningWritable(source, write);
+  assertPlanningWritable(target, targetWrite);
+  const membership = await loadPlanningMembership(context.commands, fields.task, true);
+  const delta = calculatePlanningTransfer(
+    { ...membership, source, target, input: fields },
+    { ...write, targetRevision: targetWrite.ifRevision },
+    context.commands.timestamp,
+  );
+  context.commands.apply(delta.effects);
+  context.touch(delta.target);
+  return context.result(delta.source, delta.source, [
+    { name: "target", ...batchIdentity(delta.target) },
+  ]);
+}
+
+/**
+ * Единственные async обработчики планирования: explicit load → pure calculate → sparse effects.
+ * Сохранение и проверка исходных guards выполняются общим executor после всех шагов.
  */
 export function planningBatchActions(): BatchAction<BatchStepContext>[] {
   const actions: BatchAction<BatchStepContext>[] = [];
@@ -30,10 +149,13 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
         `${command}.create`,
         fields,
         { description: batchMessages.descriptions.planning, addresses },
-        (context) => {
-          const created = context.planning.create(kind, context.input, context.actor);
-          context.created(created);
-          return context.result(created);
+        async (context) => {
+          const loaded = await loadPlanningFields(context.commands, kind, context.input);
+          const allocation = await allocatePlanningCreation(context.commands, kind);
+          const delta = calculatePlanningCreation(loaded, allocation);
+          context.commands.apply(delta.effects);
+          context.created(delta.record);
+          return context.result(delta.record);
         },
       ),
     );
@@ -47,16 +169,17 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
           revisionOwner: kind,
           addresses,
         },
-        (context) => {
-          const ref = context.ref(kind);
-          return context.result(
-            context.planning.update(
-              kind,
-              ref,
-              context.input,
-              context.write(context.planning.get(kind, ref)),
-            ),
+        async (context) => {
+          const current = decodePlanning(
+            await context.commands.get(await context.ref(kind), kind),
+            context.commands.projectId,
           );
+          const write = context.write(current);
+          assertPlanningWritable(current, write);
+          const loaded = await loadPlanningFields(context.commands, kind, context.input);
+          const delta = calculatePlanningUpdate(current, loaded, write, context.commands.timestamp);
+          context.commands.apply(delta.effects);
+          return context.result(delta.record);
         },
       ),
     );
@@ -72,18 +195,7 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
             ref: true,
             revisionOwner: kind,
           },
-          (context) => {
-            const ref = context.ref(kind);
-            return context.result(
-              context.planning.transition(
-                kind,
-                ref,
-                action,
-                context.input,
-                context.write(context.planning.get(kind, ref)),
-              ),
-            );
-          },
+          (context) => transitionPlanning(context, kind, action),
         ),
       );
     }
@@ -102,21 +214,24 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
             { path: "before", kinds: ["plan-stage"] },
           ],
         },
-        (context) => {
-          const ref = context.ref("work-plan");
-          const current = context.planning.get("work-plan", ref);
-          const updated = context.planning.stage(
-            ref,
-            action,
-            context.input,
-            context.write(current),
+        async (context) => {
+          const current = decodePlan(
+            await context.commands.get(await context.ref("work-plan"), "work-plan"),
+            context.commands.projectId,
           );
-          const previous = new Set(current.data.stages.map((stage) => stage.id));
-          const id =
-            action === "create"
-              ? updated.data.stages.find((stage) => !previous.has(stage.id))?.id
-              : context.text("stageId");
-          return context.nested(id, "plan-stage", updated);
+          const write = context.write(current);
+          assertPlanningWritable(current, write);
+          const change = parseStageChange(action, context.input);
+          const id = change.action === "create" ? context.commands.allocateId() : change.stageId;
+          const delta = calculatePlanningStage(
+            current,
+            change,
+            change.action === "create" ? id : null,
+            write,
+            context.commands.timestamp,
+          );
+          context.commands.apply(delta.effects);
+          return context.nested(id, "plan-stage", delta.record);
         },
       ),
     );
@@ -135,17 +250,28 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
             { path: "task", kinds: ["task"] },
           ],
         },
-        (context) => {
-          const ref = context.ref("work-plan");
-          const write = context.write(context.planning.get("work-plan", ref));
-          const updated = context.planning.stageTask(
-            ref,
-            context.text("stageId"),
-            context.text("task"),
-            remove,
-            write,
+        async (context) => {
+          const current = decodePlan(
+            await context.commands.get(await context.ref("work-plan"), "work-plan"),
+            context.commands.projectId,
           );
-          return context.nested(context.text("stageId"), "plan-stage", updated);
+          const write = context.write(current);
+          assertPlanningWritable(current, write);
+          const loaded = await loadPlanningMembership(
+            context.commands,
+            context.text("task"),
+            !remove,
+          );
+          const delta = calculatePlanningMembership(
+            current,
+            context.text("stageId"),
+            remove,
+            loaded,
+            write,
+            context.commands.timestamp,
+          );
+          context.commands.apply(delta.effects);
+          return context.nested(context.text("stageId"), "plan-stage", delta.record);
         },
       ),
     );
@@ -153,7 +279,7 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
   actions.push(
     batchAction(
       "plan.stage.task.transfer",
-      ["task", "targetPlan", "targetStage", "reason", "targetRevision"],
+      ["task", "targetPlan", "targetStage", "reason", "targetRevision", "targetVersion"],
       {
         description: batchMessages.descriptions.transfer,
         ref: true,
@@ -164,26 +290,7 @@ export function planningBatchActions(): BatchAction<BatchStepContext>[] {
           { path: "targetStage", kinds: ["plan-stage"] },
         ],
       },
-      (context) => {
-        const ref = context.ref("work-plan");
-        const source = context.planning.get("work-plan", ref);
-        const target = context.planning.get("work-plan", context.text("targetPlan"));
-        const write = context.write(source);
-        const targetWrite = context.writeRevision(
-          target,
-          context.input.targetRevision,
-          "input.targetRevision",
-        );
-        const { targetRevision: _targetRevision, ...input } = context.input;
-        const result = context.planning.transfer(ref, input, {
-          ...write,
-          targetRevision: targetWrite.ifRevision,
-        });
-        context.touch(result.target);
-        return context.result(result.source, result.source, [
-          { name: "target", ...batchIdentity(result.target) },
-        ]);
-      },
+      transferPlanning,
     ),
   );
   return actions;

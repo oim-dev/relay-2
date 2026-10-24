@@ -1,5 +1,5 @@
 import { RelayError, isEntityKind, type ProjectEntity } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { EntityReader } from "../projections/entity-reader";
 import { queryMessages } from "./queries.messages";
@@ -144,7 +144,7 @@ function resolveSearchIdentity(
  * Один reader переиспользует индекс разделов для всех документов текущего поиска.
  */
 export function searchProjectEntities(
-  db: ProjectDatabase,
+  db: ProjectStore,
   request: EntitySearchRequest,
 ): ProjectEntity[] {
   const entities = new EntityService(db);

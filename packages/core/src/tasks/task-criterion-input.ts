@@ -2,8 +2,8 @@
  * Декодирование команд критерия; состояние задачи и сам критерий проверяют чистые правила.
  */
 import { TASK_CRITERION_ACTIONS, TASK_CRITERION_FIELDS } from "./task-constants";
-import { choice, criterionText, invalid, newCriterion, object, reference } from "./task-input";
-import type { TaskCriterionChange, TaskCriterionContent } from "./task-input.types";
+import { choice, criterionContent, criterionText, invalid, object, reference } from "./task-input";
+import type { ParsedTaskCriterionChange, TaskCriterionContent } from "./task-input.types";
 import { taskLabels, taskMessages } from "./task-messages";
 
 /**
@@ -35,13 +35,16 @@ function parseCriterionFields(
 }
 
 /**
- * Связывает действие с проверенной формой команды; добавление выделяет новый UUID критерия.
+ * Связывает действие с проверенной формой команды без выделения ID и других побочных эффектов.
  */
-export function parseTaskCriterionChange(action: unknown, input: unknown): TaskCriterionChange {
+export function parseTaskCriterionChange(
+  action: unknown,
+  input: unknown,
+): ParsedTaskCriterionChange {
   const operation = choice(action, TASK_CRITERION_ACTIONS, taskLabels.criterionAction);
   if (operation === "add") {
     const value = object(input, TASK_CRITERION_FIELDS, taskLabels.criterionChange);
-    return { action: operation, criterion: newCriterion(value) };
+    return { action: operation, content: criterionContent(value) };
   }
   const fields: readonly string[] =
     operation === "update"

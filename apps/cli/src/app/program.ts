@@ -11,11 +11,13 @@ import { registerPlanningCommands } from "../commands/planning/register";
 import { registerHistoryCommands } from "../commands/history/register";
 import { registerQueryCommands } from "../commands/queries/register";
 import { registerBatchCommands } from "../commands/batch/register";
+import { registerGitSyncCommands } from "../commands/git-sync/register";
 import { checkPositionals, CommandRegistry } from "../execution/registry";
 import { createHelpRenderer } from "../output/help";
 import { processRuntime } from "../execution/runtime";
 import type { CliRuntime } from "../execution/runtime.types";
 import type { CliProgram, CliProgramOptions } from "./program.types";
+import { parseExpectedAddresses } from "../input/expected-addresses";
 
 /**
  * Создаёт независимые дерево команд и плагины Gunshi для одного запуска.
@@ -31,6 +33,7 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
     registerHistoryCommands,
     registerQueryCommands,
     registerBatchCommands,
+    registerGitSyncCommands,
   ]) {
     register(registry);
   }
@@ -62,11 +65,22 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
           ctx.addGlobalOption("config", string(programMessages.config));
           ctx.addGlobalOption("project", string(programMessages.project));
           ctx.addGlobalOption("actor", string(programMessages.actor));
+          ctx.addGlobalOption("expected-addresses", {
+            type: "custom",
+            description: programMessages.expectedAddresses,
+            parse: parseExpectedAddresses,
+          });
           ctx.addGlobalOption("format", choice(programMessages.format, ["text", "json"], "text"));
         },
       }),
     ],
-    onBeforeCommand: checkPositionals,
+    /**
+     * Проверяет синтаксис и условные write-предусловия до открытия источников ввода.
+     */
+    onBeforeCommand(context): void {
+      checkPositionals(context);
+      registry.checkWritePreconditions(context);
+    },
   } satisfies CliProgramOptions;
 
   return { command, options, outcome: registry.outcome };

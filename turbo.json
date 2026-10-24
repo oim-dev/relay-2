@@ -10,6 +10,10 @@
       "dependsOn": ["^build", "typecheck"],
       "outputs": ["dist/**"]
     },
+    "@relay/cli#build": {
+      "dependsOn": ["^build", "typecheck", "@relay/git-sync#build"],
+      "outputs": ["dist/**"]
+    },
     "dev": {
       "cache": false,
       "persistent": true

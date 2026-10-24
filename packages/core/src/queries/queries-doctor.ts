@@ -1,5 +1,5 @@
 import { RelayError, isEntityKind, type EntityRecord, type TaskRecord } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityReader } from "../projections/entity-reader";
 import { indexIntegrityRecords, inspectEntityReferences } from "./queries-doctor-references";
 import { queryMessages } from "./queries.messages";
@@ -89,7 +89,7 @@ function inspectRecords(items: readonly EntityRecord[], projectId: string): stri
  * Первая повреждённая задача сохраняется, чтобы неполный набор не прошёл проверку графа.
  */
 function inspectDecodedRecords(
-  db: ProjectDatabase,
+  db: ProjectStore,
   items: readonly EntityRecord[],
 ): EntityDecodingInspection {
   const reader = new EntityReader(
@@ -147,7 +147,7 @@ function inspectTaskGraph(inspection: EntityDecodingInspection): string[] {
  * Полный список загружается один раз; ссылки, разделы и граф задач используют общие индексы.
  * При нарушениях выбрасывается INTEGRITY_ERROR со всеми найденными issues и числом записей.
  */
-export function checkProjectIntegrity(db: ProjectDatabase): ProjectCheck {
+export function checkProjectIntegrity(db: ProjectStore): ProjectCheck {
   const items = db.list();
   const structuralIssues = inspectRecords(items, db.projectId);
   const inspection = inspectDecodedRecords(db, items);

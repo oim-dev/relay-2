@@ -6,20 +6,26 @@ import { errorCode } from "../sqlite/sqlite-errors";
 import { isAsyncFunction, isPromiseLike } from "../sqlite/transaction-callback";
 import type { SynchronousOperation } from "../sqlite/transaction.types";
 import { SQLITE_BUSY_TIMEOUT_MS } from "../sqlite/sqlite.constants";
+import type { LocalLock, LocalLockOptions } from "./local-lock.types";
 
 /**
  * Переводит отказ получения или подтверждения mutex в диагностику, сохраняя исходную причину.
  */
-function lockError(error: unknown, path: string): RelayError {
+function lockError(error: unknown, path: string, owned = false): RelayError {
   if (error instanceof RelayError) {
     return error;
   }
   const code = errorCode(error);
   let converted: RelayError;
   if (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED")) {
-    converted = new RelayError("WORKSPACE_BUSY", localLockMessages.busy, 4, {
-      path,
-    });
+    converted = new RelayError(
+      owned ? "LOCAL_LOCK_BUSY" : "WORKSPACE_BUSY",
+      owned ? localLockMessages.ownedBusy : localLockMessages.busy,
+      4,
+      {
+        path,
+      },
+    );
   } else {
     converted = new RelayError("STORAGE_ERROR", localLockMessages.lockFailed, 1, {
       path,
@@ -28,6 +34,50 @@ function lockError(error: unknown, path: string): RelayError {
   }
   converted.cause = error;
   return converted;
+}
+
+/**
+ * Получает межпроцессный mutex на отдельном SQLite-файле с явным временем владения.
+ * path — сам lock-файл; caller заранее канонизирует путь и создаёт родительский каталог.
+ * Соединение удерживает BEGIN IMMEDIATE до release, допускает await между получением и освобождением.
+ * Занятость даёт LOCAL_LOCK_BUSY; ОС освобождает mutex после crash/SIGKILL, файл никогда не удаляется.
+ */
+export function acquireLocalLock(path: string, options: LocalLockOptions = {}): LocalLock {
+  const timeout = options.timeoutMs ?? 0;
+  if (!Number.isSafeInteger(timeout) || timeout < 0 || timeout > 300000) {
+    throw new RelayError("INVALID_ARGUMENT", localLockMessages.invalidTimeout, 2);
+  }
+  path = resolve(path);
+  let connection: Database | undefined;
+  try {
+    connection = new Database(path, { create: true, readwrite: true, strict: true });
+    connection.exec(`PRAGMA busy_timeout=${timeout}; BEGIN IMMEDIATE;`);
+  } catch (error) {
+    connection?.close();
+    throw lockError(error, path, true);
+  }
+  const owned = connection;
+  let released = false;
+  return {
+    /**
+     * Завершает владение отдельным mutex-соединением; повторный вызов не меняет состояние.
+     */
+    release(): void {
+      if (released) {
+        return;
+      }
+      released = true;
+      try {
+        if (owned.inTransaction) {
+          owned.exec("ROLLBACK");
+        }
+      } catch (error) {
+        throw lockError(error, path, true);
+      } finally {
+        owned.close();
+      }
+    },
+  };
 }
 
 /**

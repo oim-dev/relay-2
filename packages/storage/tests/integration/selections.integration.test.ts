@@ -1,6 +1,6 @@
-import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { EntityRecord } from "@relay/contracts";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, spyOn, test, type Mock } from "bun:test";
+import type { EntityRecord, TaskCriterion } from "@relay/contracts";
 import type { ProjectDatabase } from "../../src/database/project-database";
 import {
   ProjectDatabaseFixture,
@@ -22,6 +22,104 @@ const literalFields = [
 let fixture: ProjectDatabaseFixture;
 let db: ProjectDatabase;
 
+/**
+ * Наблюдает настоящую SQLite→JS границу: число запросов и owners/PK реально возвращённых parts.
+ * Значения и SQL не подменяет. restore возвращает также методы кешированных statements.
+ */
+class SelectionReads {
+  /* Все SQL-вызовы проверяемого чтения, включая один пакет гидратации. */
+  readonly query: Mock<Database["query"]>;
+  /* Owners реально загруженных primary rows, по одному массиву на SQL-пакет. */
+  readonly partOwners: string[][] = [];
+  /* Scoped PK реально загруженных rows для проверки отсутствия повторной загрузки при repeated IDs. */
+  readonly partKeys: string[][] = [];
+  /* Восстановление методов statements после наблюдения, включая отказ утверждения. */
+  private readonly restoreStatements: (() => void)[] = [];
+
+  /**
+   * Устанавливает временное наблюдение, не открывая дополнительных соединений и не читая данных.
+   */
+  constructor() {
+    const originalQuery = Database.prototype.query;
+    const owners = this.partOwners;
+    const keys = this.partKeys;
+    const restoreStatements = this.restoreStatements;
+    this.query = spyOn(Database.prototype, "query").mockImplementation(trackedQuery);
+
+    /**
+     * Сохраняет generic-контракт драйвера и наблюдает только statements с primary component rows.
+     */
+    function trackedQuery<Result, Params extends SQLQueryBindings | SQLQueryBindings[]>(
+      this: Database,
+      sql: string,
+    ): ReturnType<typeof originalQuery<Result, Params>> {
+      const statement = (originalQuery<Result, Params>).call(this, sql);
+      if (!statement.columnNames.includes("owner_id")) {
+        return statement;
+      }
+      const originalAll = statement.all;
+      statement.all = trackedAll;
+      restoreStatements.push(() => {
+        statement.all = originalAll;
+      });
+      return statement;
+
+      /**
+       * Запоминает IDs из исходных SQL rows до возможной фильтрации или JSON-декодирования приложения.
+       */
+      function trackedAll(...params: Parameters<typeof originalAll>): Result[] {
+        const rows = originalAll.apply(statement, params);
+        const ownerBatch: string[] = [];
+        const keyBatch: string[] = [];
+        for (const row of rows) {
+          if (
+            row === null ||
+            typeof row !== "object" ||
+            !("owner_id" in row) ||
+            typeof row.owner_id !== "string" ||
+            !("kind" in row) ||
+            typeof row.kind !== "string" ||
+            !("id" in row) ||
+            typeof row.id !== "string"
+          ) {
+            throw new Error("Наблюдение ожидало primary component row");
+          }
+          ownerBatch.push(row.owner_id);
+          keyBatch.push(JSON.stringify([row.owner_id, row.kind, row.id]));
+        }
+        owners.push(ownerBatch);
+        keys.push(keyBatch);
+        return rows;
+      }
+    }
+  }
+
+  /**
+   * Освобождает все временные observers в обратном порядке; данные БД не изменяет.
+   */
+  restore(): void {
+    for (const restore of this.restoreStatements.toReversed()) {
+      restore();
+    }
+    this.query.mockRestore();
+  }
+}
+
+/**
+ * Создаёт минимальный настоящий criterion payload, чтобы проверять границу гидратации тела части.
+ */
+function selectionCriterion(id: string, description: string): TaskCriterion {
+  return {
+    id,
+    title: id,
+    summary: "",
+    description,
+    completed: false,
+    completedAt: null,
+    completedBy: null,
+  };
+}
+
 beforeEach(() => {
   fixture = new ProjectDatabaseFixture("selections");
   db = fixture.create();
@@ -32,9 +130,37 @@ afterEach(() => {
 });
 
 describe("Выборки по строковому полю содержания", () => {
-  test("один запрос отбирает только точные строки нужного вида и сортирует по ключу", () => {
-    const first = { ...createDocument("DOC-A"), data: { ownerId: "42", title: "Первый" } };
-    const second = { ...createDocument("DOC-Z"), data: { ownerId: "42", title: "Второй" } };
+  test("owners и один пакет parts отбирают точные строки нужного вида и сохраняют порядок ключей", () => {
+    const target = { ...createDocument("LINKED"), data: { title: "НЕ-ЧИТАТЬ-ЦЕЛЬ-СВЯЗИ" } };
+    db.insert(target);
+    const first = {
+      ...createDocument("DOC-A"),
+      data: {
+        ownerId: "42",
+        title: "Первый",
+        relations: [
+          {
+            target: { kind: "document", id: target.id },
+            type: "references",
+            description: "Первая выбранная часть",
+          },
+        ],
+      },
+    };
+    const second = {
+      ...createDocument("DOC-Z"),
+      data: {
+        ownerId: "42",
+        title: "Второй",
+        relations: [
+          {
+            target: { kind: "document", id: target.id },
+            type: "references",
+            description: "Вторая выбранная часть",
+          },
+        ],
+      },
+    };
     // Разные типы, вложенное поле и чужой владелец не должны попасть в строковый фильтр.
     const excludedData = [
       { ownerId: 42 },
@@ -49,7 +175,17 @@ describe("Выборки по строковому полю содержания
     for (const [index, data] of excludedData.entries()) {
       db.insert({
         ...createDocument(`OTHER-${index}`),
-        data: { ...data, title: "НЕ-ЧИТАТЬ-ЧУЖОЕ-СОДЕРЖАНИЕ" },
+        data: {
+          ...data,
+          title: "НЕ-ЧИТАТЬ-ЧУЖОЕ-СОДЕРЖАНИЕ",
+          relations: [
+            {
+              target: { kind: "document", id: target.id },
+              type: "references",
+              description: "НЕ-ЧИТАТЬ-ЧУЖУЮ-ЧАСТЬ",
+            },
+          ],
+        },
       });
     }
     db.insert({
@@ -58,17 +194,19 @@ describe("Выборки по строковому полю содержания
       data: { ownerId: "42", title: "НЕ-ЧИТАТЬ-ДРУГОЙ-ВИД" },
     });
     db.insert(first);
-    const query = spyOn(Database.prototype, "query");
+    const reads = new SelectionReads();
     const decoder = spyOn(JSON, "parse");
     try {
       const selected = db.listByField("document", "ownerId", "42");
 
       expect(selected).toEqual([first, second]);
-      expect(query).toHaveBeenCalledTimes(1);
+      expect(reads.query).toHaveBeenCalledTimes(2);
+      expect(reads.partOwners).toHaveLength(1);
+      expect([...new Set(reads.partOwners[0])].sort()).toEqual([first.id, second.id].sort());
       expect(decoder.mock.calls.some(([text]) => text.includes("НЕ-ЧИТАТЬ"))).toBe(false);
     } finally {
       decoder.mockRestore();
-      query.mockRestore();
+      reads.restore();
     }
   });
 
@@ -92,29 +230,39 @@ describe("Выборки по строковому полю содержания
     const selected: EntityRecord = {
       ...createDocument("TASK-1"),
       kind: "task",
-      data: { ownerId: "selected", title: "Нужная задача" },
+      data: {
+        ownerId: "selected",
+        title: "Нужная задача",
+        acceptanceCriteria: [selectionCriterion("selected-criterion", "Часть выбранной задачи")],
+      },
     };
     const excluded: EntityRecord = {
       ...createDocument("TASK-2"),
       kind: "task",
-      data: { ownerId: "other", title: "НЕ-ЧИТАТЬ-ЗАДАЧУ" },
+      data: {
+        ownerId: "other",
+        title: "НЕ-ЧИТАТЬ-ЗАДАЧУ",
+        acceptanceCriteria: [selectionCriterion("excluded-criterion", "НЕ-ЧИТАТЬ-ЧАСТЬ-ЗАДАЧИ")],
+      },
     };
     db.insert(selected);
     db.insert(excluded);
     const comment = createComment("Полный текст выбранного комментария");
     db.appendTaskComment(selected.id, comment);
     db.appendTaskComment(excluded.id, createComment("НЕ-ЧИТАТЬ-ЖУРНАЛ"));
-    const query = spyOn(Database.prototype, "query");
+    const reads = new SelectionReads();
     const decoder = spyOn(JSON, "parse");
     try {
       const records = db.listByField("task", "ownerId", "selected");
 
       expect(records).toEqual([{ ...selected, data: { ...selected.data, comments: [comment] } }]);
-      expect(query).toHaveBeenCalledTimes(1);
+      expect(reads.query).toHaveBeenCalledTimes(2);
+      expect(reads.partOwners).toHaveLength(1);
+      expect([...new Set(reads.partOwners[0])]).toEqual([selected.id]);
       expect(decoder.mock.calls.some(([text]) => text.includes("НЕ-ЧИТАТЬ"))).toBe(false);
     } finally {
       decoder.mockRestore();
-      query.mockRestore();
+      reads.restore();
     }
   });
 });
@@ -123,8 +271,30 @@ describe("Пакетные чтения постоянных ID", () => {
   test.each(batchMethods)(
     "%s сохраняет порядок и повторы, пропуская отсутствующие ID, ключи и алиасы",
     (method) => {
-      const document = { ...createDocument("DOC-OLD"), id: "document' OR 1=1 --" };
-      const task: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
+      const taskBase = createDocument("TASK-1");
+      const task: EntityRecord = {
+        ...taskBase,
+        kind: "task",
+        data: {
+          ...taskBase.data,
+          acceptanceCriteria: [selectionCriterion("criterion", "Часть выбранной задачи")],
+        },
+      };
+      const documentBase = createDocument("DOC-OLD");
+      const document = {
+        ...documentBase,
+        id: "document' OR 1=1 --",
+        data: {
+          ...documentBase.data,
+          relations: [
+            {
+              target: { kind: "task", id: task.id },
+              type: "documents",
+              description: "Часть выбранного документа",
+            },
+          ],
+        },
+      };
       db.insert(document);
       db.insert(task);
       const renamed = db.rename(document.id, "DOC-NEW", 1, "editor");
@@ -132,9 +302,21 @@ describe("Пакетные чтения постоянных ID", () => {
       const second = { ...createComment("Второе сообщение"), createdAt: "2000-01-01" };
       db.appendTaskComment(task.id, first);
       db.appendTaskComment(task.id, second);
-      db.insert({ ...createDocument("UNRELATED"), data: { title: "НЕ-ЧИТАТЬ-ДРУГОЙ-ID" } });
+      db.insert({
+        ...createDocument("UNRELATED"),
+        data: {
+          title: "НЕ-ЧИТАТЬ-ДРУГОЙ-ID",
+          relations: [
+            {
+              target: { kind: "task", id: task.id },
+              type: "documents",
+              description: "НЕ-ЧИТАТЬ-ДРУГИЕ-PARTS",
+            },
+          ],
+        },
+      });
       const ids = [task.id, "missing", document.key, renamed.key, document.id, task.id] as const;
-      const query = spyOn(Database.prototype, "query");
+      const reads = new SelectionReads();
       const decoder = spyOn(JSON, "parse");
       try {
         const records = db[method](ids);
@@ -142,6 +324,13 @@ describe("Пакетные чтения постоянных ID", () => {
         if (method === "getMany") {
           const expectedTask = { ...task, data: { ...task.data, comments: [first, second] } };
           expect(records).toEqual([expectedTask, renamed, expectedTask]);
+          expect(reads.query).toHaveBeenCalledTimes(2);
+          expect(reads.partOwners).toHaveLength(1);
+          expect([...new Set(reads.partOwners[0])].sort()).toEqual([task.id, document.id].sort());
+          expect(reads.partKeys).toHaveLength(1);
+          for (const keys of reads.partKeys) {
+            expect(new Set(keys).size).toBe(keys.length);
+          }
           expect(decoder.mock.calls.some(([text]) => text.includes("НЕ-ЧИТАТЬ"))).toBe(false);
         } else {
           expect(records).toEqual([
@@ -150,11 +339,12 @@ describe("Пакетные чтения постоянных ID", () => {
             { id: task.id, kind: "task", key: task.key },
           ]);
           expect(decoder).not.toHaveBeenCalled();
+          expect(reads.query).toHaveBeenCalledTimes(1);
+          expect(reads.partOwners).toEqual([]);
         }
-        expect(query).toHaveBeenCalledTimes(1);
       } finally {
         decoder.mockRestore();
-        query.mockRestore();
+        reads.restore();
       }
     },
   );

@@ -1,15 +1,16 @@
-import { statSync } from "node:fs";
 import {
   ENTITY_KINDS,
   validateEntityReadRequest,
   type EntityReadOptions,
   type EntityReadResult,
   type ProjectEntity,
+  type VersionedEntityReadResult,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityReader } from "../projections/entity-reader";
 import { checkProjectIntegrity } from "./queries-doctor";
 import { readEntitySelection } from "./queries-get";
+import { readVersionedEntitySelection } from "./queries-get-versioned";
 import { readProjectOverview } from "./queries-overview";
 import { parseEntitySearch, searchProjectEntities } from "./queries-search";
 import type { ProjectCheck, ProjectOverview, ProjectStatus } from "./queries.types";
@@ -24,12 +25,12 @@ export class QueryService {
   /* Поддерживаемые виды сущностей из общего переносимого контракта. */
   static readonly kinds = ENTITY_KINDS;
   /* Соединение выбранного проекта; открытием и закрытием владеет вызывающее приложение. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
 
   /**
    * Привязывает сценарии чтения к открытому соединению без изменения его срока жизни.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore) {
     this.db = db;
   }
 
@@ -50,6 +51,19 @@ export class QueryService {
   getMany(refs: readonly string[], options: EntityReadOptions = {}): EntityReadResult {
     validateEntityReadRequest(refs, options);
     return this.db.snapshot(() => readEntitySelection(this.db, refs, options));
+  }
+
+  /**
+   * Асинхронно читает тот же full/summary набор и отдельные переносимые версии успешных ID.
+   * Адреса, содержание, версии и поколение относятся к одному anchor; смена контекста прерывает вызов.
+   * До I/O проверяет форму запроса; summary не загружает тела, комментарии или паспорт проекта.
+   */
+  async getManyVersioned(
+    refs: readonly string[],
+    options: EntityReadOptions = {},
+  ): Promise<VersionedEntityReadResult> {
+    validateEntityReadRequest(refs, options);
+    return await readVersionedEntitySelection(this.db.commands, refs, options);
   }
 
   /**
@@ -77,8 +91,7 @@ export class QueryService {
   status(): ProjectStatus {
     return this.db.snapshot(() => ({
       projectId: this.db.projectId,
-      databasePath: this.db.path,
-      bytes: statSync(this.db.path).size,
+      ...this.db.storageInfo(),
       generation: this.db.getGeneration(),
       records: this.db.count(),
     }));

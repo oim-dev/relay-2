@@ -1,4 +1,4 @@
-import type { EntityKind } from "@relay/contracts";
+import type { CommandEntityVersions, EntityKind } from "@relay/contracts";
 import type { Page } from "../pagination/pagination.types";
 import type { CliFailure } from "../errors/errors.types";
 
@@ -11,7 +11,8 @@ export type TextPresentation =
   | "session-tree"
   | "overview"
   | "workspace-projects"
-  | "entity-read";
+  | "entity-read"
+  | "git-sync-status";
 
 /**
  * Дополнительные сведения результата; page присутствует только у списочного ответа.
@@ -19,6 +20,8 @@ export type TextPresentation =
 export interface ResultMetadata extends Readonly<Record<string, unknown>> {
   /* Сведения о текущем окне и продолжении из того же снимка, что и data. */
   readonly page?: Page;
+  /* Переносимые версии успешных ID; metadata отделена от entity и её content hash. */
+  readonly versions?: Readonly<Record<string, CommandEntityVersions>>;
 }
 
 /**
@@ -31,6 +34,8 @@ export interface Result {
   readonly meta?: ResultMetadata;
   /* Первая ошибка частичного ответа; управляет ok, диагностикой и exit code отдельно от data. */
   readonly failure?: CliFailure;
+  /* Foreground уже передал потоки напрямую; отдельный итоговый envelope не печатается. */
+  readonly silent?: boolean;
 }
 
 /**

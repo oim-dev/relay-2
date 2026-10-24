@@ -1,6 +1,6 @@
 /**
- * Подготовка содержания планирования: разрешение ссылок и начальное состояние записей.
- * Чтения выполняются внутри транзакции вызывающего сервиса; этот модуль ничего не сохраняет.
+ * Чистая подготовка содержания из проверенных полей и уже загруженных целей.
+ * Модуль не читает хранилище, не выделяет ID и не получает текущее время.
  */
 import {
   RelayError,
@@ -8,11 +8,10 @@ import {
   type ReleaseFields,
   type WorkPlanData,
   type WorkPlanFields,
+  type EntityIdentity,
+  type WorkPlanRecord,
 } from "@relay/contracts";
-import type { EntityService } from "../entities/entities";
-import { decodePlan } from "./planning-data";
-import { parsePlanFields, parseReleaseFields } from "./planning-input";
-import { invalid, reference } from "./planning-validation";
+import { invalid } from "./planning-validation";
 import { planningMessages } from "./planning.messages";
 
 /**
@@ -20,17 +19,19 @@ import { planningMessages } from "./planning.messages";
  * Повторы после разрешения ключей и алиасов запрещены; входной объект не изменяется.
  */
 export function preparePlanFields(
-  entities: EntityService,
-  input: unknown,
+  fields: Readonly<Partial<WorkPlanFields>>,
+  targets: readonly EntityIdentity[],
 ): Partial<WorkPlanFields> {
-  const fields = parsePlanFields(input);
   if (fields.scope === undefined) {
     return fields;
   }
-  const scope = fields.scope.map((entry) => ({
-    kind: entry.kind,
-    id: entities.get(entry.id, entry.kind).id,
-  }));
+  const scope = fields.scope.map((entry, index) => {
+    const target = targets[index];
+    if (target === undefined || target.kind !== entry.kind) {
+      throw new RelayError("NOT_FOUND", planningMessages.missingScope, 3, { ref: entry.id });
+    }
+    return { kind: entry.kind, id: target.id };
+  });
   if (new Set(scope.map((entry) => entry.id)).size !== scope.length) {
     invalid(planningMessages.duplicateScope);
   }
@@ -73,13 +74,10 @@ export function newPlanData(
  * Пустой набор previous при перепланировании намеренно проверяет весь состав как новый.
  */
 export function resolveReleasePlans(
-  entities: EntityService,
-  projectId: string,
-  refs: readonly string[],
+  plans: readonly WorkPlanRecord[],
   previous: ReadonlySet<string> = new Set(),
 ): string[] {
-  const ids = refs.map((ref) => {
-    const plan = decodePlan(entities.get(reference(ref, "ref"), "work-plan"), projectId);
+  const ids = plans.map((plan) => {
     if (plan.data.status === "cancelled" && !previous.has(plan.id)) {
       throw new RelayError("INVALID_PLAN", planningMessages.cancelledReleasePlan, 4, {
         id: plan.id,
@@ -98,18 +96,16 @@ export function resolveReleasePlans(
  * Прежние ID разрешают сохранение уже включённого отменённого плана при редактировании.
  */
 export function prepareReleaseFields(
-  entities: EntityService,
-  projectId: string,
-  input: unknown,
+  fields: Readonly<Partial<ReleaseFields>>,
+  plans: readonly WorkPlanRecord[],
   previous: ReadonlySet<string> = new Set(),
 ): Partial<ReleaseFields> {
-  const fields = parseReleaseFields(input);
   if (fields.planIds === undefined) {
     return fields;
   }
   return {
     ...fields,
-    planIds: resolveReleasePlans(entities, projectId, fields.planIds, previous),
+    planIds: resolveReleasePlans(plans, previous),
   };
 }
 

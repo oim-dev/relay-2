@@ -8,12 +8,12 @@ describe("Предметное исполнение примеров справ�
   test("пример product.create использует явную ревизию пустого паспорта и откатывается", async () => {
     await withCliFixture(async (fixture) => {
       const project = fixture.createProject();
-      fixture.withDatabase(project, (db) => {
+      await fixture.withDatabase(project, async (db) => {
         const before = db.list();
         const generation = db.getGeneration();
         const example = getBatchOperationContract("product.create").example;
 
-        const checked = new BatchService(db).execute(
+        const checked = await new BatchService(db).execute(
           { version: 1, operations: [example] },
           { actor: "agent", check: true },
         );
@@ -43,8 +43,12 @@ describe("Предметное исполнение примеров справ�
   test("готовые scope, relations, criteria и этап выполняются одним check без подстановки ревизий", async () => {
     await withCliFixture(async (fixture) => {
       const project = fixture.createProject();
-      fixture.withDatabase(project, (db) => {
-        const feature = new KnowledgeService(db).create("feature", { name: "Поиск" }, "agent");
+      await fixture.withDatabase(project, async (db) => {
+        const feature = await new KnowledgeService(db).create(
+          "feature",
+          { name: "Поиск" },
+          "agent",
+        );
         expect(feature.key).toBe("FEATURE-1");
         const before = db.list();
         const generation = db.getGeneration();
@@ -55,7 +59,7 @@ describe("Предметное исполнение примеров справ�
           "plan.stage.create",
         ].map((op) => getBatchOperationContract(op).example);
 
-        const checked = new BatchService(db).execute(
+        const checked = await new BatchService(db).execute(
           { version: 1, operations },
           { actor: "agent", check: true },
         );
@@ -94,13 +98,13 @@ describe("Предметное исполнение примеров справ�
   test("пример session.start сохраняет operator, а явный description:null не считается пропуском", async () => {
     await withCliFixture(async (fixture) => {
       const project = fixture.createProject();
-      fixture.withDatabase(project, (db) => {
+      await fixture.withDatabase(project, async (db) => {
         const before = db.list();
         const generation = db.getGeneration();
         const example = getBatchOperationContract("session.start").example;
         const batch = new BatchService(db);
 
-        const checked = batch.execute(
+        const checked = await batch.execute(
           { version: 1, operations: [example] },
           { actor: "agent", check: true },
         );
@@ -120,7 +124,7 @@ describe("Предметное исполнение примеров справ�
           }),
         ]);
         try {
-          batch.execute(
+          await batch.execute(
             {
               version: 1,
               operations: [{ ...example, input: { ...example.input, description: null } }],

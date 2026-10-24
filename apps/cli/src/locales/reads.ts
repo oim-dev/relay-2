@@ -3,6 +3,11 @@
  */
 export const readOutputMessages = {
   /**
+   * Отделяет переносимые версии от полей сущности и указывает токен для записи.
+   */
+  versions: (record: string, aggregate: string): string =>
+    `Версия записи: ${record}\nВерсия агрегата (expectedVersion): ${aggregate}`,
+  /**
    * Начинает отдельный результат с порядковым номером и дословным адресом в JSON-кавычках.
    */
   begin: (fence: string, index: number, ref: string): string =>

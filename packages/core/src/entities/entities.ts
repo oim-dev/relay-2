@@ -7,7 +7,7 @@ import {
   type EntityRecord,
   type WriteOptions,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import {
   allocateEntityKey,
   resolveEntityIdentity,
@@ -27,12 +27,12 @@ import {
  */
 export class EntityService {
   /* Соединение выбранного проекта; ресурсом и внешней транзакцией владеет вызывающий код. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
 
   /**
    * Привязывает внутренние операции к открытому соединению, не меняя срок его жизни.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore) {
     this.db = db;
   }
 

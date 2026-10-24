@@ -4,6 +4,34 @@ import { invokeBinary } from "./cli-process";
 
 const queries = [
   {
+    name: "единственная публичная группа Git Sync",
+    words: ["git-sync", ""],
+    included: [
+      "connect",
+      "status",
+      "now",
+      "auto",
+      "worker",
+      "conflicts",
+      "restore",
+      "service",
+      "supervise",
+    ],
+    excluded: ["--request"],
+  },
+  {
+    name: "вложенное управление пользовательской службой",
+    words: ["git-sync", "service", ""],
+    included: ["enable", "disable", "status"],
+    excluded: ["install", "supervise"],
+  },
+  {
+    name: "JSON completion конфликта не читает stdin и не запускает Git Sync",
+    words: ["git-sync", "conflicts", "resolve", "id", "--input", "-", "--format", "j"],
+    included: ["json"],
+    excluded: ["text"],
+  },
+  {
     name: "разделы справки batch",
     words: ["batch", "help", ""],
     included: ["plan", "product", "task", "session"],
@@ -296,36 +324,44 @@ describe("Shell completion собранного CLI", () => {
     },
   );
 
-  test("Bash сохраняет пробелы и буквальную подстановку в аргументе при повторном подключении", async () => {
-    const result = await invokeBinary(
-      ["relay", "task", "create", "--title", "Два слова $(touch injected)", "--format", "j"],
-      { command: ["bash", "--noprofile", "--norc", "-c", bashRoundTrip, "completion-test"] },
-    );
+  // POSIX Bash-транспорт использует process substitution и исполняемый shell-wrapper.
+  // Протокол кандидатов и генерация всех четырёх shell-скриптов выше остаются native-кроссплатформенными.
+  test.skipIf(process.platform === "win32")(
+    "Bash сохраняет пробелы и буквальную подстановку в аргументе при повторном подключении",
+    async () => {
+      const result = await invokeBinary(
+        ["relay", "task", "create", "--title", "Два слова $(touch injected)", "--format", "j"],
+        { command: ["bash", "--noprofile", "--norc", "-c", bashRoundTrip, "completion-test"] },
+      );
 
-    expect(result).toEqual({ exitCode: 0, stdout: "json\n", stderr: "", files: [] });
-  });
+      expect(result).toEqual({ exitCode: 0, stdout: "json\n", stderr: "", files: [] });
+    },
+  );
 
-  test("Bash передаёт точные границы argv через записывающую обёртку настоящего бинарника", async () => {
-    const words = [
-      "task",
-      "create",
-      "--title",
-      "Два  слова $(touch injected) ' \" *",
-      "--format",
-      "j",
-    ];
+  test.skipIf(process.platform === "win32")(
+    "Bash передаёт точные границы argv через записывающую обёртку настоящего бинарника",
+    async () => {
+      const words = [
+        "task",
+        "create",
+        "--title",
+        "Два  слова $(touch injected) ' \" *",
+        "--format",
+        "j",
+      ];
 
-    const result = await invokeBinary(["relay", ...words], {
-      command: ["bash", "--noprofile", "--norc", "-c", bashCaptureRoundTrip, "argv-test"],
-    });
+      const result = await invokeBinary(["relay", ...words], {
+        command: ["bash", "--noprofile", "--norc", "-c", bashCaptureRoundTrip, "argv-test"],
+      });
 
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toBe(`json\n${["complete", "--", ...words].join("\0")}\0`);
-    expect([...result.files].sort()).toEqual(["argv.capture", "wrapper"]);
-  });
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`json\n${["complete", "--", ...words].join("\0")}\0`);
+      expect([...result.files].sort()).toEqual(["argv.capture", "wrapper"]);
+    },
+  );
 
-  test.each(bashValues)(
+  test.skipIf(process.platform === "win32").each(bashValues)(
     "Bash: $name передаётся без повторной фильтрации",
     async ({ words, expected }) => {
       const result = await invokeBinary(words, {

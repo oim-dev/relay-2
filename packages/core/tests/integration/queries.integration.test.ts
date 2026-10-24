@@ -45,9 +45,9 @@ function write(entity: EntityRecord): WriteOptions {
 }
 
 describe("Предметные тексты поиска", () => {
-  test("название фичи находится без учёта регистра", () => {
-    withEntityDatabase((db) => {
-      const feature = new KnowledgeService(db).create(
+  test("название фичи находится без учёта регистра", async () => {
+    await withEntityDatabase(async (db) => {
+      const feature = await new KnowledgeService(db).create(
         "feature",
         { name: "Яркое название", description: "Требование шага" },
         actor,
@@ -60,9 +60,9 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("описание критерия включено в поиск задачи", () => {
-    withEntityDatabase((db) => {
-      const task = new TasksService(db).create(
+  test("описание критерия включено в поиск задачи", async () => {
+    await withEntityDatabase(async (db) => {
+      const task = await new TasksService(db).create(
         {
           title: "Работа",
           acceptanceCriteria: [{ title: "Критерий", description: "Уникальный-критерий" }],
@@ -77,9 +77,9 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("полный Markdown документа включён в поиск", () => {
-    withEntityDatabase((db) => {
-      const document = new KnowledgeService(db).create(
+  test("полный Markdown документа включён в поиск", async () => {
+    await withEntityDatabase(async (db) => {
+      const document = await new KnowledgeService(db).create(
         "document",
         { name: "Документ", body: "Глубокий Markdown\n\n    содержание" },
         actor,
@@ -92,12 +92,16 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("пояснение связи включено в поиск документа", () => {
-    withEntityDatabase((db) => {
+  test("пояснение связи включено в поиск документа", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Цель" }, actor);
-      const document = knowledge.create("document", { name: "Документ", body: "Текст" }, actor);
-      const linked = knowledge.linkDocument(document.id, feature.id, {
+      const feature = await knowledge.create("feature", { name: "Цель" }, actor);
+      const document = await knowledge.create(
+        "document",
+        { name: "Документ", body: "Текст" },
+        actor,
+      );
+      const linked = await knowledge.linkDocument(document.id, feature.id, {
         ...write(document),
         description: "Уникальное-основание",
       });
@@ -109,11 +113,11 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("ожидаемый итог этапа включён в поиск плана", () => {
-    withEntityDatabase((db) => {
+  test("ожидаемый итог этапа включён в поиск плана", async () => {
+    await withEntityDatabase(async (db) => {
       const planning = new PlanningService(db);
-      const plan = planning.create("work-plan", { title: "План", goal: "Результат" }, actor);
-      const staged = planning.stage(
+      const plan = await planning.create("work-plan", { title: "План", goal: "Результат" }, actor);
+      const staged = await planning.stage(
         plan.id,
         "create",
         { title: "Этап", outcome: "Уникальный-итог" },
@@ -127,11 +131,11 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("журнал комментариев не включён в поиск содержания задачи", () => {
-    withEntityDatabase((db) => {
+  test("журнал комментариев не включён в поиск содержания задачи", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const task = tasks.create({ title: "Работа" }, actor);
-      tasks.comment(task.id, "Секретный-комментарий", actor);
+      const task = await tasks.create({ title: "Работа" }, actor);
+      await tasks.comment(task.id, "Секретный-комментарий", actor);
       const queries = new QueryService(db);
 
       const result = queries.search({ q: "Секретный-комментарий" });
@@ -140,9 +144,9 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test.each(excludedMetadata)("$name не включается в поиск содержания", ({ source }) => {
-    withEntityDatabase((db) => {
-      const feature = new KnowledgeService(db).create("feature", { name: "Фича" }, actor);
+  test.each(excludedMetadata)("$name не включается в поиск содержания", async ({ source }) => {
+    await withEntityDatabase(async (db) => {
+      const feature = await new KnowledgeService(db).create("feature", { name: "Фича" }, actor);
       let q = actor;
       if (source === "field") {
         q = "createdAt";
@@ -157,9 +161,9 @@ describe("Предметные тексты поиска", () => {
     });
   });
 
-  test("фильтр вида исключает текстовое совпадение другой области", () => {
-    withEntityDatabase((db) => {
-      new KnowledgeService(db).create("feature", { name: "Яркое название" }, actor);
+  test("фильтр вида исключает текстовое совпадение другой области", async () => {
+    await withEntityDatabase(async (db) => {
+      await new KnowledgeService(db).create("feature", { name: "Яркое название" }, actor);
       const queries = new QueryService(db);
 
       const result = queries.search({ q: "Яркое", kind: "document" });
@@ -178,32 +182,35 @@ describe("Предметные тексты поиска", () => {
 });
 
 describe("Адреса в get и поиске", () => {
-  test.each(referenceForms)("$name после переименования находит ту же фичу", ({ field, typed }) => {
-    withEntityDatabase((db) => {
+  test.each(referenceForms)(
+    "$name после переименования находит ту же фичу",
+    async ({ field, typed }) => {
+      await withEntityDatabase(async (db) => {
+        const knowledge = new KnowledgeService(db);
+        const initial = await knowledge.create(
+          "feature",
+          { name: "Поиск", description: "Описание" },
+          actor,
+        );
+        const renamed = await knowledge.rename("feature", initial.id, "FIND", write(initial));
+        const address = field === "alias" ? initial.key : renamed[field];
+        const ref = typed ? `feature:${address}` : address;
+        const queries = new QueryService(db);
+
+        const exact = queries.get(ref);
+        const found = queries.search({ q: ref });
+
+        expect(exact).toEqual(renamed);
+        expect(found).toEqual([renamed]);
+      });
+    },
+  );
+
+  test("фильтр вида исключает точное совпадение алиаса чужой области", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const initial = knowledge.create(
-        "feature",
-        { name: "Поиск", description: "Описание" },
-        actor,
-      );
-      const renamed = knowledge.rename("feature", initial.id, "FIND", write(initial));
-      const address = field === "alias" ? initial.key : renamed[field];
-      const ref = typed ? `feature:${address}` : address;
-      const queries = new QueryService(db);
-
-      const exact = queries.get(ref);
-      const found = queries.search({ q: ref });
-
-      expect(exact).toEqual(renamed);
-      expect(found).toEqual([renamed]);
-    });
-  });
-
-  test("фильтр вида исключает точное совпадение алиаса чужой области", () => {
-    withEntityDatabase((db) => {
-      const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Поиск" }, actor);
-      knowledge.rename("feature", feature.id, "FIND", write(feature));
+      const feature = await knowledge.create("feature", { name: "Поиск" }, actor);
+      await knowledge.rename("feature", feature.id, "FIND", write(feature));
       const queries = new QueryService(db);
 
       const result = queries.search({ q: feature.key, kind: "task" });
@@ -212,11 +219,11 @@ describe("Адреса в get и поиске", () => {
     });
   });
 
-  test("часть старого алиаса не считается точным адресом", () => {
-    withEntityDatabase((db) => {
+  test("часть старого алиаса не считается точным адресом", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Поиск" }, actor);
-      knowledge.rename("feature", feature.id, "FIND", write(feature));
+      const feature = await knowledge.create("feature", { name: "Поиск" }, actor);
+      await knowledge.rename("feature", feature.id, "FIND", write(feature));
       const queries = new QueryService(db);
 
       const result = queries.search({ q: "FEATURE-" });
@@ -225,9 +232,9 @@ describe("Адреса в get и поиске", () => {
     });
   });
 
-  test("типизированная ссылка чужого вида даёт NOT_FOUND", () => {
-    withEntityDatabase((db) => {
-      const feature = new KnowledgeService(db).create("feature", { name: "Поиск" }, actor);
+  test("типизированная ссылка чужого вида даёт NOT_FOUND", async () => {
+    await withEntityDatabase(async (db) => {
+      const feature = await new KnowledgeService(db).create("feature", { name: "Поиск" }, actor);
       const queries = new QueryService(db);
 
       expectRelayError(() => queries.get(`task:${feature.id}`), "NOT_FOUND");
@@ -244,11 +251,11 @@ describe("Адреса в get и поиске", () => {
 });
 
 describe("Обзор и стоимость status", () => {
-  test("обзор включает весь состав и считает блокировку незавершённой зависимостью", () => {
-    withEntityDatabase((db) => {
+  test("обзор включает весь состав и считает блокировку незавершённой зависимостью", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const blocker = tasks.create({ title: "Блокер" }, actor);
-      const dependent = tasks.create(
+      const blocker = await tasks.create({ title: "Блокер" }, actor);
+      const dependent = await tasks.create(
         { title: "Зависимая", column: "ready", dependencies: [blocker.id] },
         actor,
       );
@@ -268,9 +275,9 @@ describe("Обзор и стоимость status", () => {
     });
   });
 
-  test("status возвращает полный счётчик и поколение без чтения списка карточек", () => {
-    withEntityDatabase((db) => {
-      new TasksService(db).create({ title: "Работа" }, actor);
+  test("status возвращает полный счётчик и поколение без чтения списка карточек", async () => {
+    await withEntityDatabase(async (db) => {
+      await new TasksService(db).create({ title: "Работа" }, actor);
       const generation = db.getGeneration();
       const queries = new QueryService(db);
       const fullRead = spyOn(db, "list");
@@ -291,8 +298,15 @@ describe("Обзор и стоимость status", () => {
     });
   });
 
-  test("commit другого соединения между чтениями не меняет поколение и состав обзора", () => {
-    withEntityDatabase((db) => {
+  test("commit другого соединения между чтениями не меняет поколение и состав обзора", async () => {
+    await withEntityDatabase(async (db) => {
+      const initialTask = await new TasksService(db).create({ title: "До начала снимка" }, actor);
+      const addedTask = {
+        ...initialTask,
+        id: crypto.randomUUID(),
+        key: "PRODUCT-2",
+        data: { ...initialTask.data, title: "После начала снимка" },
+      };
       const queries = new QueryService(db);
       const writer = ProjectDatabase.open(db.path);
       /**
@@ -306,7 +320,7 @@ describe("Обзор и стоимость status", () => {
         if (!written) {
           // Commit попадает строго между чтением состава и остальных частей обзора.
           written = true;
-          new TasksService(writer).create({ title: "После начала снимка" }, actor);
+          writer.transaction(() => writer.insert(addedTask));
         }
         return records;
       });
@@ -315,25 +329,30 @@ describe("Обзор и стоимость status", () => {
 
         expect(written).toBe(true);
         expect(overview.generation).toBe(generation);
-        expect(overview.items).toHaveLength(3);
-        expect(overview.counts.task).toBe(0);
-        expect(overview.tasks.total).toBe(0);
+        expect(overview.items).toHaveLength(4);
+        expect(overview.items.filter((record) => record.kind === "task")).toEqual([initialTask]);
+        expect(overview.counts.task).toBe(1);
+        expect(overview.tasks.total).toBe(1);
       } finally {
         list.mockRestore();
         writer.close();
       }
-      expect(queries.overview().counts.task).toBe(1);
+      expect(queries.overview().items.filter((record) => record.kind === "task")).toEqual([
+        initialTask,
+        addedTask,
+      ]);
+      expect(queries.overview().counts.task).toBe(2);
       expect(db.getGeneration()).toBeGreaterThan(generation);
     });
   });
 });
 
 describe("Диагностика целостности проекта", () => {
-  test("валидный проект возвращает проверенный состав и пустой список нарушений", () => {
-    withEntityDatabase((db) => {
+  test("валидный проект возвращает проверенный состав и пустой список нарушений", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const blocker = tasks.create({ title: "Блокер" }, actor);
-      tasks.create({ title: "Зависимая", dependencies: [blocker.id] }, actor);
+      const blocker = await tasks.create({ title: "Блокер" }, actor);
+      await tasks.create({ title: "Зависимая", dependencies: [blocker.id] }, actor);
       const generation = db.getGeneration();
       const queries = new QueryService(db);
 
@@ -349,11 +368,11 @@ describe("Диагностика целостности проекта", () => {
     });
   });
 
-  test("сочетание пропавшей цели, неверного вида и цикла возвращает все нарушения без записи", () => {
-    withEntityDatabase((db) => {
+  test("сочетание пропавшей цели, неверного вида и цикла возвращает все нарушения без записи", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const first = tasks.create({ title: "Первая" }, actor);
-      const second = tasks.create({ title: "Вторая", dependencies: [first.id] }, actor);
+      const first = await tasks.create({ title: "Первая" }, actor);
+      const second = await tasks.create({ title: "Вторая", dependencies: [first.id] }, actor);
       // Намеренно повреждаем несколько связей через Storage: doctor должен собрать их вместе.
       db.update(
         {
@@ -390,9 +409,9 @@ describe("Диагностика целостности проекта", () => {
 
   test.each(corruptedReads)(
     "$operation отклоняет повреждённые отношения без изменения документа",
-    ({ operation, code }) => {
-      withEntityDatabase((db) => {
-        const document = new KnowledgeService(db).create(
+    async ({ operation, code }) => {
+      await withEntityDatabase(async (db) => {
+        const document = await new KnowledgeService(db).create(
           "document",
           { name: "Документ", body: "Содержание" },
           actor,
@@ -431,26 +450,26 @@ describe("Диагностика целостности проекта", () => {
 
   test.each(sectionStates)(
     "$name разделы проверяются одним общим индексом без записи",
-    ({ retired }) => {
-      withEntityDatabase((db) => {
+    async ({ retired }) => {
+      await withEntityDatabase(async (db) => {
         const knowledge = new KnowledgeService(db);
-        const project = knowledge.changeSection(
+        const project = await knowledge.changeSection(
           "create",
           { id: "guides", name: "Руководства" },
           write(knowledge.get("project")),
         );
-        const first = knowledge.create(
+        const first = await knowledge.create(
           "document",
           { name: "Первый", body: "Первое руководство", sectionId: "guides" },
           actor,
         );
-        knowledge.create(
+        await knowledge.create(
           "document",
           { name: "Второй", body: "Второе руководство", sectionId: "guides" },
           actor,
         );
         if (retired) {
-          knowledge.changeSection("remove", { id: "guides" }, write(project));
+          await knowledge.changeSection("remove", { id: "guides" }, write(project));
         }
         const snapshot = db.list();
         const generation = db.getGeneration();
@@ -483,25 +502,25 @@ describe("Диагностика целостности проекта", () => {
     },
   );
 
-  test("неизвестный раздел диагностируется, а легально удалённый сохраняется без записи", () => {
-    withEntityDatabase((db) => {
+  test("неизвестный раздел диагностируется, а легально удалённый сохраняется без записи", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const project = knowledge.changeSection(
+      const project = await knowledge.changeSection(
         "create",
         { id: "guides", name: "Руководства" },
         write(knowledge.get("project")),
       );
-      const first = knowledge.create(
+      const first = await knowledge.create(
         "document",
         { name: "Первый", body: "Текст", sectionId: "guides" },
         actor,
       );
-      const second = knowledge.create(
+      const second = await knowledge.create(
         "document",
         { name: "Второй", body: "Текст", sectionId: "guides" },
         actor,
       );
-      knowledge.changeSection("remove", { id: "guides" }, write(project));
+      await knowledge.changeSection("remove", { id: "guides" }, write(project));
       // Этот ID никогда не был зарегистрирован, в отличие от раздела первого документа.
       const corruptedRecord = {
         ...second,
@@ -521,9 +540,9 @@ describe("Диагностика целостности проекта", () => {
     });
   });
 
-  test("get не маскирует неизвестный раздел как удалённый", () => {
-    withEntityDatabase((db) => {
-      const document = new KnowledgeService(db).create(
+  test("get не маскирует неизвестный раздел как удалённый", async () => {
+    await withEntityDatabase(async (db) => {
+      const document = await new KnowledgeService(db).create(
         "document",
         { name: "Документ", body: "Текст" },
         actor,
@@ -543,15 +562,19 @@ describe("Диагностика целостности проекта", () => {
     });
   });
 
-  test("валидные реализации и история принимаются doctor вместе с остальными областями", () => {
-    withEntityDatabase((db) => {
+  test("валидные реализации и история принимаются doctor вместе с остальными областями", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const feature = knowledge.create("feature", { name: "Фича" }, actor);
-      const application = knowledge.create("application", { name: "Web", slug: "web" }, actor);
-      knowledge.replaceParticipation(application.id, [feature.id], write(application));
+      const feature = await knowledge.create("feature", { name: "Фича" }, actor);
+      const application = await knowledge.create(
+        "application",
+        { name: "Web", slug: "web" },
+        actor,
+      );
+      await knowledge.replaceParticipation(application.id, [feature.id], write(application));
       const history = new HistoryService(db);
-      const session = history.start({ title: "Поручение" }, actor);
-      history.checkpoint(
+      const session = await history.start({ title: "Поручение" }, actor);
+      await history.checkpoint(
         session.id,
         "open",
         { title: "Намерение", body: "Материал", runId: session.data.currentRunId },

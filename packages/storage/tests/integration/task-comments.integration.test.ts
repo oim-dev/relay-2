@@ -90,14 +90,19 @@ describe("Независимый append-only журнал задачи", () => {
         1,
       );
 
-      expect(decoder).not.toHaveBeenCalled();
+      // Outbox декодирует только before/after затронутой карточки; независимый журнал не читается.
+      expect(
+        decoder.mock.calls.every(
+          ([json]) => !json.includes(first.body) && !json.includes(second.body),
+        ),
+      ).toBe(true);
       expect(queries).toHaveBeenCalled();
-      const selectedColumns = queries.mock.results
-        .filter((result) => result.type === "return")
-        .flatMap((result) => result.value.columnNames);
-      expect(selectedColumns.every((column) => column === "id" || column === "revision")).toBe(
-        true,
-      );
+      const entitySelects = queries.mock.calls
+        .map(([sql]) => sql)
+        .filter((sql) => /\bSELECT\b.*\bFROM entities\b/i.test(sql));
+      expect(entitySelects).toHaveLength(1);
+      expect(entitySelects[0]).toMatch(/SELECT id, revision FROM entities/i);
+      expect(queries.mock.calls.some(([sql]) => /\bFROM task_comments\b/i.test(sql))).toBe(false);
     } finally {
       queries.mockRestore();
       decoder.mockRestore();

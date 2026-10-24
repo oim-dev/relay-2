@@ -23,11 +23,13 @@ function isFieldObject(value: unknown): value is Readonly<Record<string, unknown
 
 /**
  * Проверяет обычный объект с разрешёнными ключами без изменения входа.
- * Неизвестные ключи и явно переданный undefined запрещены; обязательность проверяет парсер поля.
+ * Неизвестные ключи и undefined запрещены; исключения для отсутствующих optional условий
+ * публичного writer задаются явно. Обязательность значения проверяет парсер поля.
  */
 export function object(
   value: unknown,
   allowed: readonly string[],
+  optionalUndefinedFields: readonly string[] = [],
 ): Readonly<Record<string, unknown>> {
   if (!isFieldObject(value)) {
     invalid(planningMessages.expectedObject);
@@ -39,7 +41,7 @@ export function object(
     if (!allowed.includes(key)) {
       invalid(planningMessages.unknownField(key));
     }
-    if (value[key] === undefined) {
+    if (value[key] === undefined && !optionalUndefinedFields.includes(key)) {
       invalid(planningMessages.undefinedField(key));
     }
   }

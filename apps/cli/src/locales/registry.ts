@@ -4,6 +4,10 @@
 export const registryMessages = {
   actorRequired: "Для записи укажите --actor или RELAY_ACTOR",
   emptyCommandPath: "Путь регистрируемой команды пуст",
+  writePreconditionHelp:
+    "Предусловие записи: передайте --if-revision либо --expected-version. Можно передать оба, тогда Core проверит оба, включая no-op. Переносимый токен берите для указанного в описании владельца через relay get ID-владельца --summary --with-versions --format json: поле meta.versions[ID].aggregateVersion. Токен передаётся дословно; локальная revision и переносимая версия — самостоятельные предусловия.",
+  createVersionHelp:
+    "--expected-version позволяет проверить переносимую версию существующего владельца этой операции. Получите его через relay get ID-владельца --summary --with-versions --format json и передайте meta.versions[ID].aggregateVersion дословно.",
 
   /**
    * Указывает путь, для которого уже зарегистрирован обработчик.

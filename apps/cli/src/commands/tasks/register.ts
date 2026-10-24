@@ -39,8 +39,8 @@ function readTaskCommentInput(input: Readonly<Record<string, unknown>>): TaskCom
 
 /**
  * Добавляет в реестр команды задач и вложенных данных без открытия проекта.
- * Core владеет предметными проверками и CAS задачи; реестр сохраняет общую транзакцию
- * записи либо снимок чтения для каждого обработчика.
+ * Core владеет предметными проверками, CAS и async commit задачи; реестр удерживает
+ * только синхронный снимок чтения, а запись ожидает без внешней SQLite-транзакции.
  */
 export function registerTaskCommands(registry: CommandRegistry): void {
   registry.group("task", messages.task);
@@ -85,7 +85,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     /**
      * Возвращает задачу, атомарно созданную Core вместе с критериями и связями.
      */
-    run: (i): Result => result(i.tasks.create(i.input, i.actor)),
+    run: async (i): Promise<Result> => result(await i.tasks.create(i.input, i.actor)),
   });
   registry.add("task update", {
     ...messages.update,
@@ -95,7 +95,8 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     /**
      * Возвращает задачу после изменения содержания; Core проверяет её ревизию до no-op.
      */
-    run: (i): Result => result(i.tasks.update(i.text("ref"), i.input, i.write)),
+    run: async (i): Promise<Result> =>
+      result(await i.tasks.update(i.text("ref"), i.input, i.write)),
   });
   registry.add("task move", {
     ...messages.move,
@@ -108,7 +109,7 @@ export function registerTaskCommands(registry: CommandRegistry): void {
     /**
      * Возвращает перемещённую задачу; атомарность, CAS и no-op обеспечивает Core.
      */
-    run: (i): Result => result(i.tasks.move(i.text("ref"), i.input, i.write)),
+    run: async (i): Promise<Result> => result(await i.tasks.move(i.text("ref"), i.input, i.write)),
   });
   registry.add("task progress", {
     ...messages.progress,
@@ -137,8 +138,8 @@ export function registerTaskCommands(registry: CommandRegistry): void {
        * Возвращает задачу после установки или снятия родителя под её исходной ревизией.
        * Проверки графа и сохранение no-op выполняет Core в транзакции команды.
        */
-      run: (i): Result =>
-        result(i.tasks.setParent(i.text("ref"), clear ? null : i.text("parent"), i.write)),
+      run: async (i): Promise<Result> =>
+        result(await i.tasks.setParent(i.text("ref"), clear ? null : i.text("parent"), i.write)),
     });
   }
   registry.group("task dependency", messages.dependency);
@@ -162,8 +163,8 @@ export function registerTaskCommands(registry: CommandRegistry): void {
       /**
        * Возвращает задачу после изменения зависимости; CAS, граф и no-op проверяет Core.
        */
-      run: (i): Result =>
-        result(i.tasks.dependency(i.text("ref"), i.text("target"), remove, i.write)),
+      run: async (i): Promise<Result> =>
+        result(await i.tasks.dependency(i.text("ref"), i.text("target"), remove, i.write)),
     });
   }
   registry.group("task criterion", messages.criterion);
@@ -208,9 +209,9 @@ export function registerTaskCommands(registry: CommandRegistry): void {
        * Возвращает задачу после изменения критерия под ревизией задачи.
        * Core атомарно проверяет состояние, исходную ревизию и возможность no-op.
        */
-      run: (i): Result =>
+      run: async (i): Promise<Result> =>
         result(
-          i.tasks.criterion(
+          await i.tasks.criterion(
             i.text("ref"),
             action,
             { ...i.input, ...(action === "add" ? {} : { id: i.text("criterion") }) },
@@ -252,9 +253,9 @@ export function registerTaskCommands(registry: CommandRegistry): void {
      * Публикует новый комментарий и возвращает задачу с дополненным журналом.
      * Запись Core атомарна и не меняет ревизию содержания задачи; повтор создаёт новую запись.
      */
-    run: (i): Result => {
+    run: async (i): Promise<Result> => {
       const input = readTaskCommentInput(i.input);
-      return result(i.tasks.comment(i.text("ref"), input.body, i.actor, input.title));
+      return result(await i.tasks.comment(i.text("ref"), input.body, i.actor, input.title));
     },
   });
   for (const remove of [false, true]) {
@@ -265,7 +266,8 @@ export function registerTaskCommands(registry: CommandRegistry): void {
       /**
        * Возвращает задачу после изменения обычной связи; CAS и no-op принадлежат Core.
        */
-      run: (i): Result => result(i.tasks.related(i.text("ref"), i.text("target"), remove, i.write)),
+      run: async (i): Promise<Result> =>
+        result(await i.tasks.related(i.text("ref"), i.text("target"), remove, i.write)),
     });
   }
 }

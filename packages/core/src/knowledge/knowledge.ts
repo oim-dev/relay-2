@@ -1,6 +1,6 @@
 import {
-  validateActor,
   validateEntityPageRequest,
+  type CommandExecutionContext,
   type DocumentLinks,
   type DocumentSections,
   type EntityKind,
@@ -8,34 +8,17 @@ import {
   type EntityPageRequest,
   type KnowledgeKind,
   type KnowledgeRecord,
-  type WriteOptions,
+  type CommandWriteOptions,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
-import { EntityService } from "../entities/entities";
-import { parseDocumentSectionChange } from "./document-section-input";
-import { changeDocumentSections, requireActiveDocumentSection } from "./document-sections";
-import type { DocumentSectionAction, DocumentSectionIndex } from "./document-sections.types";
-import { KnowledgeApplications } from "./knowledge-applications";
+import type { ProjectStore } from "@relay/storage";
+import { executeEntityCommand } from "../commands/command-facade";
+import type { DocumentSectionAction } from "./document-sections.types";
 import { DOCUMENT_SECTION_ACTIONS } from "./knowledge-constants";
 import { decodeKnowledge } from "./knowledge-data";
 import { compareKnowledge, parseKnowledgeFilters } from "./knowledge-filters";
-import {
-  parseKnowledgeCreation,
-  parseKnowledgeLink,
-  parseKnowledgeUpdate,
-  parseParticipationTargets,
-} from "./knowledge-input";
-import { KnowledgeParticipation } from "./knowledge-participation";
 import { KnowledgeQueries } from "./knowledge-queries";
-import { changeKnowledgeRelation, resolveKnowledgeRelations } from "./knowledge-relations";
-import {
-  requireEmptyProduct,
-  requireKnowledgeRevision,
-  sameKnowledgeCollection,
-} from "./knowledge-rules";
 import { knowledgeMessages } from "./knowledge.messages";
 import type {
-  KnowledgeCreation,
   KnowledgeInput,
   KnowledgeLinkOptions,
   ApplicationParticipation,
@@ -50,42 +33,35 @@ import {
 } from "./knowledge-validation";
 
 /**
- * Владелец транзакционных сценариев знаний: проверяет CAS до no-op и удерживает
- * единый снимок чтения либо замок записи на время разрешения ссылок и предметных шагов.
+ * Публичные чтения знаний используют согласованный sync snapshot; все writers проходят
+ * через единый async executor с явной загрузкой, чистым расчётом и guarded commit.
  */
 export class KnowledgeService {
-  /* Соединение проекта; жизненным циклом и закрытием владеет вызывающая сторона. */
-  private readonly db: ProjectDatabase;
-  /* Внутренний механизм записи и общего разрешения адресов. */
-  private readonly entities: EntityService;
-  /* Чтение, фильтрация и эффективный раздел документа в текущем снимке. */
+  /* Открытый проект; жизненным циклом соединения владеет вызывающая сторона. */
+  private readonly db: ProjectStore;
+  /* Клиентские ожидания адресов и переносимый token владельца по умолчанию. */
+  private readonly execution: CommandExecutionContext;
+  /* Оптимизированные синхронные чтения и пользовательская проекция разделов. */
   private readonly queries: KnowledgeQueries;
-  /* Совместные изменения приложения и его доски. */
-  private readonly applications: KnowledgeApplications;
-  /* Состав активных и исторических реализаций приложений. */
-  private readonly participationWriter: KnowledgeParticipation;
 
   /**
-   * Привязывает сценарии к соединению без открытия дополнительных ресурсов.
+   * Привязывает API к открытому проекту без дополнительных ресурсов или чтений.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore, execution: CommandExecutionContext = {}) {
     this.db = db;
-    this.entities = new EntityService(db);
+    this.execution = execution;
     this.queries = new KnowledgeQueries(db);
-    this.applications = new KnowledgeApplications(db, this.entities);
-    this.participationWriter = new KnowledgeParticipation(this.entities, this.queries);
   }
 
   /**
-   * Возвращает полную проверенную запись одного снимка; исторически снятый раздел проецируется в null.
-   * Отсутствие записи даёт NOT_FOUND, повреждение содержания или неизвестный раздел — CORRUPT_DATA.
+   * Возвращает проверенную запись одного снимка; снятый раздел проецируется в null.
    */
   get<K extends EntityKind>(
     entityKind: K,
     ref?: string,
   ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
   /**
-   * Разрешение адреса, содержание и разделы читаются из одного согласованного снимка.
+   * Разрешает адрес и декодирует содержание с каталогом разделов одного snapshot.
    */
   get(entityKind: EntityKind, ref?: string): KnowledgeRecord {
     const selected = knowledgeKind(entityKind);
@@ -97,15 +73,13 @@ export class KnowledgeService {
   }
 
   /**
-   * Возвращает отфильтрованный набор; стоимость чтения зависит от всего набора выбранного вида.
-   * Фильтры, их ссылки и содержание проверяются в одном снимке; повреждение не скрывается фильтром.
+   * Декодирует и фильтрует полный набор выбранного вида в одном снимке.
    */
   list<K extends EntityKind>(
     entityKind: K,
     filters?: KnowledgeInput,
   ): KnowledgeRecord<Extract<K, KnowledgeKind>>[];
   /**
-   * Проверяет фильтры, разрешает их ссылки и декодирует записи в одном снимке.
    * Повреждение содержания не скрывается несовпадением фильтра.
    */
   list(entityKind: EntityKind, filters: KnowledgeInput = {}): KnowledgeRecord[] {
@@ -116,10 +90,7 @@ export class KnowledgeService {
   }
 
   /**
-   * Возвращает окно и count одного снимка с порядком request.sort.
-   * Переданный filters.sort должен совпадать с порядком окна.
-   * Без предметных фильтров читает ограниченное SQL-окно; иначе загружает весь набор с телами
-   * до фильтрации. Разделы документов проецируются по тому же снимку.
+   * Возвращает окно и count одного снимка; предметный фильтр требует полного набора вида.
    */
   listPage<K extends EntityKind>(
     entityKind: K,
@@ -127,7 +98,7 @@ export class KnowledgeService {
     request: EntityPageRequest,
   ): EntityPage<KnowledgeRecord<Extract<K, KnowledgeKind>>>;
   /**
-   * Проверяет форму окна и фильтров до выбора SQL либо предметного пути чтения.
+   * Без предметного фильтра использует ограниченное SQL-окно с request.sort.
    */
   listPage(
     entityKind: EntityKind,
@@ -149,187 +120,131 @@ export class KnowledgeService {
   }
 
   /**
-   * Создаёт знания атомарно: приложение вместе с доской, реализацию вместе с составом приложения.
-   * Создание реализации меняет также ревизию приложения. Пустой паспорт продукта заполняется
-   * однократно; повтор даёт ALREADY_EXISTS. Проект и доска отдельно не создаются.
+   * Создаёт знания атомарно с неявными доской и составом участия; паспорт заполняется однократно.
    */
   create<K extends EntityKind>(
     entityKind: K,
     input: KnowledgeInput,
     actor: string,
-  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+  ): Promise<KnowledgeRecord<Extract<K, KnowledgeKind>>>;
   /**
-   * Проверяет внешний ввод и ссылки под общим замком записи, откатывая все предметные шаги при отказе.
+   * Точечный create и batch используют один handler; отказ не расходует ключи и не оставляет записей.
    */
-  create(entityKind: EntityKind, input: KnowledgeInput, actor: string): KnowledgeRecord {
-    const selected = knowledgeKind(entityKind);
-    return this.db.transaction(() => {
-      validateActor(actor);
-      return this.createChecked(parseKnowledgeCreation(selected, input), actor);
-    });
-  }
-
-  /**
-   * Выполняет предметный шаг создания для проверенной команды внутри общей транзакции.
-   */
-  private createChecked(command: KnowledgeCreation, actor: string): KnowledgeRecord {
-    switch (command.kind) {
-      case "product": {
-        return decodeKnowledge(
-          this.entities.changeRelated(
-            this.queries.singletonRef("product"),
-            "product",
-            actor,
-            (record) => {
-              requireEmptyProduct(decodeKnowledge(record, "product"));
-              return { patch: { ...command.data } };
-            },
-          ),
-          "product",
-        );
-      }
-      case "application":
-        return this.applications.create(command.data, actor);
-      case "implementation":
-        return this.participationWriter.create(
-          command.application,
-          command.target,
-          command.data,
-          actor,
-        );
-      case "feature":
-        return decodeKnowledge(
-          this.entities.create("feature", "FEATURE", { ...command.data }, actor),
-          "feature",
-        );
-      case "scenario": {
-        const feature = this.queries.resolve(command.feature, "feature");
-        return decodeKnowledge(
-          this.entities.create(
-            "scenario",
-            "SCENARIO",
-            { ...command.data, featureId: feature.id },
-            actor,
-          ),
-          "scenario",
-        );
-      }
-      case "document": {
-        const sections = this.queries.sectionIndex();
-        requireActiveDocumentSection(command.data.sectionId, sections);
-        const relations = resolveKnowledgeRelations(command.relations, this.queries);
-        return this.queries.projectDocument(
-          this.entities.create("document", "DOC", { ...command.data, relations }, actor),
-          sections,
-        );
-      }
+  async create(
+    entityKind: EntityKind,
+    input: KnowledgeInput,
+    actor: string,
+  ): Promise<KnowledgeRecord> {
+    const kind = knowledgeKind(entityKind);
+    if (kind === "project" || kind === "board") {
+      invalidKnowledge(
+        kind === "project" ? knowledgeMessages.projectCreation : knowledgeMessages.boardCreation,
+      );
     }
+    return decodeKnowledge(
+      await executeEntityCommand(this.db, { op: `${kind}.create`, input }, actor, this.execution),
+      kind,
+    );
   }
 
   /**
-   * Изменяет только переданные поля под CAS указанной записи, включая no-op.
-   * Имя приложения атомарно меняет имя доски под её собственной ревизией.
-   * Равные данные сохраняют автора, ревизию и поколение; устаревшая ревизия даёт REVISION_CONFLICT.
+   * Меняет переданные поля под исходной ревизией или переносимым token до no-op.
+   * Если заданы оба условия, проверяются оба; имя приложения синхронизирует доску.
    */
   update<K extends EntityKind>(
     entityKind: K,
     ref: string | undefined,
     input: KnowledgeInput,
-    write: WriteOptions,
-  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord<Extract<K, KnowledgeKind>>>;
   /**
-   * Проверяет ревизию владельца до разбора изменения и любых предметных записей.
+   * Передаёт исходные условия единому исполнителю без чтения свежего CAS в фасаде.
    */
-  update(
+  async update(
     entityKind: EntityKind,
     ref: string | undefined,
     input: KnowledgeInput,
-    write: WriteOptions,
-  ): KnowledgeRecord {
-    const selected = knowledgeKind(entityKind);
-    return this.db.transaction(() => {
-      validateKnowledgeWrite(write);
-      if (selected === "board") {
-        invalidKnowledge(knowledgeMessages.boardUpdate);
-      }
-      let sections: DocumentSectionIndex | undefined;
-      let applicationName: string | undefined;
-      const updated = this.entities.change(
-        knowledgeText(ref ?? this.queries.singletonRef(selected), "ref", true),
-        selected,
-        write,
-        (record) => {
-          const current = decodeKnowledge(record, selected);
-          const command = parseKnowledgeUpdate(selected, input);
-          if (command.kind === "document") {
-            const document = decodeKnowledge(current, "document");
-            sections = this.queries.sectionIndex();
-            if (command.data.sectionId !== undefined) {
-              requireActiveDocumentSection(command.data.sectionId, sections);
-            }
-            const relations =
-              command.relations === undefined
-                ? undefined
-                : resolveKnowledgeRelations(command.relations, this.queries, document);
-            return {
-              patch: { ...command.data, ...(relations === undefined ? {} : { relations }) },
-            };
-          }
-          if (command.kind === "application") {
-            applicationName = command.data.name;
-          }
-          return { patch: { ...command.data } };
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord> {
+    const kind = knowledgeKind(entityKind);
+    validateKnowledgeWrite(write, [], this.execution.expectedVersion);
+    if (kind === "board") {
+      invalidKnowledge(knowledgeMessages.boardUpdate);
+    }
+    return decodeKnowledge(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `${kind}.update`,
+          ...this.commandRef(kind, ref),
+          input,
+          ...(write.ifRevision === undefined ? {} : { ifRevision: write.ifRevision }),
+          ...(write.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: write.expectedVersion }),
         },
-      );
-      if (applicationName !== undefined) {
-        this.applications.synchronizeBoard(
-          decodeKnowledge(updated, "application"),
-          applicationName,
-          write.actor,
-        );
-      }
-      return this.queries.projectDocument(updated, sections);
-    });
+        write.actor,
+        this.execution,
+      ),
+      kind,
+    );
   }
 
   /**
-   * Переименовывает запись под её CAS, включая no-op; прежний ключ остаётся алиасом.
-   * Чужой адрес даёт CONFLICT; при прежнем ключе автор, ревизия и поколение сохраняются.
-   * undefined выбирает singleton проекта или продукта; остальным видам требуется ref.
+   * Переименовывает под ревизией и/или переносимым token, сохраняя прежний ключ алиасом.
+   * Равный ключ не меняет метаданные; исходные условия проверяются и при no-op.
    */
   rename<K extends EntityKind>(
     entityKind: K,
     ref: string | undefined,
     key: string,
-    write: WriteOptions,
-  ): KnowledgeRecord<Extract<K, KnowledgeKind>>;
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord<Extract<K, KnowledgeKind>>>;
   /**
-   * Проверяет CAS до no-op и возвращает проекцию записи из той же транзакции.
+   * Singleton выбирается без ref; остальные виды требуют непустой пользовательский адрес.
    */
-  rename(
+  async rename(
     entityKind: EntityKind,
     ref: string | undefined,
     key: string,
-    write: WriteOptions,
-  ): KnowledgeRecord {
-    const selected = knowledgeKind(entityKind);
-    return this.db.transaction(() => {
-      validateKnowledgeWrite(write);
-      const renamed = this.entities.change(
-        knowledgeText(ref === undefined ? this.queries.singletonRef(selected) : ref, "ref", true),
-        selected,
-        write,
-        (record) => {
-          decodeKnowledge(record, selected);
-          return { key: knowledgeText(key, "key", true) };
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord> {
+    const kind = knowledgeKind(entityKind);
+    validateKnowledgeWrite(write, [], this.execution.expectedVersion);
+    return decodeKnowledge(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `${kind}.rename`,
+          ...this.commandRef(kind, ref),
+          input: { key },
+          ...(write.ifRevision === undefined ? {} : { ifRevision: write.ifRevision }),
+          ...(write.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: write.expectedVersion }),
         },
-      );
-      return this.queries.projectDocument(renamed);
-    });
+        write.actor,
+        this.execution,
+      ),
+      kind,
+    );
   }
 
   /**
-   * Читает разделы и ревизию проекта-владельца из одного снимка; seed без разделов даёт пустой список.
+   * Сохраняет явный адрес, включая singleton; его разрешает общий async loader.
+   */
+  private commandRef(kind: KnowledgeKind, ref: string | undefined): { readonly ref?: string } {
+    if (ref !== undefined) {
+      return { ref: knowledgeText(ref, "ref", true) };
+    }
+    if (kind === "project" || kind === "product") {
+      return {};
+    }
+    return { ref: knowledgeText(ref, "ref", true) };
+  }
+
+  /**
+   * Возвращает разделы и ревизию проекта из одного снимка; seed без разделов даёт пустой массив.
    */
   documentSections(): DocumentSections {
     return this.db.snapshot(() => {
@@ -343,7 +258,7 @@ export class KnowledgeService {
   }
 
   /**
-   * Читает проверенные отношения и ревизию документа из одного снимка без содержания целей.
+   * Читает проверенные отношения и ревизию документа без содержания его целей.
    */
   documentLinks(ref: string): DocumentLinks {
     return this.db.snapshot(() => {
@@ -353,9 +268,7 @@ export class KnowledgeService {
   }
 
   /**
-   * Читает приложение один раз и возвращает активное участие с его ключом и ревизией
-   * из одного снимка. Загружает только историю этого приложения; чужие реализации
-   * не читаются. Несогласованность активных записей с составом владельца даёт CORRUPT_DATA.
+   * Читает только историю выбранного приложения и полностью сверяет активные ID с владельцем.
    */
   participation(ref: string): ApplicationParticipation {
     return this.db.snapshot(() => {
@@ -372,87 +285,100 @@ export class KnowledgeService {
   }
 
   /**
-   * Меняет разделы под CAS проекта, включая no-op. Удаление навсегда резервирует ID,
-   * не переписывая документы; эффективный раздел проецируется при чтении.
-   * Проверка состояния, резервирование и запись атомарны.
+   * Меняет разделы под исходной ревизией и/или token проекта; снятие резервирует ID навсегда.
    */
-  changeSection(
+  async changeSection(
     action: DocumentSectionAction,
     input: KnowledgeInput,
-    write: WriteOptions,
-  ): KnowledgeRecord<"project"> {
-    return this.db.transaction(() => {
-      const selected = knowledgeChoice(action, DOCUMENT_SECTION_ACTIONS, "action");
-      validateKnowledgeWrite(write);
-      return decodeKnowledge(
-        this.entities.change(this.queries.singletonRef("project"), "project", write, (record) => {
-          const project = decodeKnowledge(record, "project");
-          const next = changeDocumentSections(project, parseDocumentSectionChange(selected, input));
-          return {
-            patch: sameKnowledgeCollection(
-              next.documentSections,
-              project.data.documentSections ?? [],
-            )
-              ? {}
-              : { ...next },
-          };
-        }),
-        "project",
-      );
-    });
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord<"project">> {
+    const selected = knowledgeChoice(action, DOCUMENT_SECTION_ACTIONS, "action");
+    validateKnowledgeWrite(write, [], this.execution.expectedVersion);
+    return decodeKnowledge(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `document.section.${selected}`,
+          input,
+          ...(write.ifRevision === undefined ? {} : { ifRevision: write.ifRevision }),
+          ...(write.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: write.expectedVersion }),
+        },
+        write.actor,
+        this.execution,
+      ),
+      "project",
+    );
   }
 
   /**
-   * Меняет одну пару цель + тип под CAS документа. Новая связь со снятой реализацией запрещена,
-   * прежнюю можно изменить или снять. Повтор и снятие отсутствующей пары — no-op только
-   * при актуальной ревизии; разрешение цели и запись атомарны.
+   * Меняет пару цель + тип под ревизией и/или token документа; новая связь со снятой FI/SI запрещена.
    */
-  linkDocument(
+  async linkDocument(
     ref: string,
     target: string,
     write: KnowledgeLinkOptions,
-  ): KnowledgeRecord<"document"> {
-    return this.db.transaction(() => {
-      validateKnowledgeWrite(write, ["remove", "type", "description"]);
-      return this.queries.projectDocument(
-        decodeKnowledge(
-          this.entities.change(
-            knowledgeText(ref, "ref", true),
-            "document",
-            { actor: write.actor, ifRevision: write.ifRevision },
-            (record) => {
-              const document = decodeKnowledge(record, "document");
-              const change = parseKnowledgeLink(write);
-              const next = changeKnowledgeRelation(document, this.queries.resolve(target), change);
-              return { patch: { relations: next } };
-            },
-          ),
-          "document",
-        ),
-      );
-    });
+  ): Promise<KnowledgeRecord<"document">> {
+    validateKnowledgeWrite(
+      write,
+      ["remove", "type", "description"],
+      this.execution.expectedVersion,
+    );
+    if (Object.hasOwn(write, "remove") && typeof write.remove !== "boolean") {
+      invalidKnowledge(knowledgeMessages.boolean("remove"));
+    }
+    if (write.remove && write.description !== undefined) {
+      invalidKnowledge(knowledgeMessages.unlinkDescription);
+    }
+    return decodeKnowledge(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `document.${write.remove ? "unlink" : "link"}`,
+          ref,
+          ...(write.ifRevision === undefined ? {} : { ifRevision: write.ifRevision }),
+          ...(write.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: write.expectedVersion }),
+          input: {
+            target,
+            ...(write.type === undefined ? {} : { type: write.type }),
+            ...(write.description === undefined ? {} : { description: write.description }),
+          },
+        },
+        write.actor,
+        this.execution,
+      ),
+      "document",
+    );
   }
 
   /**
-   * Заменяет участие под CAS приложения, не отдельных реализаций, включая no-op.
-   * Проверки FI/SI и запись состава атомарны. Снятие сохраняет ID, ключи и тексты;
-   * повторное включение возвращает историческую реализацию.
-   * Входной массив ссылок не изменяется; пустой массив снимает всё участие.
+   * Заменяет участие под ревизией и/или token приложения; снятые ID/ключи/тексты сохраняются.
    */
-  replaceParticipation(
+  async replaceParticipation(
     application: string,
     targets: readonly string[],
-    write: WriteOptions,
-  ): KnowledgeRecord<"application"> {
-    return this.db.transaction(() => {
-      validateKnowledgeWrite(write);
-      const current = this.queries.resolve(application, "application");
-      requireKnowledgeRevision(current, write.ifRevision);
-      return this.participationWriter.replace(
-        current,
-        parseParticipationTargets(targets),
+    write: CommandWriteOptions,
+  ): Promise<KnowledgeRecord<"application">> {
+    validateKnowledgeWrite(write, [], this.execution.expectedVersion);
+    return decodeKnowledge(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: "application.participation.replace",
+          ref: application,
+          input: { targets },
+          ...(write.ifRevision === undefined ? {} : { ifRevision: write.ifRevision }),
+          ...(write.expectedVersion === undefined
+            ? {}
+            : { expectedVersion: write.expectedVersion }),
+        },
         write.actor,
-      );
-    });
+        this.execution,
+      ),
+      "application",
+    );
   }
 }

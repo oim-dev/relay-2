@@ -17,19 +17,19 @@ describe("Фильтры знаний через CLI", () => {
   test("type выбирает приложения по типу до пагинации и сохраняется в продолжении", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { accounts, orders } = cli.withDatabase(project, (db) => {
+      const { accounts, orders } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const orders = knowledge.create(
+        const orders = await knowledge.create(
           "application",
           { name: "Заказы", slug: "orders", type: "backend" },
           "fixture",
         );
-        knowledge.create(
+        await knowledge.create(
           "application",
           { name: "Backend — панель", slug: "web", type: "frontend" },
           "fixture",
         );
-        const accounts = knowledge.create(
+        const accounts = await knowledge.create(
           "application",
           { name: "Аккаунты", slug: "accounts", type: "backend" },
           "fixture",
@@ -87,10 +87,10 @@ describe("Фильтры знаний через CLI", () => {
   test("несовпадающие type и q дают пустую страницу вместо поиска типа по тексту", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      cli.withDatabase(project, (db) => {
+      await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        knowledge.create("application", { name: "Backend", slug: "web" }, "fixture");
-        knowledge.create(
+        await knowledge.create("application", { name: "Backend", slug: "web" }, "fixture");
+        await knowledge.create(
           "application",
           { name: "Заказы", slug: "orders", type: "backend" },
           "fixture",
@@ -115,15 +115,15 @@ describe("Фильтры знаний через CLI", () => {
   test("board --application разрешает алиас приложения и исключает продуктовую и чужую доски", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { application, board } = cli.withDatabase(project, (db) => {
+      const { application, board } = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const application = knowledge.create(
+        const application = await knowledge.create(
           "application",
           { name: "Витрина", slug: "web" },
           "fixture",
         );
-        knowledge.create("application", { name: "API", slug: "api" }, "fixture");
-        knowledge.rename("application", application.id, "APP-WEB", {
+        await knowledge.create("application", { name: "API", slug: "api" }, "fixture");
+        await knowledge.rename("application", application.id, "APP-WEB", {
           actor: "fixture",
           ifRevision: application.revision,
         });
@@ -154,33 +154,40 @@ describe("Фильтры знаний через CLI", () => {
   test("feature включает FI и SI выбранного приложения, сохраняя снятые реализации и продолжение", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { app, feature, featureImplementation, scenarioImplementation } = cli.withDatabase(
-        project,
-        (db) => {
+      const { app, feature, featureImplementation, scenarioImplementation } =
+        await cli.withDatabase(project, async (db) => {
           const knowledge = new KnowledgeService(db);
-          const feature = knowledge.create("feature", { name: "Поиск" }, "fixture");
-          const scenario = knowledge.create(
+          const feature = await knowledge.create("feature", { name: "Поиск" }, "fixture");
+          const scenario = await knowledge.create(
             "scenario",
             { name: "Пустой результат", feature: feature.id },
             "fixture",
           );
-          const otherFeature = knowledge.create("feature", { name: "Оплата" }, "fixture");
-          const created = knowledge.create(
+          const otherFeature = await knowledge.create("feature", { name: "Оплата" }, "fixture");
+          const created = await knowledge.create(
             "application",
             { name: "Витрина", slug: "web" },
             "fixture",
           );
-          const active = knowledge.replaceParticipation(
+          const active = await knowledge.replaceParticipation(
             created.id,
             [feature.id, scenario.id, otherFeature.id],
             { actor: "fixture", ifRevision: created.revision },
           );
-          const app = knowledge.replaceParticipation(active.id, [feature.id, otherFeature.id], {
-            actor: "fixture",
-            ifRevision: active.revision,
-          });
-          const otherApp = knowledge.create("application", { name: "API", slug: "api" }, "fixture");
-          knowledge.replaceParticipation(otherApp.id, [feature.id, scenario.id], {
+          const app = await knowledge.replaceParticipation(
+            active.id,
+            [feature.id, otherFeature.id],
+            {
+              actor: "fixture",
+              ifRevision: active.revision,
+            },
+          );
+          const otherApp = await knowledge.create(
+            "application",
+            { name: "API", slug: "api" },
+            "fixture",
+          );
+          await knowledge.replaceParticipation(otherApp.id, [feature.id, scenario.id], {
             actor: "fixture",
             ifRevision: otherApp.revision,
           });
@@ -190,8 +197,7 @@ describe("Фильтры знаний через CLI", () => {
             featureImplementation: knowledge.get("implementation", "WEB-FI-1"),
             scenarioImplementation: knowledge.get("implementation", "WEB-SI-1"),
           };
-        },
-      );
+        });
       const filters = ["--application", app.key, "--feature", `feature:${feature.key}`];
 
       const first = await cli.page(
@@ -222,19 +228,23 @@ describe("Фильтры знаний через CLI", () => {
   test("feature и точный target пересекаются: чужая фича даёт пустой результат", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { feature, scenario, otherFeature, implementation } = cli.withDatabase(
+      const { feature, scenario, otherFeature, implementation } = await cli.withDatabase(
         project,
-        (db) => {
+        async (db) => {
           const knowledge = new KnowledgeService(db);
-          const feature = knowledge.create("feature", { name: "Поиск" }, "fixture");
-          const otherFeature = knowledge.create("feature", { name: "Оплата" }, "fixture");
-          const scenario = knowledge.create(
+          const feature = await knowledge.create("feature", { name: "Поиск" }, "fixture");
+          const otherFeature = await knowledge.create("feature", { name: "Оплата" }, "fixture");
+          const scenario = await knowledge.create(
             "scenario",
             { name: "Пустой результат", feature: feature.id },
             "fixture",
           );
-          const app = knowledge.create("application", { name: "Витрина", slug: "web" }, "fixture");
-          knowledge.replaceParticipation(app.id, [feature.id, scenario.id], {
+          const app = await knowledge.create(
+            "application",
+            { name: "Витрина", slug: "web" },
+            "fixture",
+          );
+          await knowledge.replaceParticipation(app.id, [feature.id, scenario.id], {
             actor: "fixture",
             ifRevision: app.revision,
           });

@@ -11,11 +11,12 @@ import {
 
 /**
  * Разбирает форму операции над разделом без чтения проекта и изменения порядка.
- * Вызывающий предварительно проверяет action и CAS проекта; неизвестные разделы проверяются далее.
+ * Вызывающий предварительно проверяет action и CAS проекта и выделяет ID создания.
  */
 export function parseDocumentSectionChange(
   action: DocumentSectionAction,
   value: unknown,
+  allocatedId?: string,
 ): DocumentSectionChange {
   const allowed = {
     create: ["id", "name"],
@@ -26,7 +27,7 @@ export function parseDocumentSectionChange(
   const input = knowledgeFields(value, allowed[action]);
   const id =
     action === "create" && !Object.hasOwn(input, "id")
-      ? crypto.randomUUID()
+      ? knowledgeText(allocatedId, "id", true)
       : knowledgeText(input.id, "id", true);
   if (id.length > KNOWLEDGE_LIMITS.sectionId || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/u.test(id)) {
     invalidKnowledge(knowledgeMessages.sectionId);

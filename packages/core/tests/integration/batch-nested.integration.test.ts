@@ -4,7 +4,7 @@ import { HistoryService } from "../../src/history/history";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { PlanningService } from "../../src/planning/planning";
 import { TasksService } from "../../src/tasks/tasks";
-import { expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import { expectAsyncRelayError, withEntityDatabase } from "./helpers/entity-fixture";
 
 const invalidTargetRevisions = [
   { name: "отсутствующий", stale: false, expectedCode: "INVALID_ARGUMENT" },
@@ -14,24 +14,24 @@ const invalidTargetRevisions = [
 describe("Владельцы вложенных действий пакета", () => {
   test.each(invalidTargetRevisions)(
     "$name targetRevision не подменяется актуальной ревизией при переносе внутри плана",
-    ({ stale, expectedCode }) => {
-      withEntityDatabase((db) => {
+    async ({ stale, expectedCode }) => {
+      await withEntityDatabase(async (db) => {
         const planning = new PlanningService(db);
-        const task = new TasksService(db).create({ title: "Перенести" }, "author");
-        const plan = planning.create("work-plan", { title: "План" }, "author");
-        const first = planning.stage(
+        const task = await new TasksService(db).create({ title: "Перенести" }, "author");
+        const plan = await planning.create("work-plan", { title: "План" }, "author");
+        const first = await planning.stage(
           plan.id,
           "create",
           { title: "Исходный этап" },
           { actor: "author", ifRevision: plan.revision },
         );
-        const both = planning.stage(
+        const both = await planning.stage(
           plan.id,
           "create",
           { title: "Целевой этап" },
           { actor: "author", ifRevision: first.revision },
         );
-        const included = planning.stageTask(
+        const included = await planning.stageTask(
           plan.id,
           both.data.stages[0]?.id ?? "missing",
           task.id,
@@ -40,7 +40,7 @@ describe("Владельцы вложенных действий пакета", 
         );
         const generation = db.getGeneration();
 
-        const error = expectRelayError(
+        const error = await expectAsyncRelayError(
           () =>
             new BatchService(db).execute(
               {
@@ -77,12 +77,12 @@ describe("Владельцы вложенных действий пакета", 
     },
   );
 
-  test("checkpoint и fork возвращают собственные ID и ревизию родительской сессии", () => {
-    withEntityDatabase((db) => {
+  test("checkpoint и fork возвращают собственные ID и ревизию родительской сессии", async () => {
+    await withEntityDatabase(async (db) => {
       const history = new HistoryService(db);
-      const session = history.start({ title: "Исследование" }, "agent");
+      const session = await history.start({ title: "Исследование" }, "agent");
       const runId = session.data.currentRunId;
-      const result = new BatchService(db).execute(
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [
@@ -141,11 +141,15 @@ describe("Владельцы вложенных действий пакета", 
     });
   });
 
-  test("создание FI на существующем приложении требует исходную числовую ревизию", () => {
-    withEntityDatabase((db) => {
+  test("создание FI на существующем приложении требует исходную числовую ревизию", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const application = knowledge.create("application", { name: "Web", slug: "web" }, "author");
-      const feature = knowledge.create("feature", { name: "Поиск" }, "author");
+      const application = await knowledge.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "author",
+      );
+      const feature = await knowledge.create("feature", { name: "Поиск" }, "author");
       const generation = db.getGeneration();
       const input = {
         version: 1,
@@ -157,7 +161,7 @@ describe("Владельцы вложенных действий пакета", 
         ],
       };
 
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(input, {
             actor: "agent",
@@ -172,12 +176,12 @@ describe("Владельцы вложенных действий пакета", 
     });
   });
 
-  test("назначение реализации на чужую доску откатывает связанное создание", () => {
-    withEntityDatabase((db) => {
+  test("назначение реализации на чужую доску откатывает связанное создание", async () => {
+    await withEntityDatabase(async (db) => {
       const before = db.list();
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -220,11 +224,11 @@ describe("Владельцы вложенных действий пакета", 
     });
   });
 
-  test("структурированная ссылка проверяет именно объявленный kind и указывает вложенный путь", () => {
-    withEntityDatabase((db) => {
+  test("структурированная ссылка проверяет именно объявленный kind и указывает вложенный путь", async () => {
+    await withEntityDatabase(async (db) => {
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -256,9 +260,9 @@ describe("Владельцы вложенных действий пакета", 
     });
   });
 
-  test("типизированный объект отношения разрешает виртуальный адрес доски без потери kind", () => {
-    withEntityDatabase((db) => {
-      const result = new BatchService(db).execute(
+  test("типизированный объект отношения разрешает виртуальный адрес доски без потери kind", async () => {
+    await withEntityDatabase(async (db) => {
+      const result = await new BatchService(db).execute(
         {
           version: 1,
           operations: [

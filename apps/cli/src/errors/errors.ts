@@ -38,7 +38,13 @@ export function describeCliFailure(error: unknown, inputFailure?: ValidationFail
     error instanceof CliUsageError ||
     validationFailed ||
     (error instanceof RelayError &&
-      ["INVALID_ARGUMENT", "INVALID_INPUT", "VALIDATION_ERROR"].includes(error.code));
+      [
+        "INVALID_ARGUMENT",
+        "INVALID_INPUT",
+        "VALIDATION_ERROR",
+        "GIT_SYNC_INVALID_REQUEST",
+        "GIT_SYNC_REQUEST_TOO_LARGE",
+      ].includes(error.code));
   let message: string = errorMessages.unknown;
   if (validationFailed) {
     message = inputFailure.message;

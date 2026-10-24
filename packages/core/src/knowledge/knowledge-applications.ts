@@ -1,91 +1,109 @@
-import { RelayError, type KnowledgeRecord } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
-import type { EntityService } from "../entities/entities";
+import { RelayError, type KnowledgeRecord, type WriteOptions } from "@relay/contracts";
+import { changeCommandEntity, createCommandEntity } from "../commands/command-entity";
+import { knowledgeCommandEffect } from "./knowledge-transition";
 import { decodeKnowledge } from "./knowledge-data";
+import { requireKnowledgeAddresses } from "./knowledge-command-addresses";
+import type { KnowledgeAllocation, KnowledgeDelta } from "./knowledge-command.types";
 import { knowledgeMessages } from "./knowledge.messages";
 import type { ApplicationCreationData } from "./knowledge.types";
 
 /**
- * Совместные изменения приложения и принадлежащей ему доски.
- * Методы требуют внешней транзакции KnowledgeService на том же соединении.
+ * Рассчитывает создание приложения rev1, доски и приложения rev2 без I/O.
+ * Порядок трёх эффектов наблюдаем; собственные одинаковые slug/prefix двух видов допустимы.
  */
-export class KnowledgeApplications {
-  /* Внутренний механизм записи с CAS и сохранением адресов. */
-  private readonly entities: EntityService;
-  /* Адресные проекции той же транзакции без загрузки содержания. */
-  private readonly db: ProjectDatabase;
-
-  /**
-   * Принимает механизмы чтения и записи внешнего транзакционного владельца.
-   */
-  constructor(db: ProjectDatabase, entities: EntityService) {
-    this.entities = entities;
-    this.db = db;
+export function calculateApplicationCreation(
+  data: ApplicationCreationData,
+  allocation: KnowledgeAllocation,
+  boardAllocation: KnowledgeAllocation,
+): KnowledgeDelta<"application"> {
+  if (
+    [...allocation.addresses, ...boardAllocation.addresses].some(
+      (entry) => entry.scope === "kind" && entry.virtual.length > 0,
+    )
+  ) {
+    throw new RelayError("ALREADY_EXISTS", knowledgeMessages.boardAddress, 4);
   }
-
-  /**
-   * Создаёт приложение вместе с доской после проверки свободного slug и префикса.
-   * Любой конфликт адреса должен откатить обе записи и счётчики внешней транзакции.
-   */
-  create(data: ApplicationCreationData, actor: string): KnowledgeRecord<"application"> {
-    this.requireFreeAddress(data);
-    const application = this.entities.create(
-      "application",
-      "APP",
-      { ...data, implementationIds: [] },
-      actor,
-    );
-    const board = this.entities.create(
+  requireKnowledgeAddresses("application", allocation.id, allocation.addresses);
+  requireKnowledgeAddresses("board", boardAllocation.id, boardAllocation.addresses);
+  const initial = createCommandEntity(
+    "application",
+    allocation.key,
+    {
+      ...data,
+      implementationIds: [],
+    },
+    allocation,
+  );
+  const board = decodeKnowledge(
+    createCommandEntity(
       "board",
-      "BOARD",
+      boardAllocation.key,
       {
         name: data.name,
         slug: data.slug,
         prefix: data.prefix,
         description: "",
-        applicationId: application.id,
+        applicationId: initial.id,
       },
-      actor,
-      `BOARD-${data.prefix}`,
-    );
-    return decodeKnowledge(
-      this.entities.update(
-        application.id,
-        "application",
-        { boardId: board.id },
-        { actor, ifRevision: application.revision },
-      ),
-      "application",
-    );
-  }
+      boardAllocation,
+    ),
+    "board",
+  );
+  const record = decodeKnowledge(
+    changeCommandEntity(
+      initial,
+      { boardId: board.id },
+      {
+        actor: allocation.actor,
+        ifRevision: initial.revision,
+      },
+      allocation.timestamp,
+    ),
+    "application",
+  );
+  return {
+    record,
+    effects: [
+      ...knowledgeCommandEffect(null, initial, "application.create"),
+      ...knowledgeCommandEffect(null, board, "application.create"),
+      ...knowledgeCommandEffect(initial, record, "application.create"),
+    ],
+  };
+}
 
-  /**
-   * Синхронизирует имя доски после изменения приложения в той же внешней транзакции.
-   * Доска читается один раз и сохраняет собственный ключ; равное имя — no-op.
-   * Отсутствие или чужой владелец доски откатывает также уже записанное приложение.
-   */
-  synchronizeBoard(application: KnowledgeRecord<"application">, name: string, actor: string): void {
-    this.entities.changeRelated(application.data.boardId, "board", actor, (record) => {
-      const board = decodeKnowledge(record, "board");
-      if (board.data.applicationId !== application.id) {
-        throw new RelayError("INVALID_STATE", knowledgeMessages.foreignBoard, 4);
-      }
-      return { patch: { name } };
-    });
+/**
+ * Проверяет владельца доски даже при неизменном имени приложения.
+ */
+export function requireApplicationBoard(
+  application: KnowledgeRecord<"application">,
+  board: KnowledgeRecord<"board">,
+): void {
+  if (application.data.boardId !== board.id || board.data.applicationId !== application.id) {
+    throw new RelayError("INVALID_STATE", knowledgeMessages.foreignBoard, 4);
   }
+}
 
-  /**
-   * Проверяет уникальность виртуального адреса сразу среди досок и приложений.
-   * Коллизиями ключей и исторических алиасов дополнительно владеет EntityService.
-   */
-  private requireFreeAddress(data: ApplicationCreationData): void {
-    const occupied = (["board", "application"] as const).some((kind) =>
-      [data.slug, data.prefix].some(
-        (address) => this.db.findAddressIdentities(address, kind).length > 0,
-      ),
-    );
-    if (occupied) {
-      throw new RelayError("ALREADY_EXISTS", knowledgeMessages.boardAddress, 4);
-    }
-  }
+/**
+ * Рассчитывает синхронное имя зависимой доски под её прочитанным guarded CAS; no-op сохраняет ревизию.
+ */
+export function calculateApplicationBoard(
+  application: KnowledgeRecord<"application">,
+  board: KnowledgeRecord<"board">,
+  write: WriteOptions,
+  timestamp: string,
+): KnowledgeDelta<"board"> {
+  requireApplicationBoard(application, board);
+  const record = decodeKnowledge(
+    changeCommandEntity(
+      board,
+      { name: application.data.name },
+      {
+        actor: write.actor,
+        ifRevision: board.revision,
+      },
+      timestamp,
+    ),
+    "board",
+  );
+  return { record, effects: knowledgeCommandEffect(board, record, "application.update") };
 }

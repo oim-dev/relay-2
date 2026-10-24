@@ -3,30 +3,28 @@
  * Данные знаний декодирует их владелец; допустимость назначения определяют чистые правила задач.
  */
 import { RelayError, type KnowledgeRecord, type TaskRecord } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import type { EntityService } from "../entities/entities";
 import { decodeKnowledge } from "../knowledge/knowledge-data";
-import { TASK_LIMITS } from "./task-constants";
 import { taskRecord } from "./task-data";
 import type { TaskTarget } from "./task-data.types";
 import type { TaskFilterInput, TaskTargetFilter } from "./task-input.types";
 import type { TaskSelection } from "./task-list.types";
-import { taskLabels, taskMessages } from "./task-messages";
-import { ensureTaskTargets, ensureUniqueTaskReferences } from "./task-rules";
+import { taskMessages } from "./task-messages";
 
 /**
  * Чтение адресованных сущностей без кеша между операциями; ресурсами БД владеет вызывающий сервис.
  */
 export class TaskReferences {
   /* Соединение проекта; составные чтения выполняются внутри снимка сервиса. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
   /* Общий владелец разрешения ID, ключей, алиасов и типизированных ссылок. */
   private readonly entities: EntityService;
 
   /**
    * Привязывает разрешение ссылок к существующему соединению, не открывая новых ресурсов.
    */
-  constructor(db: ProjectDatabase, entities: EntityService) {
+  constructor(db: ProjectStore, entities: EntityService) {
     this.db = db;
     this.entities = entities;
   }
@@ -43,35 +41,6 @@ export class TaskReferences {
    */
   board(ref: string): KnowledgeRecord<"board"> {
     return decodeKnowledge(this.entities.get(ref, "board"), "board");
-  }
-
-  /**
-   * Разрешает список задач с полным декодированием и проверкой дублей после раскрытия алиасов.
-   */
-  taskIds(refs: readonly string[], label: string): string[] {
-    const ids = refs.map((ref) => this.task(ref).id);
-    ensureUniqueTaskReferences(ids, label);
-    return ids;
-  }
-
-  /**
-   * Разрешает допустимые для доски цели; retained содержит прежние ID только для той же доски.
-   */
-  targets(
-    refs: readonly string[],
-    board: KnowledgeRecord<"board">,
-    retained: readonly string[],
-  ): string[] {
-    if (refs.length > TASK_LIMITS.targets) {
-      throw new RelayError(
-        "INVALID_ARGUMENT",
-        taskMessages.invalidArray(taskLabels.targets, TASK_LIMITS.targets),
-        2,
-      );
-    }
-    const targets = refs.map((ref) => this.target(ref));
-    ensureTaskTargets(targets, board, retained);
-    return targets.map((target) => target.id);
   }
 
   /**

@@ -5,6 +5,7 @@ import {
   type BatchRevisionReference,
 } from "@relay/contracts";
 import { locateBatchError } from "./batch-errors";
+import { isWellFormedAddressText } from "../entities/entity-text";
 import { batchMessages } from "./batch.messages";
 import type {
   BatchActionDescriptor,
@@ -107,12 +108,14 @@ export function batchFields(
 }
 
 /**
- * Проверяет адрес, локальное имя или ключ доставки без исправления пользовательского текста.
+ * Проверяет UTF-8-представимый адрес, локальное имя или ключ доставки без исправления текста.
+ * Markdown и JSON-содержание проверяются отдельно и могут сохранять lone surrogate.
  */
 export function batchText(value: unknown, path: string): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
+    !isWellFormedAddressText(value) ||
     value.trim() !== value ||
     /\p{Cc}/u.test(value)
   ) {
@@ -154,13 +157,14 @@ function parseStep(
   index: number,
   catalog: ReadonlyMap<string, BatchActionDescriptor>,
   aliases: Set<string>,
+  implicitCreation: boolean,
 ): BatchStep {
   const path = `operations[${index}]`;
   let op = "";
   try {
     const object = batchObject(value, path);
     op = batchText(object.op, `${path}.op`);
-    batchFields(object, ["op", "as", "ref", "ifRevision", "input"], path);
+    batchFields(object, ["op", "as", "ref", "ifRevision", "expectedVersion", "input"], path);
     const action = catalog.get(op);
     if (action === undefined) {
       invalidBatch(batchMessages.unknownOperation, `${path}.op`);
@@ -177,13 +181,30 @@ function parseStep(
       action.description.inputFields,
       `${path}.input`,
     );
+    const explicitSingleton =
+      implicitCreation &&
+      object.ref !== undefined &&
+      ["project.update", "project.rename", "product.update", "product.rename"].includes(op);
     const ref =
-      action.description.ref === "required" ? batchReference(object.ref, `${path}.ref`) : undefined;
+      action.description.ref === "required" || explicitSingleton
+        ? batchReference(object.ref, `${path}.ref`)
+        : undefined;
     if (ref === undefined && Object.hasOwn(object, "ref")) {
       invalidBatch(batchMessages.unknownField, `${path}.ref`);
     }
+    const expectedVersion =
+      object.expectedVersion === undefined
+        ? undefined
+        : batchText(object.expectedVersion, `${path}.expectedVersion`);
+    if (expectedVersion !== undefined && action.description.revisionOwner === null) {
+      invalidBatch(batchMessages.unknownField, `${path}.expectedVersion`);
+    }
     const revision =
-      action.description.revisionOwner === null
+      action.description.revisionOwner === null ||
+      (object.ifRevision === undefined && expectedVersion !== undefined) ||
+      (implicitCreation &&
+        object.ifRevision === undefined &&
+        (op === "product.create" || op === "implementation.create"))
         ? undefined
         : batchRevision(object.ifRevision, `${path}.ifRevision`);
     if (revision === undefined && Object.hasOwn(object, "ifRevision")) {
@@ -196,6 +217,7 @@ function parseStep(
       input: input as BatchObject,
       ...(ref === undefined ? {} : { ref }),
       ...(revision === undefined ? {} : { ifRevision: revision }),
+      ...(expectedVersion === undefined ? {} : { expectedVersion }),
     };
   } catch (error) {
     throw locateBatchError(error, index, op);
@@ -209,6 +231,7 @@ function parseStep(
 export function parseBatch(
   prepared: PreparedBatchInput,
   catalog: ReadonlyMap<string, BatchActionDescriptor>,
+  implicitCreation = false,
 ): readonly BatchStep[] {
   if (prepared.inputBytes > BATCH_LIMITS.inputBytes) {
     invalidBatch(batchMessages.tooLarge, "$");
@@ -225,5 +248,7 @@ export function parseBatch(
     invalidBatch(batchMessages.operations, "operations");
   }
   const aliases = new Set<string>();
-  return object.operations.map((step, index) => parseStep(step, index, catalog, aliases));
+  return object.operations.map((step, index) =>
+    parseStep(step, index, catalog, aliases, implicitCreation),
+  );
 }

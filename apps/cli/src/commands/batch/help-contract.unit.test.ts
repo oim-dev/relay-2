@@ -50,7 +50,7 @@ const requiredFields = new Set([
   "plan.stage.task.add.task",
   "plan.stage.task.remove.stageId",
   "plan.stage.task.remove.task",
-  ...["task", "targetPlan", "targetStage", "reason", "targetRevision"].map(
+  ...["task", "targetPlan", "targetStage", "reason"].map(
     (field) => `plan.stage.task.transfer.${field}`,
   ),
   "session.start.title",
@@ -139,6 +139,19 @@ const preservedTaskFields = [
 ] as const;
 
 describe("Предметные политики всех полей batch", () => {
+  test("transfer требует хотя бы одно целевое предусловие и допускает проверку обоих", () => {
+    for (const [field, alternative] of [
+      ["targetRevision", "targetVersion"],
+      ["targetVersion", "targetRevision"],
+    ] as const) {
+      expect(getBatchFieldContract("plan.stage.task.transfer", field)).toEqual({
+        presence: `Обязательно, если ${alternative} не передан. Можно передать оба предусловия; тогда проверяются оба.`,
+        omission: `При пропуске требуется ${alternative}; без обоих предусловий операция отклоняется.`,
+        nullable: false,
+      });
+    }
+  });
+
   test("каталог содержит 72 листа без пропущенных политик и выдуманного null", () => {
     expect(BATCH_OPERATIONS).toHaveLength(72);
     const seenRequired = new Set<string>();
@@ -346,7 +359,9 @@ describe("Автономные JSON-примеры листов", () => {
       expect(json).not.toContain('"$ref"');
       expect(json).not.toContain('"$revision"');
       expect(
-        Object.keys(example).every((field) => ["op", "ref", "ifRevision", "input"].includes(field)),
+        Object.keys(example).every((field) =>
+          ["op", "ref", "ifRevision", "expectedVersion", "input"].includes(field),
+        ),
       ).toBe(true);
     },
   );
@@ -380,15 +395,16 @@ describe("Автономные JSON-примеры листов", () => {
 
   test("правила называют владельца CAS seed, приложения, обоих планов и сессии материала", () => {
     expect(getBatchOperationContract("product.create").rules.join(" ")).toContain(
-      "ifRevision именно этого паспорта",
+      "expectedVersion либо ifRevision именно этого паспорта",
     );
     expect(getBatchOperationContract("implementation.create").rules.join(" ")).toContain(
       "ревизия этого приложения",
     );
     const transfer = getBatchOperationContract("plan.stage.task.transfer");
     expect(transfer.rules.join(" ")).toContain(
-      "targetRevision обязателен и принадлежит targetPlan",
+      "targetRevision либо targetVersion принадлежат targetPlan",
     );
+    expect(transfer.rules.join(" ")).toContain("Если переданы обе формы, проверяются обе");
     expect(transfer.example).toMatchObject({
       ref: "PLN-1",
       ifRevision: 1,

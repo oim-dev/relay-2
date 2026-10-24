@@ -1,11 +1,14 @@
-import type { PlanStage, WriteOptions } from "@relay/contracts";
+import type { CommandWriteOptions, PlanStage } from "@relay/contracts";
 
 /**
- * Ревизии обоих владельцев переноса; для одного плана проверяются обе переданные ревизии.
+ * Клиентские условия обоих владельцев переноса. Каждая сторона требует числовой CAS
+ * либо переносимую версию; при одном плане оба условия всё равно проверяются независимо.
  */
-export interface PlanTransferWriteOptions extends Readonly<WriteOptions> {
-  /* Ожидаемая ревизия целевого плана; ifRevision защищает исходный план. */
-  readonly targetRevision: number;
+export interface PlanTransferWriteOptions extends Readonly<CommandWriteOptions> {
+  /* Ожидаемая ревизия получателя; отсутствие допустимо только с targetVersion. */
+  readonly targetRevision?: number;
+  /* Переносимая версия агрегата получателя; проверяется вместе с CAS, если переданы оба. */
+  readonly targetVersion?: string;
 }
 
 /**

@@ -5,8 +5,9 @@ import {
   RelayError,
   validateActor,
   type KnowledgeKind,
-  type WriteOptions,
+  type CommandWriteOptions,
 } from "@relay/contracts";
+import { expectedCommandVersion } from "../commands/command-write";
 import { KNOWLEDGE_LIMITS } from "./knowledge-constants";
 import { knowledgeMessages } from "./knowledge.messages";
 import { isKnowledgeTitle } from "./knowledge-title";
@@ -151,12 +152,28 @@ export function knowledgeKind(value: unknown): KnowledgeKind {
 }
 
 /**
- * Проверяет автора, положительную ревизию и форму параметров до чтения владельца.
+ * Проверяет автора и исходные условия до чтения владельца. Переносимый token допускает
+ * отсутствие числового CAS, но не исправляет явно переданную неверную ревизию.
  */
-export function validateKnowledgeWrite(value: WriteOptions, extra: readonly string[] = []): void {
-  knowledgeFields(value, ["actor", "ifRevision", ...extra], knowledgeMessages.writeLabel);
+export function validateKnowledgeWrite(
+  value: CommandWriteOptions,
+  extra: readonly string[] = [],
+  inheritedVersion?: string,
+): void {
+  knowledgeFields(
+    value,
+    ["actor", "ifRevision", "expectedVersion", ...extra],
+    knowledgeMessages.writeLabel,
+  );
   validateActor(value.actor);
-  if (!Number.isSafeInteger(value.ifRevision) || value.ifRevision < 1) {
-    invalidKnowledge(knowledgeMessages.revisionRequired);
+  const version = expectedCommandVersion(value.expectedVersion, inheritedVersion);
+  if (value.ifRevision !== undefined || version === undefined) {
+    if (
+      typeof value.ifRevision !== "number" ||
+      !Number.isSafeInteger(value.ifRevision) ||
+      value.ifRevision < 1
+    ) {
+      invalidKnowledge(knowledgeMessages.revisionRequired);
+    }
   }
 }

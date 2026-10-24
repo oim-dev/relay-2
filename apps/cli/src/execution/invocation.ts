@@ -1,4 +1,3 @@
-import { resolve } from "node:path";
 import {
   HistoryService,
   KnowledgeService,
@@ -6,92 +5,48 @@ import {
   QueryService,
   TasksService,
 } from "@relay/core";
-import type { EntityRecord, WriteOptions } from "@relay/contracts";
-import {
-  openProject,
-  type OpenedProject,
-  type ProjectLocation,
-  type RuntimeOptions,
-} from "@relay/project-runtime";
+import type { CommandExecutionContext, CommandWriteOptions, EntityRecord } from "@relay/contracts";
+import { openProject, type OpenedProject, type ProjectLocation } from "@relay/project-runtime";
 import type { ProjectDatabase } from "@relay/storage";
 import type { CommandContext } from "gunshi";
-import type { ArgumentValues, InputFields } from "../input/arguments.types";
-import { CliUsageError } from "../errors/errors";
+import type { InputFields } from "../input/arguments.types";
 import { invocationPage, orderEntities } from "./invocation-pagination";
-import { registryMessages } from "../locales/registry";
+import { LocalInvocation } from "./local-invocation";
 import type { Result } from "../output/output.types";
 import type { LocalPageSource, PageSource } from "../pagination/pagination.types";
 import type { CliRuntime } from "./runtime.types";
+import { readVersionPrecondition } from "../input/version-precondition";
 
 /**
  * Контекст одного обработчика: значения ввода, выбор проекта и ленивое владение соединением БД.
- * Реестр закрывает вызов в finally; транзакцией либо снимком владеет реестр или явно выбранный сервис.
+ * Реестр закрывает вызов после await/finally; записью владеет Core executor, async read — anchor Core.
+ * Обычные синхронные чтения сохраняют согласованный snapshot.
  */
-export class Invocation {
+export class Invocation extends LocalInvocation {
   /* Проверенный проект с рабочим соединением; отсутствует до первого обращения к db или location. */
   private openedProject?: OpenedProject;
-  /* Неизменяемые значения Gunshi; предметные поля находятся отдельно в input. */
-  readonly values: ArgumentValues;
-  /* Контекст разбора команды; экземпляр не разделяется между вызовами runCli. */
-  readonly context: Readonly<CommandContext>;
-  /* Явное окружение и источник stdin данного запуска. */
-  readonly runtime: CliRuntime;
-  /* Поля после разрешения источников и CLI-алиасов; предметную форму проверяет Core. */
-  readonly input: InputFields;
+  /* Прочитанные клиентом guards только writer; undefined оставляет чтение без execution context. */
+  readonly commandExecution: CommandExecutionContext | undefined;
 
   /**
    * Сохраняет уже разобранные параметры и поля, не выбирая проект и не открывая БД.
    */
-  constructor(context: Readonly<CommandContext>, runtime: CliRuntime, input: InputFields) {
-    this.context = context;
-    this.runtime = runtime;
-    this.input = input;
-    this.values = context.values;
+  constructor(
+    context: Readonly<CommandContext>,
+    runtime: CliRuntime,
+    input: InputFields,
+    commandExecution?: CommandExecutionContext,
+  ) {
+    super(context, runtime, input);
+    this.commandExecution = commandExecution;
   }
 
   /**
-   * Возвращает строковое представление параметра; отсутствующее значение представляется пустой строкой.
+   * Передаёт только предъявленные локальное/переносимое предусловия и автора.
+   * Отсутствующую локальную ревизию не вычисляет и не подменяет; владельца проверяет Core.
    */
-  text(key: string): string {
-    return String(this.values[key] ?? "");
-  }
-
-  /**
-   * Выбирает автора с приоритетом --actor над RELAY_ACTOR и отвергает отсутствие непустой строки.
-   * Значение сохраняется дословно; остальные ограничения автора проверяет предметный сервис.
-   */
-  get actor(): string {
-    const actor = this.values.actor ?? this.runtime.env.RELAY_ACTOR;
-    if (typeof actor !== "string" || !actor.trim()) {
-      throw new CliUsageError(registryMessages.actorRequired, "ACTOR_REQUIRED");
-    }
-    return actor;
-  }
-
-  /**
-   * Передаёт автора и прочитанную ревизию в Core; владелец ревизии определяется конкретным сценарием.
-   * Наличие и числовой синтаксис --if-revision проверяет схема update-команды.
-   */
-  get write(): WriteOptions {
-    return { actor: this.actor, ifRevision: Number(this.values["if-revision"]) };
-  }
-
-  /**
-   * Вычисляет параметры Project Runtime без обращения к файловой системе.
-   * CLI имеет приоритет над окружением; RELAY_HOME передаётся дословно, включая пустое значение.
-   * Runtime проверяет home до файловых операций и разрешает относительный путь от runtime.cwd.
-   */
-  get options(): RuntimeOptions {
-    const config = this.values.config ?? this.runtime.env.RELAY_CONFIG;
-    const home =
-      this.runtime.env.RELAY_HOME ??
-      (this.runtime.env.HOME ? resolve(this.runtime.env.HOME, ".relay") : undefined);
-    return {
-      cwd: this.runtime.cwd,
-      ...(home !== undefined ? { home } : {}),
-      ...(config !== undefined ? { config: String(config) } : {}),
-      ...(this.values.project !== undefined ? { project: this.text("project") } : {}),
-    };
+  get write(): CommandWriteOptions {
+    return { actor: this.actor, ...readVersionPrecondition(this.values) };
   }
 
   /**
@@ -118,35 +73,35 @@ export class Invocation {
   }
 
   /**
-   * Подключает сценарии знаний к общему соединению и транзакции вызова.
+   * Подключает знания к соединению проекта; асинхронные записи используют его CommandStore.
    */
   get knowledge(): KnowledgeService {
-    return new KnowledgeService(this.db);
+    return new KnowledgeService(this.db, this.commandExecution);
   }
 
   /**
    * Подключает сценарии задач, сохраняя независимый журнал комментариев внутри Core.
    */
   get tasks(): TasksService {
-    return new TasksService(this.db);
+    return new TasksService(this.db, this.commandExecution);
   }
 
   /**
    * Подключает сценарии планирования к тому же соединению выбранного проекта.
    */
   get planning(): PlanningService {
-    return new PlanningService(this.db);
+    return new PlanningService(this.db, this.commandExecution);
   }
 
   /**
-   * Подключает историю поручений к транзакции или снимку текущего вызова.
+   * Подключает историю поручений; записи используют async executor, чтения наследуют снимок CLI.
    */
   get history(): HistoryService {
-    return new HistoryService(this.db);
+    return new HistoryService(this.db, this.commandExecution);
   }
 
   /**
-   * Подключает составные чтения проекта, наследующие удерживаемый реестром снимок.
+   * Подключает sync-чтения в снимке CLI и async versioned-reader с собственным anchor Core.
    */
   get queries(): QueryService {
     return new QueryService(this.db);

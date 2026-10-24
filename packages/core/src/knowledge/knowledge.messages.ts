@@ -104,4 +104,5 @@ export const knowledgeMessages = {
   inactiveRelation: "Новое прикрепление к снятой реализации недопустимо",
   boardAddress: "Slug или префикс доски уже занят",
   missingActiveFeature: "SI требует активную FI той же фичи в том же приложении",
+  immutableTransition: "Переход знаний изменяет неизменяемую связь или поле чужой операции",
 } as const;

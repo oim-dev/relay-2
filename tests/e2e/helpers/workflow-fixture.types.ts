@@ -32,6 +32,10 @@ export interface ProcessResult {
 export interface WorkflowEnvironment {
   /* Уникальный каталог маршрута под .artifacts с отдельным домашним каталогом. */
   readonly root: string;
+  /* Абсолютный путь собранной CLI для самостоятельного foreground-процесса fixture. */
+  readonly binary: string;
+  /* Изолированные переменные дочерних процессов; PATH сохраняет доступ к системному Git. */
+  readonly variables: Readonly<Record<string, string>>;
 
   /**
    * Запускает новый бинарник в указанном каталоге и ожидает его завершения.

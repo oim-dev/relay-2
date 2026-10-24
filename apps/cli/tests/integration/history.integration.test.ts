@@ -13,11 +13,11 @@ const checkpointInputs = [
  * Создаёт сессию и открытое намерение через Core, возвращая актуальную ревизию владельца.
  * Переданное соединение остаётся во владении вызывающей fixture.
  */
-function createSessionWithIntent(db: ProjectDatabase): OpenIntentFixture {
+async function createSessionWithIntent(db: ProjectDatabase): Promise<OpenIntentFixture> {
   const history = new HistoryService(db);
-  const started = history.start({ title: "Поручение" }, "agent");
+  const started = await history.start({ title: "Поручение" }, "agent");
   const runId = stringValue(started.data.currentRunId);
-  const intent = history.checkpoint(
+  const intent = await history.checkpoint(
     started.id,
     "open",
     {
@@ -77,8 +77,9 @@ describe("Рабочая история через CLI", () => {
     async ({ source }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const session = cli.withDatabase(project, (db) =>
-          new HistoryService(db).start({ title: "Поручение" }, "agent"),
+        const session = await cli.withDatabase(
+          project,
+          async (db) => await new HistoryService(db).start({ title: "Поручение" }, "agent"),
         );
         const runId = stringValue(session.data.currentRunId);
         const material = { title: "Материал", body: "План проверки\n  с отступом\n" };
@@ -110,7 +111,7 @@ describe("Рабочая история через CLI", () => {
   test("страница намерений возвращает открытый материал выбранной сессии", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { session, intent } = cli.withDatabase(project, createSessionWithIntent);
+      const { session, intent } = await cli.withDatabase(project, createSessionWithIntent);
 
       const page = await cli.page(["session", "intents", session.key], entityValue);
 
@@ -122,9 +123,9 @@ describe("Рабочая история через CLI", () => {
   test("страница истории содержит намерение и результат в порядке сохранения", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { session, intent, result } = cli.withDatabase(project, (db) => {
-        const { session, runId, intent } = createSessionWithIntent(db);
-        const result = new HistoryService(db).checkpoint(
+      const { session, intent, result } = await cli.withDatabase(project, async (db) => {
+        const { session, runId, intent } = await createSessionWithIntent(db);
+        const result = await new HistoryService(db).checkpoint(
           intent.id,
           "complete",
           {
@@ -147,7 +148,7 @@ describe("Рабочая история через CLI", () => {
   test("завершение намерения сохраняет связанный результат и полный текст", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { session, runId, intent } = cli.withDatabase(project, createSessionWithIntent);
+      const { session, runId, intent } = await cli.withDatabase(project, createSessionWithIntent);
       const body = "# Полный результат\n\n  Значимый отступ\n";
 
       const result = await cli.entity([
@@ -181,8 +182,9 @@ describe("Рабочая история через CLI", () => {
   test("завершение сессии сохраняет итог и закрывает текущее участие", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const session = cli.withDatabase(project, (db) =>
-        new HistoryService(db).start({ title: "Поручение" }, "agent"),
+      const session = await cli.withDatabase(
+        project,
+        async (db) => await new HistoryService(db).start({ title: "Поручение" }, "agent"),
       );
       const runId = stringValue(session.data.currentRunId);
 

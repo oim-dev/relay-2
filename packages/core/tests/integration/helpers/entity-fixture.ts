@@ -7,9 +7,14 @@ import { ProjectDatabase } from "@relay/storage";
 /**
  * Передаёт тесту отдельную файловую SQLite со штатными начальными записями проекта.
  * Владеет соединением и каталогом: закрывает и удаляет их даже при отказе callback.
- * Callback синхронен; дополнительные предметные данные создаёт сам тест.
+ * Асинхронный callback завершается до очистки; синхронный сохраняет прежний путь
+ * без Promise. Дополнительные предметные данные создаёт сам тест.
  */
-export function withEntityDatabase(run: (db: ProjectDatabase) => void): void {
+export function withEntityDatabase<T>(run: (db: ProjectDatabase) => Promise<T>): Promise<T>;
+export function withEntityDatabase<T>(run: (db: ProjectDatabase) => T): T;
+export function withEntityDatabase<T>(
+  run: (db: ProjectDatabase) => T | Promise<T>,
+): T | Promise<T> {
   const artifacts = resolve(
     import.meta.dir,
     "../../../../../.artifacts",
@@ -18,17 +23,35 @@ export function withEntityDatabase(run: (db: ProjectDatabase) => void): void {
   mkdirSync(artifacts, { recursive: true });
   const directory = mkdtempSync(join(artifacts, "core-reading-tests-"));
   let db: ProjectDatabase | undefined;
+
+  /**
+   * Освобождает файловую fixture после завершения callback, включая отказ.
+   */
+  function cleanup(): void {
+    try {
+      db?.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  let result: T | Promise<T>;
   try {
     db = ProjectDatabase.create(join(directory, "project.sqlite"), {
       id: crypto.randomUUID(),
       name: "Тестовый проект",
       slug: "test-project",
     });
-    run(db);
-  } finally {
-    db?.close();
-    rmSync(directory, { recursive: true, force: true });
+    result = run(db);
+  } catch (error) {
+    cleanup();
+    throw error;
   }
+  if (result instanceof Promise) {
+    return result.finally(cleanup);
+  }
+  cleanup();
+  return result;
 }
 
 /**
@@ -38,6 +61,28 @@ export function withEntityDatabase(run: (db: ProjectDatabase) => void): void {
 export function expectRelayError(operation: () => unknown, code: string): RelayError {
   try {
     operation();
+  } catch (error) {
+    expect(error).toBeInstanceOf(RelayError);
+    if (!(error instanceof RelayError)) {
+      throw error;
+    }
+    expect(error.code).toBe(code);
+    return error;
+  }
+  throw new Error(`Ожидалась ошибка ${code}`);
+}
+
+/**
+ * Ожидает отказ асинхронной операции, проверяет класс и предметный код ошибки.
+ * Возвращает ошибку для дополнительных утверждений; успех и посторонний отказ
+ * проваливают тест после завершения операции.
+ */
+export async function expectAsyncRelayError(
+  operation: () => Promise<unknown>,
+  code: string,
+): Promise<RelayError> {
+  try {
+    await operation();
   } catch (error) {
     expect(error).toBeInstanceOf(RelayError);
     if (!(error instanceof RelayError)) {

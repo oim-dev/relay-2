@@ -10,6 +10,13 @@ export const projectMessages = {
   invalidSlug: `Slug проекта: ${ENTITY_SLUG_LENGTH.min}–${ENTITY_SLUG_LENGTH.max} строчные латинские буквы/цифры с одиночными дефисами между частями`,
   workspaceRequired: "Выбор --project требует конфигурацию workspace",
   projectRequired: "Выберите проект workspace через --project",
+  restoreInvalidId: "Для восстановления требуется постоянный ID проекта без компонентов пути",
+  restoreRecoveryRequired:
+    "Незавершённая публикация restore требует проверки локального маркера; чужая или изменённая БД сохранена",
+  restoreDatabaseExists: "Восстановление не заменяет существующую SQLite-базу, WAL или SHM",
+  restoreSynchronous: "Материализация восстановленной базы должна быть строго синхронной",
+  restoreDatabaseOpen:
+    "Перед публикацией восстановленной базы закройте соединения и checkpoint WAL",
 
   /**
    * Указывает конфигурацию, постоянный ID которой не совпал с открытой базой.

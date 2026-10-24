@@ -23,7 +23,7 @@ export interface HistoryRecordMetadata {
 export interface HistoryRootInitialization {
   /* Корень сразу открыт и принадлежит первому участию. */
   readonly status: "open";
-  /* Первое участие, чей ID уже зарезервирован фабрикой. */
+  /* Первое участие, чей ID уже выделен загрузчиком команды. */
   readonly run: HistoryRun;
 }
 

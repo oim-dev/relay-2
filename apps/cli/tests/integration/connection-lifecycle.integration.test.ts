@@ -46,14 +46,14 @@ describe("Владение рабочим соединением CLI", () => {
   test("страница и продолжение используют одно соединение, закрытое после успешного результата", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const first = cli.withDatabase(project, (db) => {
+      const first = await cli.withDatabase(project, async (db) => {
         const knowledge = new KnowledgeService(db);
-        const first = knowledge.create(
+        const first = await knowledge.create(
           "document",
           { name: "Первый", body: "Содержание" },
           "fixture",
         );
-        knowledge.create("document", { name: "Второй", body: "Содержание" }, "fixture");
+        await knowledge.create("document", { name: "Второй", body: "Содержание" }, "fixture");
         return first;
       });
       const open = spyOn(ProjectDatabase, "open");

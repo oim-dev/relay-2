@@ -1,5 +1,9 @@
 import { QueryService } from "@relay/core";
-import { validateEntityReadRequest } from "@relay/contracts";
+import {
+  validateEntityReadRequest,
+  type EntityReadResult,
+  type VersionedEntityReadResult,
+} from "@relay/contracts";
 import { choice, flag, pageArgs, positional, string } from "../../input/arguments";
 import { CliUsageError } from "../../errors/errors";
 import { queryCommandMessages as messages } from "../../locales/commands/queries";
@@ -29,14 +33,15 @@ export function registerQueryCommands(registry: CommandRegistry): void {
     args: {
       refs: { ...positional(messages.references, false), multiple: true },
       summary: flag(messages.summary),
+      "with-versions": flag(messages.withVersions),
     },
     presentation: "entity-read",
-    execution: "service",
+    execution: "service-read",
     /**
      * Объединяет адреса до и после -- и проверяет общий размер до открытия БД.
-     * Core удерживает общий снимок и различает ошибки отдельных адресов.
+     * Без metadata используется прежний sync read; versioned read возвращает projection и версии одного anchor.
      */
-    run: (i): Result => {
+    run: async (i): Promise<Result> => {
       const positionals = i.values.refs ?? [];
       if (
         !Array.isArray(positionals) ||
@@ -46,12 +51,20 @@ export function registerQueryCommands(registry: CommandRegistry): void {
       }
       const refs = [...positionals, ...i.context.rest];
       validateEntityReadRequest(refs);
-      const data = i.queries.getMany(refs, {
-        summary: i.values.summary === true,
-      });
+      const options = { summary: i.values.summary === true };
+      let data: EntityReadResult;
+      let versions: VersionedEntityReadResult["versions"] | undefined;
+      if (i.values["with-versions"] === true) {
+        const read = await i.queries.getManyVersioned(refs, options);
+        data = read.data;
+        versions = read.versions;
+      } else {
+        data = i.queries.getMany(refs, options);
+      }
       const firstFailure = data.items.find((item) => !item.ok);
       return {
         data,
+        ...(versions === undefined ? {} : { meta: { versions } }),
         ...(firstFailure && !firstFailure.ok
           ? { failure: { ...firstFailure.error, invalidInput: false } }
           : {}),

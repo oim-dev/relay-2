@@ -24,7 +24,9 @@ export async function runCli(
   output: CliOutput,
   runtime: CliRuntime = processRuntime(),
 ): Promise<number> {
-  return runProgram(argv, output, () => createProgram(runtime));
+  return runProgram(argv, output, () =>
+    createProgram({ ...runtime, stdout: output.stdout, stderr: output.stderr }),
+  );
 }
 
 /**

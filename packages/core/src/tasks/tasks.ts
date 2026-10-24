@@ -1,46 +1,28 @@
-import { randomUUID } from "node:crypto";
 import {
   RelayError,
-  validateActor,
   validateEntityPageRequest,
+  type CommandExecutionContext,
+  type CommandWriteOptions,
   type EntityPage,
   type EntityPageRequest,
   type TaskComment,
   type TaskCriterion,
-  type TaskData,
   type TaskProgress,
   type TaskRecord,
-  type WriteOptions,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
+import { executeEntityCommand } from "../commands/command-facade";
 import { EntityService } from "../entities/entities";
 import { pageEntities } from "../entities/entity-page";
-import { TASK_LIMITS } from "./task-constants";
-import { changeTaskCriteria, findTaskCriterion } from "./task-criteria";
-import { parseTaskCriterionChange } from "./task-criterion-input";
+import { findTaskCriterion } from "./task-criteria";
 import { taskGraphNode, taskRecord } from "./task-data";
 import { TaskGraph } from "./task-graph";
-import {
-  parseCreateTask,
-  parseMoveTask,
-  parseTaskFilters,
-  parseTaskLink,
-  parseUpdateTask,
-  reference,
-  text,
-  validateTaskWriteOptions,
-} from "./task-input";
-import type { TaskCriterionAction, TaskLinkChange } from "./task-input.types";
+import { parseTaskFilters, parseTaskLink, reference, validateTaskWriteOptions } from "./task-input";
+import type { TaskCriterionAction } from "./task-input.types";
 import { selectTaskRecords } from "./task-list";
 import { taskLabels, taskMessages } from "./task-messages";
 import { TaskReferences } from "./task-references";
 import type { TaskCollection, TaskCriterionRead } from "./task-read.types";
-import {
-  changeTaskLink,
-  ensureTaskDone,
-  ensureTaskParentAccepts,
-  sameTaskData,
-} from "./task-rules";
 
 export {
   TASK_COLUMNS,
@@ -51,23 +33,27 @@ export {
 } from "@relay/contracts";
 
 /**
- * Локальные сценарии задач: декодирование, проверки и запись атомарны в пределах проекта.
- * Мутации содержания принимают ifRevision самой задачи и проверяют CAS до no-op.
+ * Синхронные чтения задач и тонкие async фасады единственного command executor.
+ * Мутации содержания принимают ifRevision и/или expectedVersion самой задачи до no-op.
+ * Переносимый token проверяет общий executor; фасад не читает и не подставляет числовой CAS.
  * Комментарии имеют независимый append-only журнал и не изменяют эту ревизию.
  */
 export class TasksService {
   /* Соединение проекта; его жизненным циклом владеет вызывающее приложение. */
-  private readonly db: ProjectDatabase;
-  /* Внутренний примитив разрешения адресов и записи проверенного содержания. */
+  private readonly db: ProjectStore;
+  /* Внутренний примитив разрешения адресов для синхронных чтений. */
   private readonly entities: EntityService;
   /* Разрешение задач, досок и целей без кеша между снимками. */
   private readonly references: TaskReferences;
+  /* Ожидаемые адресные привязки и переносимый token по умолчанию для записей фасада. */
+  private readonly execution: CommandExecutionContext;
 
   /**
    * Создаёт сервис поверх открытой БД, не открывая дополнительных соединений.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore, execution: CommandExecutionContext = {}) {
     this.db = db;
+    this.execution = execution;
     this.entities = new EntityService(db);
     this.references = new TaskReferences(db, this.entities);
   }
@@ -121,55 +107,30 @@ export class TasksService {
    * Атомарно создаёт задачу с разрешёнными ссылками и проверенным графом обязательств.
    * Невозможный done, цикл и невыполненный новый ребёнок done-родителя откатывают также ключ и поколение.
    */
-  create(input: Readonly<Record<string, unknown>>, actor: string): TaskRecord {
-    const command = parseCreateTask(input);
-    validateActor(actor);
-    return this.db.transaction(() => {
-      const board = this.references.board(command.board);
-      const data: TaskData = {
-        boardId: board.id,
-        title: command.title,
-        description: command.description,
-        column: command.column,
-        parentId: command.parent === null ? null : this.references.task(command.parent).id,
-        dependencies: this.references.taskIds(command.dependencies, taskLabels.dependencies),
-        related: this.references.taskIds(command.related, taskLabels.related),
-        targets: this.references.targets(command.targets, board, []),
-        acceptanceCriteria: [...command.acceptanceCriteria],
-        comments: [],
-      };
-      const record = taskRecord(
-        this.entities.create("task", board.data.prefix, { ...data }, actor),
-      );
-      const graph = this.graph(record);
-      ensureTaskDone(record, graph);
-      ensureTaskParentAccepts(record, null, graph);
-      return record;
-    });
+  async create(input: Readonly<Record<string, unknown>>, actor: string): Promise<TaskRecord> {
+    return taskRecord(
+      await executeEntityCommand(this.db, { op: "task.create", input }, actor, this.execution),
+    );
   }
 
   /**
-   * Меняет заголовок, описание и цели под CAS задачи в общей транзакции проверки и записи.
+   * Меняет заголовок, описание и цели через async load и атомарный guarded commit под CAS задачи.
    * Неизменное содержание сохраняет ревизию; снятая цель может остаться в прежнем назначении.
    */
-  update(ref: string, input: Readonly<Record<string, unknown>>, options: WriteOptions): TaskRecord {
-    const command = parseUpdateTask(input);
-    return this.db.transaction(() => {
-      const record = this.writable(ref, options);
-      const data: TaskData = {
-        ...record.data,
-        title: command.title ?? record.data.title,
-        description: command.description ?? record.data.description,
-      };
-      if (command.targets !== undefined) {
-        data.targets = this.references.targets(
-          command.targets,
-          this.references.board(data.boardId),
-          data.targets,
-        );
-      }
-      return this.save(record, data, options);
-    });
+  async update(
+    ref: string,
+    input: Readonly<Record<string, unknown>>,
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        { op: "task.update", ref, input, ...conditions },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
@@ -177,93 +138,125 @@ export class TasksService {
    * выдаёт новый ключ и сохраняет прежний алиас. Done требует выполненных обязательств.
    * Неизменный запрос сохраняет ревизию, но не обходит CAS и проверку графа.
    */
-  move(ref: string, input: Readonly<Record<string, unknown>>, options: WriteOptions): TaskRecord {
-    const command = parseMoveTask(input);
-    return this.db.transaction(() => {
-      const record = this.writable(ref, options);
-      const previous = record.data;
-      const board = this.references.board(command.board ?? previous.boardId);
-      const data: TaskData = {
-        ...previous,
-        boardId: board.id,
-        column: command.column ?? previous.column,
-      };
-      this.references.targets(
-        data.targets,
-        board,
-        board.id === previous.boardId ? previous.targets : [],
-      );
-      const candidate = { ...record, data };
-      ensureTaskDone(candidate, this.graph(candidate));
-      if (board.id === previous.boardId) {
-        return this.save(record, data, options);
-      }
-      // Storage резервирует прежний ключ как алиас при атомарном изменении записи.
-      const moved: TaskRecord = {
-        ...record,
-        data,
-        key: this.db.nextKey(board.data.prefix),
-        revision: record.revision + 1,
-        updatedAt: new Date().toISOString(),
-        updatedBy: options.actor,
-      };
-      this.db.update({ ...moved, data: { ...moved.data } }, options.ifRevision);
-      return moved;
-    });
+  async move(
+    ref: string,
+    input: Readonly<Record<string, unknown>>,
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        { op: "task.move", ref, input, ...conditions },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
    * Атомарно меняет родителя под CAS задачи; null снимает связь, прежний родитель даёт no-op.
    * Общий граф отвергает циклы и присоединение невыполненного ребёнка к done-родителю.
    */
-  setParent(ref: string, parent: string | null, options: WriteOptions): TaskRecord {
-    return this.db.transaction(() => {
-      const record = this.writable(ref, options);
-      const parentId =
-        parent === null ? null : this.references.task(reference(parent, taskLabels.parent)).id;
-      const data = { ...record.data, parentId };
-      const candidate = { ...record, data };
-      const graph = this.graph(candidate);
-      ensureTaskParentAccepts(candidate, record.data.parentId, graph);
-      return this.save(record, data, options);
-    });
+  async setParent(
+    ref: string,
+    parent: string | null,
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: parent === null ? "task.parent.clear" : "task.parent.set",
+          ref,
+          input: parent === null ? {} : { parent: reference(parent, taskLabels.parent) },
+          ...conditions,
+        },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
    * Добавляет либо снимает обязательную зависимость атомарно под CAS задачи.
    * Повтор связи — no-op; новая зависимость done-задачи должна быть выполнена, циклы запрещены.
    */
-  dependency(ref: string, target: string, remove: boolean, options: WriteOptions): TaskRecord {
-    return this.changeLink(ref, parseTaskLink("dependencies", target, remove), options);
+  async dependency(
+    ref: string,
+    target: string,
+    remove: boolean,
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    const change = parseTaskLink("dependencies", target, remove);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `task.dependency.${change.action}`,
+          ref,
+          input: { target: change.target },
+          ...conditions,
+        },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
    * Добавляет либо снимает необязательную связь под CAS задачи; на прогресс она не влияет.
    * Повтор связи — no-op, самоссылки запрещены; существующий граф также проверяется перед записью.
    */
-  related(ref: string, target: string, remove: boolean, options: WriteOptions): TaskRecord {
-    return this.changeLink(ref, parseTaskLink("related", target, remove), options);
+  async related(
+    ref: string,
+    target: string,
+    remove: boolean,
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    const change = parseTaskLink("related", target, remove);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: change.action === "add" ? "task.link" : "task.unlink",
+          ref,
+          input: { target: change.target },
+          ...conditions,
+        },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
    * Атомарно меняет критерий под CAS задачи. Изменение текста сбрасывает отметку выполнения;
    * неизменный текст и повтор отметки — no-op после CAS. В done изменения критериев запрещены.
    */
-  criterion(
+  async criterion(
     ref: string,
     action: TaskCriterionAction,
     input: Readonly<Record<string, unknown>>,
-    options: WriteOptions,
-  ): TaskRecord {
-    const command = parseTaskCriterionChange(action, input);
-    return this.db.transaction(() => {
-      const record = this.writable(ref, options);
-      const acceptanceCriteria = changeTaskCriteria(record.data, command, {
-        actor: options.actor,
-        timestamp: new Date().toISOString(),
-      });
-      return this.save(record, { ...record.data, acceptanceCriteria }, options);
-    });
+    options: CommandWriteOptions,
+  ): Promise<TaskRecord> {
+    const conditions = validateTaskWriteOptions(options, this.execution.expectedVersion);
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        {
+          op: `task.criterion.${action}`,
+          ref,
+          input,
+          ...conditions,
+        },
+        options.actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
@@ -272,25 +265,15 @@ export class TasksService {
    * поколение проекта увеличивается. Поздняя запись содержания не стирает журнал.
    * Каждый вызов публикует новый комментарий; повтор не является no-op.
    */
-  comment(ref: string, body: string, actor: string, title = ""): TaskRecord {
-    const checkedBody = text(body, taskLabels.commentBody, TASK_LIMITS.commentBody, {
-      required: true,
-    });
-    const checkedTitle = text(title, taskLabels.commentTitle, TASK_LIMITS.commentTitle, {
-      singleLine: true,
-    });
-    validateActor(actor);
-    return this.db.transaction(() => {
-      const record = this.get(ref);
-      const comment: TaskComment = {
-        id: randomUUID(),
-        title: checkedTitle,
-        body: checkedBody,
-        createdAt: new Date().toISOString(),
-        createdBy: actor,
-      };
-      return taskRecord(this.db.appendTaskComment(record.id, comment));
-    });
+  async comment(ref: string, body: string, actor: string, title = ""): Promise<TaskRecord> {
+    return taskRecord(
+      await executeEntityCommand(
+        this.db,
+        { op: "task.comment.add", ref, input: { title, body } },
+        actor,
+        this.execution,
+      ),
+    );
   }
 
   /**
@@ -427,67 +410,9 @@ export class TasksService {
   }
 
   /**
-   * Проверяет автора, CAS содержания и полную карточку внутри уже открытой транзакции.
-   * Вызывается перед расчётом изменения, чтобы no-op не принимал устаревшую ревизию.
+   * Читает одну узкую проекцию графа в текущем синхронном снимке чтения.
    */
-  private writable(ref: string, options: WriteOptions): TaskRecord {
-    validateTaskWriteOptions(options);
-    const record = this.get(ref);
-    if (record.revision !== options.ifRevision) {
-      throw new RelayError("REVISION_CONFLICT", taskMessages.revisionConflict, 4, {
-        id: record.id,
-        expectedRevision: options.ifRevision,
-        actualRevision: record.revision,
-      });
-    }
-    return record;
-  }
-
-  /**
-   * Записывает проверенное содержание в транзакции вызывающего сценария после writable.
-   * No-op сохраняет ревизию; EntityService повторяет CAS и сохраняет независимый журнал.
-   */
-  private save(record: TaskRecord, data: TaskData, options: WriteOptions): TaskRecord {
-    if (sameTaskData(record.data, data)) {
-      return record;
-    }
-    return taskRecord(this.entities.update(record.id, "task", { ...data }, options));
-  }
-
-  /**
-   * Читает одну узкую проекцию графа в текущем снимке, подменяя изменяемую задачу кандидатом.
-   */
-  private graph(candidate?: TaskRecord): TaskGraph {
-    const nodes = this.db
-      .listTaskGraph()
-      .filter((record) => record.id !== candidate?.id)
-      .map(taskGraphNode);
-    if (candidate !== undefined) {
-      nodes.push(taskGraphNode(candidate));
-    }
-    return new TaskGraph(nodes);
-  }
-
-  /**
-   * Разрешает и меняет связь в общей транзакции CAS, проверки графа и записи.
-   * Новое обязательство done-задачи проверяет готовность; снятие существующей связи меняет ревизию.
-   * Повторное добавление и удаление отсутствующей связи — no-op только после CAS.
-   */
-  private changeLink(ref: string, change: TaskLinkChange, options: WriteOptions): TaskRecord {
-    return this.db.transaction(() => {
-      const record = this.writable(ref, options);
-      const targetId = this.references.task(change.target).id;
-      const data = changeTaskLink(record, targetId, change);
-      const candidate = { ...record, data };
-      const graph = this.graph(candidate);
-      if (
-        change.field === "dependencies" &&
-        change.action === "add" &&
-        !record.data.dependencies.includes(targetId)
-      ) {
-        ensureTaskDone(candidate, graph);
-      }
-      return this.save(record, data, options);
-    });
+  private graph(): TaskGraph {
+    return new TaskGraph(this.db.listTaskGraph().map(taskGraphNode));
   }
 }

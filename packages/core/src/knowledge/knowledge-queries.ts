@@ -1,5 +1,4 @@
 import {
-  RelayError,
   type EntityKind,
   type EntityPage,
   type EntityPageRequest,
@@ -7,7 +6,7 @@ import {
   type KnowledgeKind,
   type KnowledgeRecord,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { pageEntities } from "../entities/entity-page";
 import { indexDocumentSections, projectDocumentSection } from "./document-sections";
@@ -16,6 +15,7 @@ import { decodeKnowledge, isKnowledgeKind } from "./knowledge-data";
 import { compareKnowledge, matchesKnowledge, resolveKnowledgeFilters } from "./knowledge-filters";
 import type { KnowledgeFilters } from "./knowledge-filters.types";
 import { knowledgeMessages } from "./knowledge.messages";
+import { requireApplicationImplementations } from "./knowledge-rules";
 import type { KnowledgeReference } from "./knowledge.types";
 import { invalidKnowledge, knowledgeKind, knowledgeText } from "./knowledge-validation";
 
@@ -27,12 +27,12 @@ export class KnowledgeQueries {
   /* Общий владелец правил разрешения адресов; соединением владеет вызывающая сторона. */
   private readonly entities: EntityService;
   /* Соединение проекта; методы не открывают самостоятельный внешний снимок. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
 
   /**
    * Привязывает чтение к переданному соединению, не меняя его жизненный цикл.
    */
-  constructor(db: ProjectDatabase) {
+  constructor(db: ProjectStore) {
     this.db = db;
     this.entities = new EntityService(db);
   }
@@ -116,17 +116,7 @@ export class KnowledgeQueries {
     const records = this.db
       .listByField("implementation", "applicationId", application.id)
       .map((record) => decodeKnowledge(record, "implementation"));
-    const activeIds = new Set(
-      records.filter((record) => record.data.active).map((record) => record.id),
-    );
-    if (
-      activeIds.size !== application.data.implementationIds.length ||
-      application.data.implementationIds.some((id) => !activeIds.has(id))
-    ) {
-      throw new RelayError("CORRUPT_DATA", knowledgeMessages.participationMismatch, 1, {
-        id: application.id,
-      });
-    }
+    requireApplicationImplementations(application, records);
     return records;
   }
 

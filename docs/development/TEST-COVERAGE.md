@@ -63,6 +63,18 @@ ID и пути базы из конфига выбранного проекта.
 проверяет однократное чтение/декодирование реестра через symlink и доступность list/remove
 при утраченной базе зарегистрированного проекта.
 
+[Нормализованные части](../../packages/storage/tests/integration/components.integration.test.ts)
+проверяют собственные scoped ID и версии критериев, этапов и включений; owner не хранит
+вторую копию коллекции. Правка части сохраняет соседние версии и позиции, снятие/повторное
+включение создаёт новый ID с tombstone прежнего. Sparse import меняет только затронутого
+владельца, restore сохраняет точные части без echo, readonly не исправляет повреждение.
+[Миграции частей](../../packages/storage/tests/integration/components-migrations.integration.test.ts)
+сверяют карточки, scoped ID, алиасы, комментарии, квитанции и исходный outbox после
+перехода схем v2/v3 к v4 и повторного открытия.
+[Durable outbox](../../packages/storage/tests/integration/replication.integration.test.ts)
+защищает общий rollback записи и changeset, savepoint, receipt-only изменения и сохранение
+исходных bytes/digest исторических пакетов при миграции.
+
 ## Предметные сценарии Core
 
 | Гарантия                                                                                                                                               | Где проверяется                                                                                                                                                                  |
@@ -79,7 +91,7 @@ ID и пути базы из конфига выбранного проекта.
 | Повторное открытие зависимости транзитивно меняет вычисляемое выполнение; готовность отличается от сохранённой колонки                                 | [Задачи](../../packages/core/tests/integration/tasks.integration.test.ts)                                                                                                        |
 | Изменение критерия сбрасывает отметку; done ограничивает операции с критериями; комментарии не заменяются старым снимком содержания                    | [Задачи](../../packages/core/tests/integration/tasks.integration.test.ts)                                                                                                        |
 | Цели ограничены доской/приложением; снятые реализации не получают новые назначения; перенос доски сохраняет ID, алиасы и связи                         | [Задачи](../../packages/core/tests/integration/tasks.integration.test.ts)                                                                                                        |
-| Между чтением графа и записью задачи второе SQLite-соединение получает STORAGE_BUSY; после commit запись проходит с той же исходной ревизией           | [Транзакция задачи](../../packages/core/tests/integration/task-transaction.integration.test.ts)                                                                                  |
+| Новое обязательство между load и commit отклоняет done по graph predicate; независимый append сохраняется без подстановки свежего CAS                  | [Транзакция задачи](../../packages/core/tests/integration/task-transaction.integration.test.ts)                                                                                  |
 | Задача имеет одно текущее включение в открытый план/этап; перенос проверяет обе ревизии и откатывается при отказе второй записи                        | [Планирование](../../packages/core/tests/integration/planning.integration.test.ts)                                                                                               |
 | Начало плана требует цели и состава; завершение зависит от фактических обязательств; закрытый план ограничивает изменения                              | [Планирование](../../packages/core/tests/integration/planning.integration.test.ts)                                                                                               |
 | Выпуск требует завершённых планов с актуально выполненными задачами; released неизменяем, отменённый релиз перепланируется явно                        | [Планирование](../../packages/core/tests/integration/planning.integration.test.ts)                                                                                               |
@@ -118,6 +130,12 @@ ID и пути базы из конфига выбранного проекта.
 [Безымянные задачи](../../packages/core/tests/integration/queries-get-task-titles.integration.test.ts)
 сохраняют допустимый пустой/пробельный заголовок в обоих представлениях.
 
+[Версионированное групповое чтение](../../packages/core/tests/integration/queries-get-versioned.integration.test.ts)
+сравнивает full/summary-проекцию, порядок, повторы, адресные ошибки и generation
+с metadata только успешных ID. Снятый раздел проецируется без изменения raw-источника,
+summary не загружает полные записи и журнал. Конкурентная запись между command-port
+load отклоняет сменившийся anchor вместо смешанного результата.
+
 [Пакетные сценарии](../../packages/core/tests/integration/batch-workflow.integration.test.ts)
 проверяют связанные требования, реализации и задачи, план с этапами и критериями,
 перенос с двумя владельцами и неявно изменяемый состав приложения.
@@ -127,8 +145,10 @@ ID и пути базы из конфига выбранного проекта.
 проверяют адресные поля, историю, FI и структурированные типизированные ссылки.
 [Повторная доставка](../../packages/core/tests/integration/batch-replay.integration.test.ts)
 сохраняет исходный результат после reopen и последующих изменений, различает
-значимые части запроса и не повторяет адресное разрешение либо CAS. Проверка ключа
-удерживает writer-lock до commit; повтор не загружает текущие карточки и полный проект.
+значимые части запроса и не повторяет адресное разрешение либо CAS. Async load не держит
+writer-lock; короткий commit проверяет receipt под настоящим `BEGIN IMMEDIATE`.
+Доставка между load и commit возвращает выигравшую квитанцию без второго создания;
+replay не загружает текущие карточки и полный проект.
 [Формат и нормализация](../../packages/core/src/batch/batch-input.unit.test.ts) сохраняют
 порядок массивов, строки, исходные адреса и различие пропущенных/явных полей.
 [Декодер квитанции](../../packages/core/src/batch/batch-receipt.unit.test.ts) отклоняет
@@ -152,9 +172,219 @@ ID и пути базы из конфига выбранного проекта.
 проверяет выборку материалов сессии/намерения и затронутых детей, пакетное принятие и
 снимки references, сохранение ошибок повреждённых связей и коллизии ID участия.
 
+### Единый асинхронный исполнитель
+
+[Command executor](../../packages/core/tests/integration/command-executor.integration.test.ts)
+проверяет настоящую async-границу `CommandStore`: адресные загрузки без полного проекта,
+один commit/outbox, отказ после конкурентной записи без повторного исполнения и
+успешную независимую правку после подготовки. Поздний append сохраняется в журнале
+и первоначальной квитанции изменения содержания.
+[SQLite command port](../../packages/storage/tests/integration/command-port.integration.test.ts)
+проверяет stale anchor, положительные и отрицательные предикаты, phantom-вставки,
+preview ключа без резервирования, receipt-first commit, rollback counters/aliases/
+журналов/ordered tape и исходный инфраструктурный отказ. Отдельные утверждения
+проверяют стабильные ID подготовленных эффектов и выборку версий только нужных владельцев.
+
+[Versioned read и запись](../../packages/core/tests/integration/command-version.integration.test.ts)
+связывают `expectedVersion` с `versions.aggregateVersion`, отдельно от raw data
+и локальной ревизии. Изменение только дочерней части делает старый token устаревшим;
+append комментария его не меняет. Проверяются no-op, оба одновременно переданных
+предусловия, restore с другой локальной revision и запрет актуализации старого token
+в следующем шаге batch.
+[Команды знаний](../../packages/core/tests/integration/knowledge-command.integration.test.ts)
+проверяют приложение с доской и участием в одном commit, сохранённый снятый раздел
+и отказ после phantom-вставки истории приложения без расходования ключа.
+[Планирование](../../packages/core/tests/integration/planning-commands.integration.test.ts)
+проверяет version-only transfer обоих владельцев, stale targetVersion при свежем
+targetRevision, пустой membership predicate и raw scope с клиентским address guard.
+[История](../../packages/core/tests/integration/history-commands.integration.test.ts)
+сверяет checkpoints с именами/ревизиями каждого шага и отвергает конкурирующий takeover,
+занятый после подготовки run ID и нового ребёнка перед закрытием без частичной записи.
+
 Проверки общего resolver не означают, что каждый принимающий ссылку параметр каждого
 сервиса проверен отдельно. Аналогично тест одного перехода не доказывает полноту
 всех переходов. При изменении сценария сверяйте конкретные входы и утверждения.
+
+## Предметная репликация и переносимое состояние
+
+- [Обмен SQLite-реплик](../../packages/core/tests/integration/replication.integration.test.ts):
+  независимые поля, комментарии, отсутствие echo, сохранение поздней локальной записи,
+  неделимый batch и независимая доставка при конфликте. Коллизия ключа сохраняет ID,
+  не создаёт ложный алиас и не переписывает Markdown. Старый guard даёт `ADDRESS_CHANGED`,
+  отсутствие guard после renumber — `ADDRESS_GUARD_REQUIRED`, в том числе после reopen;
+  новая локальная правка делает старый fingerprint решения недействительным.
+- [Предметные инварианты](../../packages/core/tests/integration/replication-invariants.integration.test.ts)
+  сохраняют raw sectionId, проверяют циклы, единственность включения, session/run ownership,
+  неизменяемые checkpoints и исторические key snapshots.
+  [Составы](../../packages/core/tests/integration/replication-collections.integration.test.ts)
+  различают правку/снятие критерия, порядок этапов и снятие FI при конкурентной SI.
+- [Причинность](../../packages/core/tests/integration/replication-causality.integration.test.ts)
+  связывает запись с созданием нужного ID, но не привязывает независимый комментарий
+  к конфликтной правке содержания. [Порядок журнала](../../packages/core/tests/integration/replication-comment-order.integration.test.ts)
+  сравнивает публичную выдачу обеих реплик при одинаковых часах и встречных append.
+- [Доказательства приёма](../../packages/core/tests/integration/replication-acceptance.integration.test.ts)
+  отвергают чужой digest под собственным changesetId и устаревший receipt-only ack
+  без очистки очереди; версии слияния сохраняют обоих родителей. Решение не заменяет
+  несовместимую первоначальную квитанцию.
+- [Атомарный приём](../../packages/core/tests/integration/replication-commit-atomicity.integration.test.ts)
+  проверяет поздний SQL-отказ очистки outbox при ACK после импорта: данные, части, квитанция,
+  base, поколение и outbox откатываются вместе; повтор сохраняет весь пакет.
+- [Ordered publication](../../packages/core/tests/integration/replication-publication.integration.test.ts)
+  проверяет переходы на границах каждого шага, в том числе no-op с явной целью;
+  complete/publish перед последующим reopen не оцениваются только по конечному snapshot.
+  Пропущенная публикация требует chain, подмена ленты отклоняется до ack.
+  Локальный CAS не переносится, импорт увеличивает свой guard без обратного echo.
+- [Технический source](../../packages/core/tests/integration/replication-technical-source.integration.test.ts)
+  отвергает обычную mutation без named tape, техническую маскировку, legacy-гибрид
+  и повтор genesis поверх непустой основы, сохраняя canonical state/guard/outbox.
+  [Область вложенного перехода](../../packages/core/tests/integration/replication-nested-scope.integration.test.ts)
+  связывает targets с реально изменённым этапом/составом и сохраняет независимые
+  изменения соседей; отказ не импортирует receipt или частичные эффекты.
+- [Custom text](../../packages/core/tests/integration/replication-custom.integration.test.ts)
+  сверяет scope конкретной исходной boundary, сохранение остальных эффектов batch,
+  original source/receipt и авторство поправки. Незатронутая запись/поле отклоняются;
+  независимое продвижение remote не переписывает immutable решение.
+- [History capability](../../packages/core/tests/integration/replication-proof.integration.test.ts)
+  проверяет точную immutable цель, отказ fabricated token и непроверенного prefix
+  перед declared base. При допустимом reuse поздняя локальная запись и pending сохраняются.
+- [Ограниченная публикация](../../packages/core/tests/integration/replication-bounded-publication.integration.test.ts)
+  проверяет последовательные SQL-окна до decode, неделимый oversized source,
+  cursor после reopen, причинный порядок, holes, exact receipts/proofs и локальный остаток.
+  Deferred dependencies остаются pending с причинами, не конфликтами.
+  [Guards окна](../../packages/core/tests/integration/replication-bounded-guards.integration.test.ts)
+  отвергают receipt-only гонку и чужой own digest вне окна, сохраняя поздние записи.
+  [Bounded resolve](../../packages/core/tests/integration/replication-bounded-resolution.integration.test.ts)
+  сохраняет scoped witness и immutable решение при отдельной доставке causal tail.
+- Чистые [Markdown merge](../../packages/core/src/sync-merge/text.unit.test.ts)
+  и [порядок ID](../../packages/core/src/sync-merge/order.unit.test.ts) сравнивают точные
+  ожидаемые значения: независимые изменения, совпадающие вставки, снятия, конфликтные
+  пересечения/циклы, CRLF и непарные surrogate без нормализации.
+
+## Процессы, службы и восстановление Runtime
+
+[Процессный клиент](../../packages/project-runtime/tests/integration/git-sync-process.integration.test.ts)
+проверяет stdin-envelope и согласованность ответа с exit code, строгий UTF-8,
+большие одновременные потоки, несовместимый override бинарника и discovery с пробелами/
+Unicode. [Health supervisor](../../packages/project-runtime/tests/integration/git-sync-supervisor.integration.test.ts)
+проверяет capability, физический home и instance через реальный loopback;
+живой PID или ответ другого экземпляра не подтверждает readiness.
+
+[Correlation клиента](../../packages/project-runtime/src/git-sync/request-correlation.unit.test.ts)
+проверяет назначение operationId до version probe/spawn, неизменность входного объекта
+и сохранение ID/code/exit/cause при process timeout. Read/wait с requestId не получает
+новый operationId, непрочитанный envelope даёт unknown, достоверные details компонента
+не заменяются предположением о результате.
+
+[Службы: unit](../../packages/project-runtime/src/git-sync/service.unit.test.ts)
+проверяют unit/plist/XML, точные argv, текущего Windows-пользователя, явные операции
+native manager и отдельную health-границу через fixtures. Это не установка службы
+на пользовательском хосте. [Windows XML](../../packages/project-runtime/tests/integration/git-sync-service-format.integration.test.ts)
+дополняет генерацию нативным разбором формата на Windows.
+
+[Native lifecycle](../../packages/project-runtime/tests/native/service.native.test.ts)
+защищает enable/re-enable, новый instance после самостоятельного restart native manager,
+disable и сохранность проекта до cleanup fixture. Это отдельный opt-in набор;
+условия запуска и границы проверки login/reboot — в
+[организации нативной приёмки](../../tests/README.md#отдельная-нативная-приёмка-служб).
+
+[Общий guardian](../../packages/project-runtime/tests/integration/process-guardian.integration.test.ts)
+проверяет bounded drain, deadline/отмену после выхода непосредственного ребёнка,
+передачу stdin lease, согласованность протокола и ограничения захвата вывода.
+Условия платформ в тесте существенны: escaped-потомки не объявлены частью групповой
+гарантии macOS.
+[Восстановление](../../packages/project-runtime/tests/integration/restoration.integration.test.ts)
+проверяет staging и эксклюзивную публикацию новой БД/конфига, совпадение projectId,
+отказ замены рабочей БД, сохранность WAL/SHM и чужого файла при гонке или recovery.
+[Поздний writer](../../packages/project-runtime/tests/integration/restoration-late-writer.integration.test.ts)
+фиксирует запись вторым процессом после публикации hardlink и проверяет сохранность
+этой ревизии при проигрыше config и crash, даже при прежнем inode и исчезнувших WAL/SHM.
+Повтор возвращает `RESTORE_RECOVERY_REQUIRED` до materializer; сохраняются intent,
+рабочая БД и последняя staging-копия, а старое состояние не выдаётся за новый snapshot.
+[Явный resume](../../packages/project-runtime/tests/integration/restoration-resume.integration.test.ts)
+сравнивает точные данные, `replicaId` и outbox после позднего commit и завершения
+локальной привязки. Проверяются ID из конфига/аргумента без home scan, read-only
+sync validator, живой public WAL, чужой target того же projectId, legacy/copied intent,
+сомнительные staging-алиасы и отказ validator без публикации. Cleanup failure
+сохраняет причину и companion-файл; после полной уборки `RESTORE_NOT_PENDING`
+не вызывает validator и не меняет БД.
+
+## Git-транспорт и постоянный обмен
+
+[Snapshot codec](../../apps/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip
+первичных записей и частей, безопасные имена, exact Markdown и lossless JSON для
+непарных surrogate. Отдельно сохраняются исходный publication payload и исторические
+ревизии; неизвестный путь и несовместимый manifest отвергаются.
+[Markdown-дескрипторы](../../apps/git-sync/src/snapshot/codec-markdown.unit.test.ts)
+проверяют точные bytes/SHA-256, BOM/CRLF/empty/noLF, lone-surrogate fallback и отказ
+неверных descriptors/UTF-8. [JSON layout](../../apps/git-sync/src/snapshot/json.unit.test.ts)
+защищает lex UTF-16 pretty bytes, numeric-like ключи и duplicate keys.
+[Смешанная история layout 1→2](../../apps/git-sync/tests/integration/snapshot-layout.integration.test.ts)
+сохраняет DTO, версии, source digests и прежние Git bytes без idle echo. Отказ Core
+для layout 1 либо byte digest для layout 2 не меняет SQLite, pending и accepted cursor.
+[История Git](../../apps/git-sync/tests/integration/git-history.integration.test.ts)
+проверяет пакетное чтение промежуточных snapshots, общие неизменённые blobs и отказ
+нелинейной истории/symlink до применения.
+
+[Транспорт](../../apps/git-sync/tests/integration/transport.integration.test.ts)
+содержит проверки переиспользования неизменного HEAD, ограниченного числа Git-процессов
+для набора файлов, отказа подмены origin/общей истории и безопасного чтения дерева.
+[Гонки](../../apps/git-sync/tests/integration/races.integration.test.ts) согласуют
+два push одного HEAD и локальную запись во время fetch.
+[Обмен](../../apps/git-sync/tests/integration/exchange.integration.test.ts)
+проверяет потерянный push-ответ, точный набор ack, сохранение позднего pending,
+отсутствие echo, различие ahead и числа changeset, refresh без push/импорта.
+[Bounded transport](../../apps/git-sync/tests/integration/bounded-publication.integration.test.ts)
+проверяет durable cursor через reopen, пустые окна без ACK, независимый хвост,
+реальный pending после одного успешного окна и full diagnostics без hot blocked scan.
+[Повторы окна](../../apps/git-sync/tests/integration/bounded-retry.integration.test.ts)
+сохраняют исходный cursor/source IDs при non-FF и неизвестном push, а затем принимают
+только фактически опубликованные proofs.
+[Аварийное восстановление](../../apps/git-sync/tests/integration/crash-recovery.integration.test.ts)
+использует реальные выходы процессов после Git commit до push, после принятого push
+до локального ack и после SQLite accept до обновления Git cursor. Проверяются исходные
+IDs/digests, receipt/comment, поздний pending, локальные версии/части и отсутствие echo
+после нового открытия и replay.
+
+[SSH-профиль](../../apps/git-sync/tests/integration/ssh-profile.integration.test.ts)
+проверяет foreground-настройки стандартного клиента с сохранением identity/proxy,
+точный custom `core.sshCommand` и отсутствие записи maintenance overrides в config.
+[Guardian компонента](../../apps/git-sync/tests/process/guardian.process.test.ts)
+проверяет обычный exit, output budget, deadline, отмену и смерть владельца до cleanup
+fixture. На Linux/Windows отдельные случаи используют subreaper/Job Object;
+для macOS остаётся управляемая собственная process group без обещания atomic fork-barrier.
+[Foreground lease](../../apps/git-sync/tests/process/foreground-lease.process.test.ts)
+связывает SIGKILL прокси с остановкой supervisor/workers и сохранением desired state.
+[Resume компонента](../../apps/git-sync/tests/process/restore-resume.process.test.ts)
+сохраняет поздний документ и исходный replication status в прежней БД. Git-trap
+проверяет отсутствие обращения к Git, результат содержит `sourceCheckpoint: null`;
+сочетание resume с remote отклоняется.
+
+[Процессный протокол](../../apps/git-sync/tests/process/protocol.process.test.ts)
+проверяет оболочку бинарника, отказ несовместимой версии, restore без предварительной
+БД и одного responsive worker, который получает remote при пустом локальном outbox.
+[Supervisor](../../apps/git-sync/tests/process/supervisor.process.test.ts)
+проверяет обслуживание независимых проектов при общем бюджете, недоступный соседний
+origin, новый instance после crash и сохранение desired `stopped`. После настоящего
+перезапуска supervisor барьер ждёт reconcile нового instance: остановленная БД
+не получает worker, другой проект продолжает публикацию без нового start/auto enable;
+настройки и данные сохранены.
+
+[Исход операции](../../apps/git-sync/tests/process/control-outcome.process.test.ts)
+отделяет wait deadline от readiness, читает live и terminal состояния одного ID
+и не выполняет повторный submit после expiry. [Долгий now](../../apps/git-sync/tests/process/long-now.process.test.ts)
+удерживает реальный Git-запрос до барьера: worker остаётся отзывчивым, а request.get
+позже возвращает completed. Платформенные условия этого сценария не подменяются
+результатом запуска на другой ОС.
+
+[Командный сценарий](../../apps/git-sync/tests/integration/team-replication.integration.test.ts)
+содержит конечные волны 50 независимых SQLite/Git-реплик: одинаковые предварительные
+ключи, конкретные ID-связи и квитанции, non-FF, конфликт, offline-return, потерянный
+ответ и restore. Assertions сравнивают ожидаемые записи, публичные журналы и ack,
+а также одну общую ветку. Число реплик здесь описывает сценарий корректности,
+не измеренную одновременную пропускную способность.
+Встроенная [волна recovery](../../apps/git-sync/tests/integration/team-helpers/team-recovery.ts)
+сохраняет позднюю запись между materialization и push и исходный outbox после аварии;
+новый процесс публикует те же IDs/digests, которые затем входят в общий exact proof set.
 
 ## CLI: ввод, вывод и соединение компонентов
 
@@ -234,6 +464,42 @@ ID `none`, явный false, конфликт источников фильтр�
 и штатный приоритет help/version. [Запись Markdown](../../apps/cli/tests/integration/dash-markdown.integration.test.ts)
 проверяет отсутствие записи при отказе и точный текст, переданный через `--поле=`.
 
+[Async writers CLI](../../apps/cli/tests/integration/async-writers.integration.test.ts)
+удерживают соединение до settlement Promise при успехе и отказе; второе SQLite-соединение
+может писать, пока обработчик ждёт I/O. [Адресные guards](../../apps/cli/tests/integration/address-guards.integration.test.ts)
+проверяют исходные `expectedId` и CAS, отсутствие записи после отказа, raw scope без
+предварительного QueryService-чтения и replay receipt до новых guards.
+[Пагинация](../../apps/cli/tests/integration/pagination.integration.test.ts)
+не включает `--expected-addresses` и версионные write-only флаги в fingerprint/команду
+продолжения readonly-запроса.
+
+[Переносимые версии CLI](../../apps/cli/tests/integration/portable-versions.integration.test.ts)
+проверяют `get --with-versions` без изменения full/summary-проекции, отдельную
+`meta.versions` одного anchor и отказ при конкурентном commit между загрузками.
+Token-only запись и оба CAS проверяются независимо от адресного guard; stale token
+отклоняет no-op без записи. Отдельные assertions защищают токен существующего product
+owner, принадлежность `--target-version` целевому плану, stale `--target-revision`
+и атомарный перенос с сохранением задачи.
+
+[Адаптер Git Sync](../../apps/cli/src/commands/git-sync/register.unit.test.ts)
+проверяет точную передачу action/options/input, ошибку `now` без retry и сохранение
+code/exitCode/details. Одиночный и workspace status сохраняют одинаковую форму items,
+частичные ошибки и `null` счётчиков; конфликт сам по себе не делает чтение ошибочным.
+Resolve сохраняет JSON из inline/file/stdin, foreground не получает лишний JSON-envelope,
+а help/version не открывают проект и не читают stdin.
+[Correlation CLI](../../apps/cli/src/commands/git-sync/request.unit.test.ts)
+сверяет request get и ожидание now/refresh без operationId, сохранение unknown без
+результата и retry, ID в text/JSON ошибке и независимые исходы workspace refresh.
+Неверный wait budget, ожидание без refresh и один ID для всего workspace отклоняются до port.
+[Blocked-диагностика CLI](../../apps/cli/src/commands/git-sync/blocked.unit.test.ts)
+сохраняет оба массива conflicts/blocked, причины ожидания без fingerprint и отказ
+resolve blocked без повторного запроса. Full remaining diagnostics и pending
+не подменяются ограниченным preview included/deferred/hasMore.
+[Адаптер resume](../../apps/cli/src/commands/git-sync/restore.unit.test.ts)
+сверяет `resume/projectId`, отсутствие сериализованного undefined, конфликт источников
+до запуска компонента, сохранение `recovery.failure` и исходных кодов recovery-ошибок
+без retry. Help/version остаются автономными.
+
 ## Поставляемый бинарник и пользовательские маршруты
 
 [Процессный набор CLI](../../apps/cli/tests/process/cli.process.test.ts) проверяет
@@ -273,6 +539,16 @@ JSON-файла, применение через stdin, локальные сс�
 нового документа с архивированием прежнего, полное и краткое групповое чтение.
 Отдельные запуски восстанавливают квитанцию и повторяют исходный пакет с тем же ключом.
 
+Новые пользовательские маршруты Git Sync разделены по наблюдаемой гарантии:
+
+- [Обмен и restore](../../tests/e2e/git-sync-workflow.e2e.test.ts) сохраняет две записи
+  с первоначально одинаковым ключом, ID-связи и независимые поля через реальные бинарники.
+- [Конфликт](../../tests/e2e/git-sync-conflict.e2e.test.ts) проверяет `now` с exit 4 /
+  `SYNC_CONFLICT`, успешный status, полные base/local/remote и доставку решения
+  с прочитанным fingerprint.
+- [Worker](../../tests/e2e/git-sync-worker.e2e.test.ts) проверяет readiness `auto enable`,
+  тот же instance из следующего CLI-процесса и сохранение stopped без ложного retry.
+
 ## Границы карты
 
 - Модульные проверки есть у Contracts, CLI и Core: общие правила идентичности,
@@ -282,14 +558,18 @@ JSON-файла, применение через stdin, локальные сс�
 - Ограниченное чтение карточек проверяется для базовых страниц без предметных фильтров
   и явных составов этапа/релиза.
   Это не утверждение об ограниченной стоимости всех поисков и вычисляемых списков.
-- Техническая миграция SQLite v1 → v2 проверяется отдельно от переноса данных первой
-  реализации Relay; перенос её JSON-хранилища не входит в эти проверки.
+- Технические миграции SQLite, включая нормализацию v4, проверяются отдельно от переноса
+  данных первой реализации Relay; перенос её JSON-хранилища не входит в эти проверки.
+- [CI-матрица](../../.github/workflows/ci.yml) задаёт нативные Linux/macOS/Windows-запуски.
+  Генератор конфигурации, fake manager и Linux-прогон группового примитива не являются
+  нативной приёмкой другой ОС. Платформенные условия и границы ownership читаются
+  вместе с конкретными assertions; macOS не обещает containment произвольных daemonized helpers.
 - Конкурентные функциональные случаи и SIGKILL владельца mutex не измеряют предел
   пропускной способности и не доказывают устойчивость всех данных к отключению питания.
 - Измерения количества команд в секунду, p95/p99, памяти и пределов размера проекта
   относятся к [ручной нагрузке](CLI-PERFORMANCE.md); исполняемый стенд пока не создан.
-- Server, Web, MCP, Git-синхронизация и восстановление из origin не входят в реализованную
-  локальную CLI и не считаются покрытыми этими наборами.
+- Server, Web, HTTP API, PostgreSQL и MCP относятся к следующим этапам и не считаются
+  покрытыми этими наборами.
 
 При изменении гарантии обновите соответствующую строку и ссылку. Если проверка удалена,
 укажите оставшееся подтверждение либо уберите утверждение о покрытии. Новые случаи

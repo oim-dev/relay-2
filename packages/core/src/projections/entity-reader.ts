@@ -4,7 +4,7 @@ import {
   type KnowledgeRecord,
   type ProjectEntity,
 } from "@relay/contracts";
-import type { ProjectDatabase } from "@relay/storage";
+import type { ProjectStore } from "@relay/storage";
 import { EntityService } from "../entities/entities";
 import { entityMessages } from "../entities/entity.messages";
 import {
@@ -12,10 +12,8 @@ import {
   projectDocumentSection,
   type DocumentSectionIndex,
 } from "../knowledge/document-sections";
-import { decodeHistoryCheckpoint, decodeHistorySession } from "../history/history-data";
 import { decodeKnowledge } from "../knowledge/knowledge-data";
-import { decodePlanning } from "../planning/planning-data";
-import { taskRecord } from "../tasks/task-data";
+import { decodeEntityRecord } from "./entity-record";
 
 /**
  * Проверенное чтение разных предметных видов в пределах одной операции.
@@ -24,7 +22,7 @@ import { taskRecord } from "../tasks/task-data";
  */
 export class EntityReader {
   /* Соединение проекта, снимок которого удерживается вызывающим сценарием. */
-  private readonly db: ProjectDatabase;
+  private readonly db: ProjectStore;
   /* Общий resolver адресов и чтение сырых карточек из того же соединения. */
   private readonly entities: EntityService;
   /* Проект из снимка; null означает известное отсутствие, undefined — необходимость чтения. */
@@ -40,7 +38,7 @@ export class EntityReader {
    * null фиксирует отсутствие проекта в полном составе; пропуск аргумента оставляет ленивое чтение.
    * Декодирование отложено до обращения, чтобы doctor мог собрать ошибки всех карточек.
    */
-  constructor(db: ProjectDatabase, project?: Readonly<EntityRecord> | null) {
+  constructor(db: ProjectStore, project?: Readonly<EntityRecord> | null) {
     this.db = db;
     this.entities = new EntityService(db);
     this.projectRecord = project;
@@ -79,25 +77,14 @@ export class EntityReader {
    * Неизвестный раздел отклоняется; легально удалённый проецируется в null без изменения записи.
    */
   decode(record: Readonly<EntityRecord>): ProjectEntity {
-    switch (record.kind) {
-      case "project":
-        return record === this.projectRecord ? this.project() : decodeKnowledge(record, "project");
-      case "task":
-        return taskRecord(record);
-      case "work-plan":
-      case "release":
-        return decodePlanning(record, this.db.projectId);
-      case "work-session":
-        return decodeHistorySession(record);
-      case "work-checkpoint":
-        return decodeHistoryCheckpoint(record);
-      case "document": {
-        const document = decodeKnowledge(record, "document");
-        this.sections ??= indexDocumentSections(this.project());
-        return projectDocumentSection(document, this.sections);
-      }
-      default:
-        return decodeKnowledge(record, record.kind);
+    if (record.kind === "project" && record === this.projectRecord) {
+      return this.project();
     }
+    const entity = decodeEntityRecord(record, this.db.projectId);
+    if (entity.kind === "document") {
+      this.sections ??= indexDocumentSections(this.project());
+      return projectDocumentSection(entity, this.sections);
+    }
+    return entity;
   }
 }

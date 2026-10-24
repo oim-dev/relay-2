@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { BatchService } from "../../src/batch/batch";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { TasksService } from "../../src/tasks/tasks";
-import { expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import { expectAsyncRelayError, withEntityDatabase } from "./helpers/entity-fixture";
 
 const invalidSteps = [
   {
@@ -37,15 +37,15 @@ const invalidSteps = [
 describe("Атомарность предметного пакета", () => {
   test.each(invalidSteps)(
     "$name откатывает сущности, комментарий, алиасы, счётчики и квитанцию",
-    ({ step, code, path }) => {
-      withEntityDatabase((db) => {
+    async ({ step, code, path }) => {
+      await withEntityDatabase(async (db) => {
         const knowledge = new KnowledgeService(db);
-        const original = knowledge.create(
+        const original = await knowledge.create(
           "document",
           { name: "Старый", body: "Сохранить" },
           "author",
         );
-        const task = new TasksService(db).create({ title: "Исходная задача" }, "author");
+        const task = await new TasksService(db).create({ title: "Исходная задача" }, "author");
         const before = db.list();
         const generation = db.getGeneration();
         const batch = new BatchService(db);
@@ -66,7 +66,7 @@ describe("Атомарность предметного пакета", () => {
           ],
         };
 
-        const error = expectRelayError(
+        const error = await expectAsyncRelayError(
           () => batch.execute(input, { actor: "agent", operationKey: "rollback" }),
           code,
         );
@@ -81,17 +81,27 @@ describe("Атомарность предметного пакета", () => {
         expect(db.getIdentity("DOC-RENAMED")).toBeUndefined();
         expect(db.getBatchReceipt("rollback")).toBeUndefined();
         expect(
-          knowledge.create("document", { name: "После отката", body: "Содержание" }, "author").key,
+          (
+            await knowledge.create(
+              "document",
+              { name: "После отката", body: "Содержание" },
+              "author",
+            )
+          ).key,
         ).toBe("DOC-2");
       });
     },
   );
 
-  test("устаревший CAS откатывает предшествующее создание без подстановки свежей ревизии", () => {
-    withEntityDatabase((db) => {
+  test("устаревший CAS откатывает предшествующее создание без подстановки свежей ревизии", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const initial = knowledge.create("document", { name: "ТЗ", body: "Первая версия" }, "author");
-      const current = knowledge.update(
+      const initial = await knowledge.create(
+        "document",
+        { name: "ТЗ", body: "Первая версия" },
+        "author",
+      );
+      const current = await knowledge.update(
         "document",
         initial.id,
         { body: "Актуальная версия" },
@@ -99,7 +109,7 @@ describe("Атомарность предметного пакета", () => {
       );
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -132,15 +142,15 @@ describe("Атомарность предметного пакета", () => {
     });
   });
 
-  test("чужая ревизия критерия отклоняется и при совпадении чисел у двух авторизованных владельцев", () => {
-    withEntityDatabase((db) => {
+  test("чужая ревизия критерия отклоняется и при совпадении чисел у двух авторизованных владельцев", async () => {
+    await withEntityDatabase(async (db) => {
       const tasks = new TasksService(db);
-      const first = tasks.create({ title: "Первая" }, "author");
-      const second = tasks.create({ title: "Вторая" }, "author");
+      const first = await tasks.create({ title: "Первая" }, "author");
+      const second = await tasks.create({ title: "Вторая" }, "author");
       const before = db.list("task");
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -180,12 +190,12 @@ describe("Атомарность предметного пакета", () => {
     });
   });
 
-  test("комментарий не даёт скрытый CAS первой правки существующей задачи", () => {
-    withEntityDatabase((db) => {
-      const task = new TasksService(db).create({ title: "Исходная" }, "author");
+  test("комментарий не даёт скрытый CAS первой правки существующей задачи", async () => {
+    await withEntityDatabase(async (db) => {
+      const task = await new TasksService(db).create({ title: "Исходная" }, "author");
       const generation = db.getGeneration();
 
-      const error = expectRelayError(
+      const error = await expectAsyncRelayError(
         () =>
           new BatchService(db).execute(
             {
@@ -216,15 +226,15 @@ describe("Атомарность предметного пакета", () => {
     });
   });
 
-  test("check выполняет смешанные изменения, полностью откатывает и не расходует ключ", () => {
-    withEntityDatabase((db) => {
+  test("check выполняет смешанные изменения, полностью откатывает и не расходует ключ", async () => {
+    await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
-      const existing = knowledge.create(
+      const existing = await knowledge.create(
         "document",
         { name: "Предыдущая спецификация", body: "Старый текст" },
         "author",
       );
-      const task = new TasksService(db).create({ title: "Работа" }, "author");
+      const task = await new TasksService(db).create({ title: "Работа" }, "author");
       const before = db.list();
       const generation = db.getGeneration();
       const input = {
@@ -242,7 +252,7 @@ describe("Атомарность предметного пакета", () => {
       };
       const batch = new BatchService(db);
 
-      const checked = batch.execute(input, {
+      const checked = await batch.execute(input, {
         actor: "agent",
         operationKey: "publication",
         check: true,
@@ -255,7 +265,7 @@ describe("Атомарность предметного пакета", () => {
       expect(db.list()).toEqual(before);
       expect(db.getGeneration()).toBe(generation);
       expect(db.getBatchReceipt("publication")).toBeUndefined();
-      const applied = batch.execute(input, { actor: "agent", operationKey: "publication" });
+      const applied = await batch.execute(input, { actor: "agent", operationKey: "publication" });
       expect(applied.status).toBe("committed");
       expect(applied.items[0]?.key).toBe(checked.items[0]?.key);
       expect(applied.items[0]?.id).not.toBe(checked.items[0]?.id);
@@ -266,12 +276,12 @@ describe("Атомарность предметного пакета", () => {
     });
   });
 
-  test("повторная ссылка на устаревшую локальную ревизию не обновляется автоматически", () => {
-    withEntityDatabase((db) => {
+  test("повторная ссылка на устаревшую локальную ревизию не обновляется автоматически", async () => {
+    await withEntityDatabase(async (db) => {
       const batch = new BatchService(db);
       const generation = db.getGeneration();
 
-      expectRelayError(
+      await expectAsyncRelayError(
         () =>
           batch.execute(
             {

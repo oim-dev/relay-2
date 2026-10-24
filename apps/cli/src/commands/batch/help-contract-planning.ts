@@ -5,6 +5,7 @@ import {
   defineContract,
   nullableField,
   optionalField,
+  preconditionField,
   requiredField,
   updateField,
 } from "./help-contract-fields";
@@ -253,7 +254,8 @@ function stageHelpContractFactories(): ReadonlyMap<string, BatchHelpContractFact
             targetPlan: requiredField(),
             targetStage: requiredField(),
             reason: requiredField(),
-            targetRevision: requiredField(),
+            targetRevision: preconditionField("targetVersion"),
+            targetVersion: preconditionField("targetRevision"),
           },
           [rules.transfer, rules.transferState],
           {
