@@ -55,6 +55,10 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
       pid: waitForReady ? 1234 : null,
       heartbeat: waitForReady ? "2026-10-24T00:00:00Z" : null,
     }),
+    /**
+     * Unit fixture не владеет файлами SQLite; реальный межпроцессный барьер проверяется интеграцией.
+     */
+    supervisorLockProbe: (): "free" => "free",
     serviceFiles: {
       /**
        * Читает только память fixture.
@@ -581,6 +585,45 @@ describe("Конфигурации пользовательского supervisor
         failureCode: "GIT_SYNC_CANCELLED",
         failureExit: 143,
         failurePhase: null,
+      },
+    },
+    {
+      name: "busy mutex после COM расходует общий stop budget и запрещает Run",
+      scenario: "lock-timeout",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "wait-supervisor-lock",
+      },
+    },
+    {
+      name: "SIGTERM при busy mutex сохраняет код отмены и запрещает Run",
+      scenario: "lock-cancelled",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_CANCELLED",
+        failureExit: 143,
+        failurePhase: null,
+      },
+    },
+    {
+      name: "освобождение mutex после истечения stop budget не разрешает Run",
+      scenario: "lock-expired-after-probe",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "wait-supervisor-lock",
       },
     },
   ])("Windows monotonic stop: $name", ({ scenario, pollBudgets, mutations, result }) => {

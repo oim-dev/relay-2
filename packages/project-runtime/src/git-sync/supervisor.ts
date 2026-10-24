@@ -2,6 +2,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { RelayError } from "@relay/contracts";
+import { acquireLocalLock } from "@relay/storage";
 import { hasCode } from "../configuration/files";
 import { gitSyncMessages as messages } from "./git-sync.messages";
 import type {
@@ -12,6 +13,36 @@ import type {
 
 const MAX_HEALTH_BYTES = 64 * 1024;
 const READINESS_INTERVAL_MS = 50;
+
+/**
+ * Проверяет освобождение lifetime mutex supervisor настоящим захватом того же SQLite lock.
+ * Отсутствующий файл означает отсутствие владельца на момент проверки; существующий не удаляется.
+ * Успешный захват сразу освобождается и не резервирует следующий запуск. PID, endpoint и native
+ * state не заменяют этот барьер: Windows может освободить файловые locks позже завершения процесса.
+ * Только LOCAL_LOCK_BUSY означает busy; ошибки открытия и освобождения передаются вызывающему.
+ */
+export function probeGitSyncSupervisorLock(home: string): "free" | "busy" {
+  let path: string;
+  try {
+    path = realpathSync(join(home, "git-sync/supervisor.json.ownership.sqlite"));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) {
+      return "free";
+    }
+    throw error;
+  }
+  let lock;
+  try {
+    lock = acquireLocalLock(path);
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "LOCAL_LOCK_BUSY") {
+      return "busy";
+    }
+    throw error;
+  }
+  lock.release();
+  return "free";
+}
 
 /**
  * Сопоставляет версию поставки с поколением локального control-протокола.

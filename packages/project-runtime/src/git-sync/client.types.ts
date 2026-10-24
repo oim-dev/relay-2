@@ -40,6 +40,8 @@ export interface GitSyncEnvironment {
     home: string,
     waitForReady: boolean,
   ) => Promise<GitSyncSupervisorStatus>;
+  /* Подмена технического SQLite-барьера в тестах manager; free требует реального захвата/release. */
+  readonly supervisorLockProbe?: (home: string) => "free" | "busy";
   /* Deadline готовности после service enable; по умолчанию 10 секунд. */
   readonly readinessTimeoutMs?: number;
   /* Deadline запроса, по умолчанию 120 секунд; не ограничивает foreground supervise. */

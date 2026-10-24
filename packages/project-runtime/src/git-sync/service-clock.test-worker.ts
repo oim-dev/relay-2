@@ -16,6 +16,9 @@ assert.ok(
     "expired-after-probe",
     "cancelled",
     "cancelled-at-deadline",
+    "lock-timeout",
+    "lock-expired-after-probe",
+    "lock-cancelled",
   ].includes(scenario ?? ""),
 );
 const configuration = createServiceConfiguration({
@@ -59,6 +62,25 @@ const environment: GitSyncEnvironment = {
   version: "0.0.0",
   timeoutMs: configuredBudget,
   signal: cancellation.signal,
+  /**
+   * Имитирует занятость после завершения manager, расходуя тот же бюджет либо отменяя ожидание.
+   */
+  supervisorLockProbe(): "free" | "busy" {
+    assert.ok(stopped);
+    if (scenario === "lock-timeout") {
+      monotonic = 110.5;
+      return "busy";
+    }
+    if (scenario === "lock-expired-after-probe") {
+      monotonic = 110.5;
+      return "free";
+    }
+    if (scenario === "lock-cancelled") {
+      cancellation.abort("SIGTERM");
+      return "busy";
+    }
+    return "free";
+  },
   /**
    * Возвращает только in-memory COM-ответы. Ни одна ОС-команда не запускается.
    * Лишний poll завершается ошибкой, чтобы регрессия старого deadline не зависла.

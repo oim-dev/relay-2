@@ -4,6 +4,7 @@ import type { GitSyncEnvironment } from "./client.types";
 import { gitSyncMessages as messages } from "./git-sync.messages";
 import { runServiceCommand as native } from "./service-command";
 import { serviceFiles } from "./service-files";
+import { probeGitSyncSupervisorLock } from "./supervisor";
 import type { WindowsServiceSnapshot } from "./service-windows.types";
 import type {
   GitSyncServiceAction,
@@ -112,9 +113,20 @@ export async function windowsState(
 }
 
 /**
- * Останавливает старую регистрацию до замены definition и ждёт подтверждения manager.
- * End выполняется один раз; затем повторяются только readonly COM-наблюдения.
- * Ready/Disabled без исчезновения running instances не разрешают новый Run.
+ * Определяет завершение задачи в manager; это ещё не подтверждение освобождения её файловых locks.
+ */
+function taskStopped(snapshot: WindowsServiceSnapshot): boolean {
+  return (
+    !snapshot.native.registered ||
+    (snapshot.native.state === "stopped" && snapshot.runningInstances === 0)
+  );
+}
+
+/**
+ * Останавливает старую регистрацию до замены definition и ждёт manager и реальный SQLite mutex S.
+ * End выполняется один раз; затем повторяются только COM-наблюдения и технический захват/release.
+ * Ready/Disabled, отсутствие instances и endpoint сами по себе не разрешают Run или успешный disable.
+ * Чужой живой владелец не останавливается и сохраняет busy до deadline без замены definition.
  * Монотонный бюджет не зависит от коррекции часов ОС; native timeout округляется вверх до ms.
  */
 async function stopWindowsTask(
@@ -122,36 +134,52 @@ async function stopWindowsTask(
   environment: GitSyncEnvironment,
   initial: WindowsServiceSnapshot,
 ): Promise<WindowsServiceSnapshot> {
-  if (
-    !initial.native.registered ||
-    (initial.native.state === "stopped" && initial.runningInstances === 0)
-  ) {
-    return initial;
-  }
   const timeoutMs = environment.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS;
   const deadline = performance.now() + timeoutMs;
-  await native(environment, "schtasks.exe", ["/End", "/TN", config.id]);
+  if (!taskStopped(initial)) {
+    await native(environment, "schtasks.exe", ["/End", "/TN", config.id]);
+  }
   let current = initial;
   for (;;) {
+    if (environment.signal?.aborted) {
+      throw new RelayError(
+        "GIT_SYNC_CANCELLED",
+        messages.processCancelled,
+        environment.signal.reason === "SIGTERM" ? 143 : 130,
+      );
+    }
     const remaining = deadline - performance.now();
     if (remaining <= 0) {
-      throw new RelayError("GIT_SYNC_SERVICE_FAILED", messages.nativeFailed, 4, {
-        id: config.id,
-        phase: "wait-stopped",
-        timeoutMs,
-        native: current.native,
-        runningInstances: current.runningInstances,
+      throw new RelayError(
+        "GIT_SYNC_SERVICE_FAILED",
+        taskStopped(current) ? messages.supervisorLockBusy : messages.nativeFailed,
+        4,
+        {
+          id: config.id,
+          phase: taskStopped(current) ? "wait-supervisor-lock" : "wait-stopped",
+          timeoutMs,
+          native: current.native,
+          runningInstances: current.runningInstances,
+        },
+      );
+    }
+    if (!taskStopped(current)) {
+      current = await readWindowsSnapshot(config, {
+        ...environment,
+        timeoutMs: Math.ceil(remaining),
       });
     }
-    current = await readWindowsSnapshot(config, {
-      ...environment,
-      timeoutMs: Math.ceil(remaining),
-    });
-    if (
-      !current.native.registered ||
-      (current.native.state === "stopped" && current.runningInstances === 0)
-    ) {
-      return current;
+    if (taskStopped(current)) {
+      if (environment.signal?.aborted || performance.now() >= deadline) {
+        continue;
+      }
+      const lock = (environment.supervisorLockProbe ?? probeGitSyncSupervisorLock)(config.home);
+      if (lock === "free") {
+        if (environment.signal?.aborted || performance.now() >= deadline) {
+          continue;
+        }
+        return current;
+      }
     }
     const pauseRemaining = deadline - performance.now();
     // Полученный во время COM abort сохраняет прежний CANCELLED и при истёкшем deadline.

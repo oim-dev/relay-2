@@ -23,6 +23,7 @@ export {
   gitSyncControlRelease,
   readGitSyncControlEndpoint,
   probeGitSyncSupervisor,
+  probeGitSyncSupervisorLock,
   waitForGitSyncSupervisor,
 } from "./git-sync/supervisor";
 export type {

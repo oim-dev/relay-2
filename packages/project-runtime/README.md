@@ -96,6 +96,8 @@ Scheduler. Установка явно сохраняет exact executable/home 
 внешнего supervisor, с явно подключёнными потоками и `AbortSignal`. Git и сеть остаются
 ответственностью компонента Git Sync. Правила входа пользователя и linger описаны
 в [паспорте CLI](../../apps/cli/README.md#кто-запускает-supervisor).
+На Windows повторный запуск и отключение службы ожидают также освобождения SQLite mutex
+supervisor в пределах бюджета остановки: одного состояния Task Scheduler недостаточно.
 Foreground запускается с приватным `--parent-lease`: Runtime удерживает stdin pipe
 до конца прокси, а аварийная смерть CLI даёт kernel EOF и shutdown ребёнка. Обычный
 `--request` закрывает stdin сразу после передачи JSON. Native service запускает
