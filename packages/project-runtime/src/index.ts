@@ -33,6 +33,7 @@ export type {
 export { createServiceConfiguration } from "./git-sync/service-configuration";
 export { createNativeProcessRunner } from "./git-sync/process";
 export { sourceGuardianComponent } from "./process-guardian/component";
+export { buildSourceGuardianComponent } from "./process-guardian/component-build";
 export { runGuardedCommand } from "./process-guardian/runner";
 export { runGuardianEntry } from "./process-guardian/entry";
 export { GuardedCommandError } from "./process-guardian/errors";

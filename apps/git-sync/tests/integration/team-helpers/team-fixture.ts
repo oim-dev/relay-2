@@ -7,9 +7,11 @@ import { ReplicationAdapter, restoreSnapshot } from "../../../src/sync/replicati
 import { git, requireGit } from "../../../src/transport/git";
 import type { RepositoryOptions } from "../../../src/transport/repository.types";
 import { TeamRepository } from "./publication-barrier";
-import type { TeamFixture, TeamReplica } from "./team-fixture.types";
+import type { TeamFixture, TeamFixtureOptions, TeamReplica } from "./team-fixture.types";
 import { runExchangeProcess } from "../helpers/crash-exchange";
 import type { ExchangeProcessObservation } from "../helpers/crash-exchange.types";
+import { withGitProcessRuntime } from "../../../src/transport/process-runtime";
+import { TeamDiagnostics } from "./team-diagnostics";
 
 const FIXTURE_DEADLINE_MS = 240_000;
 const GIT_DEADLINE_MS = 10_000;
@@ -18,8 +20,14 @@ const EXCHANGE_BUDGET = 2;
 /**
  * Создаёт один origin и независимые SQLite/Git по запросу сценария.
  * Общий deadline отменяет Git и барьеры; finally ждёт остановки engines до закрытия БД.
+ * После отказа сохраняет bounded диагностику; optional callback получает путь готового отчёта.
+ * Сценарий может сократить общий deadline, оставляя запас до watchdog Bun для полной очистки.
  */
-export async function withTeamFixture(run: (fixture: TeamFixture) => Promise<void>): Promise<void> {
+export async function withTeamFixture(
+  run: (fixture: TeamFixture) => Promise<void>,
+  onFailure?: (path: string) => void,
+  options: TeamFixtureOptions = {},
+): Promise<void> {
   const now = new Date();
   const date = [
     now.getFullYear(),
@@ -35,6 +43,9 @@ export async function withTeamFixture(run: (fixture: TeamFixture) => Promise<voi
   );
   mkdirSync(artifacts, { recursive: true });
   const root = mkdtempSync(join(artifacts, "replicas-"));
+  const diagnostics = new TeamDiagnostics(root, artifacts);
+  let failed = false;
+  let failure: unknown;
   const origin = join(root, "origin.git");
   const originHome = join(root, "origin-home");
   mkdirSync(originHome);
@@ -44,12 +55,17 @@ export async function withTeamFixture(run: (fixture: TeamFixture) => Promise<voi
   const cancellation = new AbortController();
   const deadline = setTimeout(
     () => cancellation.abort(new Error("Истёк deadline конечной командной приёмки")),
-    FIXTURE_DEADLINE_MS,
+    options.deadlineMs ?? FIXTURE_DEADLINE_MS,
   );
   const originOptions = {
     signal: cancellation.signal,
     timeoutMs: GIT_DEADLINE_MS,
-    env: { HOME: originHome, RELAY_HOME: join(originHome, "relay"), GIT_CONFIG_NOSYSTEM: "1" },
+    env: {
+      HOME: originHome,
+      RELAY_HOME: join(originHome, "relay"),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TRACE2_EVENT: diagnostics.tracePath,
+    },
   };
 
   /**
@@ -59,12 +75,16 @@ export async function withTeamFixture(run: (fixture: TeamFixture) => Promise<voi
     databases.add(db);
     replica.db = db;
     replica.replication = new ReplicationAdapter(db);
-    replica.engine = new SyncEngine(
+    replica.engine = diagnostics.engine(
+      replica.index,
       replica.directory,
-      db.projectId,
-      replica.replication,
-      replica.repository,
-      cancellation.signal,
+      new SyncEngine(
+        replica.directory,
+        db.projectId,
+        replica.replication,
+        replica.repository,
+        cancellation.signal,
+      ),
     );
   }
 
@@ -80,114 +100,153 @@ export async function withTeamFixture(run: (fixture: TeamFixture) => Promise<voi
   }
 
   try {
-    requireGit(
-      await git(root, ["init", "--bare", "--initial-branch=main", origin], originOptions),
-      "team-origin",
-    );
-    await run({
-      origin,
-      branch,
-      replicas,
-      signal: cancellation.signal,
-      /**
-       * Новая реплика получает собственные пути, replicaId и проверенный общий baseline.
-       */
-      async replica(snapshot): Promise<TeamReplica> {
-        const index = replicas.length;
-        const directory = join(root, `participant-${index}`);
-        const home = join(directory, "home");
-        const relayHome = join(directory, "relay-home");
-        mkdirSync(home, { recursive: true });
-        mkdirSync(relayHome);
-        const path = join(relayHome, "project.sqlite");
-        const db = snapshot
-          ? ProjectDatabase.createReplica(path, snapshot.projectId)
-          : ProjectDatabase.create(path, { id: "team-project", name: "Команда", slug: "team" });
-        databases.add(db);
-        const replication = new ReplicationAdapter(db);
-        if (snapshot) {
-          replication.core.bootstrap(snapshot);
-        }
-        const options = {
-          directory: join(directory, "repository.git"),
-          remote: origin,
-          branch,
-          signal: cancellation.signal,
-          timeoutMs: GIT_DEADLINE_MS,
-          env: { HOME: home, RELAY_HOME: relayHome, GIT_CONFIG_NOSYSTEM: "1" },
-        } satisfies RepositoryOptions;
-        const repository = new TeamRepository(options);
-        const replica = {
-          index,
-          directory,
-          home,
-          relayHome,
-          db,
-          replication,
-          repository,
-          engine: new SyncEngine(
-            directory,
-            db.projectId,
-            replication,
-            repository,
-            cancellation.signal,
-          ),
-        };
-        replicas.push(replica);
-        await repository.initialize();
-        return replica;
-      },
-      /**
-       * Имитирует завершение локального приложения без копирования SQLite/WAL.
-       */
-      reopen(replica): void {
-        const path = replica.db.path;
-        close(replica);
-        attach(replica, ProjectDatabase.open(path));
-      },
-      /**
-       * Закрывает только подготовительное соединение; crash произойдёт у нового владельца SQLite.
-       * После ожидания exit новый repository не наследует cached refs погибшего владельца.
-       */
-      async exchangeInProcess(replica, attempt): Promise<ExchangeProcessObservation> {
-        const path = replica.db.path;
-        const { signal: _signal, ...repository } = replica.repository.options;
-        close(replica);
+    await withGitProcessRuntime(
+      async () => {
         try {
-          return await runExchangeProcess(
-            { ...attempt, databasePath: path, directory: replica.directory, repository },
-            cancellation.signal,
+          requireGit(
+            await git(root, ["init", "--bare", "--initial-branch=main", origin], originOptions),
+            "team-origin",
           );
+          await run({
+            origin,
+            branch,
+            replicas,
+            signal: cancellation.signal,
+            /**
+             * Новая реплика получает собственные пути, replicaId и проверенный общий baseline.
+             */
+            async replica(snapshot): Promise<TeamReplica> {
+              const index = replicas.length;
+              const directory = join(root, `participant-${index}`);
+              const home = join(directory, "home");
+              const relayHome = join(directory, "relay-home");
+              mkdirSync(home, { recursive: true });
+              mkdirSync(relayHome);
+              const path = join(relayHome, "project.sqlite");
+              const db = snapshot
+                ? ProjectDatabase.createReplica(path, snapshot.projectId)
+                : ProjectDatabase.create(path, {
+                    id: "team-project",
+                    name: "Команда",
+                    slug: "team",
+                  });
+              databases.add(db);
+              const replication = new ReplicationAdapter(db);
+              if (snapshot) {
+                replication.core.bootstrap(snapshot);
+              }
+              const options = {
+                directory: join(directory, "repository.git"),
+                remote: origin,
+                branch,
+                signal: cancellation.signal,
+                timeoutMs: GIT_DEADLINE_MS,
+                env: {
+                  HOME: home,
+                  RELAY_HOME: relayHome,
+                  GIT_CONFIG_NOSYSTEM: "1",
+                  GIT_TRACE2_EVENT: diagnostics.tracePath,
+                },
+              } satisfies RepositoryOptions;
+              const repository = new TeamRepository(options);
+              const replica = {
+                index,
+                directory,
+                home,
+                relayHome,
+                db,
+                replication,
+                repository,
+                engine: diagnostics.engine(
+                  index,
+                  directory,
+                  new SyncEngine(
+                    directory,
+                    db.projectId,
+                    replication,
+                    repository,
+                    cancellation.signal,
+                  ),
+                ),
+              };
+              replicas.push(replica);
+              await repository.initialize();
+              return replica;
+            },
+            /**
+             * Имитирует завершение локального приложения без копирования SQLite/WAL.
+             */
+            reopen(replica): void {
+              const path = replica.db.path;
+              close(replica);
+              attach(replica, ProjectDatabase.open(path));
+            },
+            /**
+             * Закрывает только подготовительное соединение; crash произойдёт у нового владельца SQLite.
+             * После ожидания exit новый repository не наследует cached refs погибшего владельца.
+             */
+            async exchangeInProcess(replica, attempt): Promise<ExchangeProcessObservation> {
+              const path = replica.db.path;
+              const { signal: _signal, ...repository } = replica.repository.options;
+              close(replica);
+              try {
+                return await runExchangeProcess(
+                  { ...attempt, databasePath: path, directory: replica.directory, repository },
+                  cancellation.signal,
+                );
+              } finally {
+                replica.repository = new TeamRepository({
+                  ...repository,
+                  signal: cancellation.signal,
+                });
+                attach(replica, ProjectDatabase.open(path));
+              }
+            },
+            /**
+             * Использует реальный app/Core bootstrap; только принятые данные могут быть восстановлены.
+             */
+            restore(replica, snapshot: PortableProjectSnapshot): void {
+              if (replica.replication.core.status().pending !== 0) {
+                throw new Error("Fixture не разрешает терять pending при восстановлении");
+              }
+              close(replica);
+              const path = join(replica.relayHome, "restored.sqlite");
+              restoreSnapshot(path, snapshot, { trustedCheckpoint: true });
+              attach(replica, ProjectDatabase.open(path));
+            },
+            /**
+             * Читает только специально созданный origin настоящим Git.
+             */
+            async originGit(args): Promise<string> {
+              return requireGit(await git(origin, args, originOptions), "team-origin-assertion");
+            },
+          });
         } finally {
-          replica.repository = new TeamRepository({ ...repository, signal: cancellation.signal });
-          attach(replica, ProjectDatabase.open(path));
+          cancellation.abort();
+          await Promise.allSettled(replicas.map((replica) => replica.engine.settled()));
+          for (const db of databases) {
+            db.close();
+          }
         }
       },
-      /**
-       * Использует реальный app/Core bootstrap; только принятые данные могут быть восстановлены.
-       */
-      restore(replica, snapshot: PortableProjectSnapshot): void {
-        if (replica.replication.core.status().pending !== 0) {
-          throw new Error("Fixture не разрешает терять pending при восстановлении");
-        }
-        close(replica);
-        const path = join(replica.relayHome, "restored.sqlite");
-        restoreSnapshot(path, snapshot, { trustedCheckpoint: true });
-        attach(replica, ProjectDatabase.open(path));
-      },
-      /**
-       * Читает только специально созданный origin настоящим Git.
-       */
-      async originGit(args): Promise<string> {
-        return requireGit(await git(origin, args, originOptions), "team-origin-assertion");
-      },
-    });
+      join(root, "process-runtime"),
+      (observation) => diagnostics.observe(observation),
+    );
+  } catch (error) {
+    failed = true;
+    failure = error;
+    throw error;
   } finally {
     clearTimeout(deadline);
     cancellation.abort();
-    await Promise.allSettled(replicas.map((replica) => replica.engine.settled()));
-    for (const db of databases) {
-      db.close();
+    if (failed) {
+      try {
+        const path = diagnostics.failure(failure);
+        onFailure?.(path);
+        console.error(`Диагностика конечного обмена: ${path}`);
+      } catch (error) {
+        console.error("Не удалось сохранить диагностику конечного обмена:", error);
+      }
     }
     rmSync(root, { recursive: true, force: true });
   }

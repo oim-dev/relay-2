@@ -126,7 +126,9 @@ export function expectCreationsPreserved(
   winner: OfflineCreation,
 ): void {
   const documentIds = new Set(creations.map((entry) => entry.document.id));
-  expect(snapshot.entities.filter((entry) => documentIds.has(entry.record.id))).toHaveLength(50);
+  expect(snapshot.entities.filter((entry) => documentIds.has(entry.record.id))).toHaveLength(
+    creations.length,
+  );
   const keys: string[] = [];
   const taskKeys: string[] = [];
   for (const initial of creations) {
@@ -154,8 +156,8 @@ export function expectCreationsPreserved(
     keys.push(document.key);
     taskKeys.push(task.key);
   }
-  expect(new Set(keys).size).toBe(50);
-  expect(new Set(taskKeys).size).toBe(50);
+  expect(new Set(keys).size).toBe(creations.length);
+  expect(new Set(taskKeys).size).toBe(creations.length);
   expect(storedEntity(snapshot, winner.document.id).record.key).toBe(winner.document.key);
   expect(snapshot.addresses.find((entry) => entry.ref === "DOC-2")?.entityId).toBe(
     winner.document.id,
@@ -172,8 +174,8 @@ export function expectIndependentWorkPreserved(
   work: readonly IndependentWork[],
   commonTaskId: string,
 ): void {
-  expect(snapshot.comments).toHaveLength(50);
-  expect(new Set(snapshot.comments.map((entry) => entry.comment.id)).size).toBe(50);
+  expect(snapshot.comments).toHaveLength(work.length);
+  expect(new Set(snapshot.comments.map((entry) => entry.comment.id)).size).toBe(work.length);
   for (const [index, operation] of work.entries()) {
     const initial = creations[index];
     if (initial === undefined) {

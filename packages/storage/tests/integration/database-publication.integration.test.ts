@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database, constants } from "bun:sqlite";
+import { spawnSync } from "node:child_process";
 import { existsSync, linkSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ProjectDatabase } from "../../src/database/project-database";
 import { withProjectDatabasePublication } from "../../src/database/project-publication";
 import {
@@ -11,6 +12,36 @@ import {
 } from "./helpers/project-database-fixture";
 
 let fixture: ProjectDatabaseFixture;
+
+/**
+ * Проверяет доступ к SQLite writer-lock отдельным коротким процессом с busy_timeout=0.
+ * Его HOME/cwd изолированы, timeout завершает зависший probe; ошибки запуска не считаются занятостью БД.
+ */
+function expectPublicationWriterProbe(path: string, expected: "SQLITE_BUSY" | "ACQUIRED"): void {
+  const directory = dirname(path);
+  const probe = spawnSync(
+    process.execPath,
+    [join(import.meta.dir, "helpers/publication-lock-probe.ts"), path],
+    {
+      cwd: directory,
+      env: { ...process.env, HOME: directory, USERPROFILE: directory },
+      encoding: "utf8",
+      timeout: 5000,
+    },
+  );
+  expect(probe.error).toBeUndefined();
+  expect({
+    status: probe.status,
+    signal: probe.signal,
+    stdout: probe.stdout,
+    stderr: probe.stderr,
+  }).toEqual({
+    status: 0,
+    signal: null,
+    stdout: `${expected}\n`,
+    stderr: "",
+  });
+}
 
 beforeEach(() => {
   fixture = new ProjectDatabaseFixture("publication");
@@ -43,19 +74,15 @@ describe("SQLite-барьер публикации private БД", () => {
     withProjectDatabasePublication(fixture.path, () => {
       expect(existsSync(`${fixture.path}-wal`)).toBe(false);
       expect(existsSync(`${fixture.path}-journal`)).toBe(false);
-      // SQLite read/write format=1 подтверждает rollback mode; оставшийся SHM в нём не участвует.
-      expect(Array.from(readFileSync(fixture.path).subarray(18, 20))).toEqual([1, 1]);
       linkSync(fixture.path, target);
-      const contender = new Database(target, { create: false, readwrite: true });
-      try {
-        expect(() => contender.exec("PRAGMA journal_mode=WAL")).toThrow(
-          expect.objectContaining({ code: "SQLITE_BUSY" }),
-        );
-      } finally {
-        contender.close(true);
-      }
+      // Внутрипроцессный VFS-cache не доказывает удержание kernel fcntl-lock.
+      expectPublicationWriterProbe(target, "SQLITE_BUSY");
     });
 
+    expectPublicationWriterProbe(target, "ACQUIRED");
+    // Чтение закрывает отдельный FD datafile: на POSIX это сняло бы fcntl-lock внутри barrier.
+    // Здесь barrier уже освобождён, а ProjectDatabase.open ещё не включил WAL снова.
+    expect(Array.from(readFileSync(fixture.path).subarray(18, 20))).toEqual([1, 1]);
     const published = ProjectDatabase.open(target);
     try {
       expect(published.get(document.id)).toEqual(document);
@@ -142,6 +169,32 @@ describe("SQLite-барьер публикации private БД", () => {
     const published = ProjectDatabase.openReadonly(target);
     try {
       expect(published.list()).toEqual(initial);
+    } finally {
+      published.close();
+    }
+  });
+
+  test("Promise после hardlink отклоняется без удаления опубликованной БД", () => {
+    const database = fixture.create();
+    const initial = database.list();
+    const outbox = database.getReplicationOutbox();
+    database.close();
+    const target = join(fixture.directory, "published.sqlite");
+
+    expectRelayError(
+      () =>
+        withProjectDatabasePublication(fixture.path, () => {
+          linkSync(fixture.path, target);
+          return Promise.resolve();
+        }),
+      "INVALID_ARGUMENT",
+    );
+
+    const published = ProjectDatabase.openReadonly(target);
+    try {
+      expect(published.list()).toEqual(initial);
+      expect(published.getReplicationOutbox()).toEqual(outbox);
+      expect(existsSync(fixture.path)).toBe(true);
     } finally {
       published.close();
     }

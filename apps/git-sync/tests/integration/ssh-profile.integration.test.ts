@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git, requireGit } from "../../src/transport/git";
+import { redact } from "../../src/transport/process";
 import { selectSshProfile, shellWord } from "../../src/transport/ssh-profile";
 
 /**
@@ -38,6 +39,32 @@ async function withSshRepository(
   }
 }
 
+/**
+ * При отказе профиля повторяет только безопасный production probe в том же Git окружении.
+ * Печатает короткие version/exit/stderr, не меняя исходный assert и выбор SSH клиента.
+ */
+async function printSshProbeFailure(
+  directory: string,
+  env: Record<string, string | undefined>,
+): Promise<void> {
+  const entry = fileURLToPath(new URL("./helpers/ssh-profile-diagnostic.ts", import.meta.url));
+  const command = [process.execPath, entry].map((word) => shellWord(word)).join(" ");
+  try {
+    const diagnostic = await git(
+      directory,
+      ["-c", `alias.relay-test-ssh-diagnostic=!${command}`, "relay-test-ssh-diagnostic"],
+      { env, timeoutMs: 10_000, maxBytes: 16 * 1024 },
+    );
+    console.error("Диагностика SSH probe:", {
+      exitCode: diagnostic.exitCode,
+      stdout: redact(diagnostic.stdout.toString("utf8")),
+      stderr: redact(diagnostic.stderr.toString("utf8")),
+    });
+  } catch (error) {
+    console.error("Диагностика SSH probe недоступна:", redact(String(error)));
+  }
+}
+
 describe("SSH profile в настоящем Git окружении", () => {
   test.skipIf(Bun.which("ssh") === null)(
     "probe stdout отделён от протокола, identity/proxy и ControlMaster сохраняются",
@@ -49,6 +76,10 @@ describe("SSH profile в настоящем Git окружении", () => {
           remote: "ssh://relay-profile.invalid/repo",
           branch: "data",
         });
+        if (profile.capability.mode !== "openssh-foreground") {
+          console.error("Неожиданный SSH профиль:", profile.capability);
+          await printSshProbeFailure(directory, env);
+        }
         expect(profile.capability.mode).toBe("openssh-foreground");
         expect(profile.command).not.toBeNull();
         const key = join(directory, "ключ с пробелом");

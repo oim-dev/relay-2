@@ -13,7 +13,8 @@ try {
     process.stdout.write(`${version}\n`);
   } else {
     const { runProcessEntry } = await import("./app/process-run");
-    process.exitCode = await runProcessEntry(args);
+    const { withGitProcessRuntime } = await import("./transport/process-runtime");
+    process.exitCode = await withGitProcessRuntime(() => runProcessEntry(args));
   }
 } catch (error) {
   const response = failure(error);

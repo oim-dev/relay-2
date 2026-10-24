@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DataRepository } from "../../../src/transport/repository";
 import { git, requireGit } from "../../../src/transport/git";
+import { withGitProcessRuntime } from "../../../src/transport/process-runtime";
 
 /**
  * Изолирует только Git object database, без текущего SQL/domain-контракта и пользовательских configs.
@@ -35,16 +36,21 @@ export async function withGitRepository(
     GIT_COMMITTER_EMAIL: "fixture@localhost",
   };
   try {
-    const remote = join(root, "remote.git");
-    requireGit(await git(root, ["init", "--bare", remote], { env }), "create-remote");
-    const repository = new DataRepository({
-      directory: join(root, "private.git"),
-      remote,
-      branch: "relay-data-v2",
-      env,
-    });
-    await repository.initialize();
-    await operation(repository, root, env);
+    await withGitProcessRuntime(
+      async () => {
+        const remote = join(root, "remote.git");
+        requireGit(await git(root, ["init", "--bare", remote], { env }), "create-remote");
+        const repository = new DataRepository({
+          directory: join(root, "private.git"),
+          remote,
+          branch: "relay-data-v2",
+          env,
+        });
+        await repository.initialize();
+        await operation(repository, root, env);
+      },
+      join(root, "process-runtime"),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

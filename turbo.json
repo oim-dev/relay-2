@@ -27,7 +27,8 @@
       "outputs": []
     },
     "test:integration": {
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["CI_LOG_DIR"]
     },
     "test:process": {
       "dependsOn": ["build"],

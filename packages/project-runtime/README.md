@@ -81,6 +81,13 @@ subreaper и Windows Job Object; на macOS граница — управляе�
 `--guarded-command` в `runGuardianEntry`. Без явного helper Runtime возвращает
 `GIT_SYNC_GUARDIAN_REQUIRED` до запуска проверяемой команды.
 
+Для составного source-сценария `buildSourceGuardianComponent(directory)` создаёт свежий
+bytecode executable из собственного entry Runtime текущим Bun. Каталог создаётся
+эксклюзивно; существующий output не переиспользуется. Вызывающий владеет каталогом
+и удаляет его после завершения всех guarded commands. Это способ композиции того же
+guardian/anchor/native cleanup, без нового протокола или доверия проверяемому executable.
+Standalone приложение продолжает предоставлять свою private роль.
+
 `service(enable|disable|status, options)` управляет user-systemd, LaunchAgent или Task
 Scheduler. Установка явно сохраняет exact executable/home и запускает native manager;
 удаление затрагивает только свою службу. `supervise(options)` — foreground-прокси для

@@ -83,6 +83,10 @@ export class NativeServiceFixture {
   private readonly pids = new Set<number>();
   /* Попытка enable началась после подготовки и доказанного отсутствия выбранного ID. */
   private armed = false;
+  /* Текущий этап для snapshot ошибок вне service(), включая crash/readiness assertions. */
+  private stage = "prepare";
+  /* Уже сохранённые причины не запускают повторный snapshot при проходе через общий catch. */
+  private readonly capturedFailures = new Set<unknown>();
   /* Настоящий локальный проект, который disable обязан сохранить. */
   private project: ProjectLocation | undefined;
   /* Побайтовый снимок БД после её закрытия. */
@@ -165,24 +169,13 @@ export class NativeServiceFixture {
     if (action === "enable") {
       this.armed = true;
     }
-    this.save(`${stage}-attempt`, {
-      action,
-      startedAt: new Date().toISOString(),
-      id: this.config.id,
-    });
+    this.beginStage(stage, action);
     let result: GitSyncServiceStatus;
     try {
       result = await this.client.service(action, this.options);
     } catch (error) {
       try {
-        await captureNativeFailure(
-          this.commands,
-          this.config,
-          this.binary,
-          this.version,
-          stage,
-          error,
-        );
+        await this.captureFailure(error);
       } catch (snapshotError) {
         throw new AggregateError(
           [error, snapshotError],
@@ -276,6 +269,38 @@ export class NativeServiceFixture {
    */
   save(stage: string, value: unknown): void {
     writeFileSync(join(this.directory, `${stage}.json`), JSON.stringify(value, null, 2));
+  }
+
+  /**
+   * Отмечает начало native-этапа; action присутствует только у вызова публичного service API.
+   */
+  beginStage(stage: string, action?: GitSyncServiceAction): void {
+    this.stage = stage;
+    this.save(`${stage}-attempt`, {
+      stage,
+      ...(action === undefined ? {} : { action }),
+      startedAt: new Date().toISOString(),
+      id: this.config.id,
+    });
+  }
+
+  /**
+   * Сохраняет readonly-состояние перед cleanup, включая отказ crash recovery вне service().
+   * Одинаковая ошибка записывается один раз; ошибки записи передаются отдельно от исходной причины.
+   */
+  async captureFailure(error: unknown): Promise<void> {
+    if (this.capturedFailures.has(error)) {
+      return;
+    }
+    await captureNativeFailure(
+      this.commands,
+      this.config,
+      this.binary,
+      this.version,
+      this.stage,
+      error,
+    );
+    this.capturedFailures.add(error);
   }
 
   /**
@@ -380,6 +405,11 @@ export async function withNativeServiceFixture(
     await operation(fixture);
   } catch (error) {
     errors.push(error);
+    try {
+      await fixture?.captureFailure(error);
+    } catch (snapshotError) {
+      errors.push(snapshotError);
+    }
   } finally {
     try {
       await fixture?.dispose();

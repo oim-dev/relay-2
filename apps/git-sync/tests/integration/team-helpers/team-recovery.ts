@@ -6,8 +6,8 @@ import { expectAcknowledged, publishedSnapshot, storedEntity } from "./team-stat
 import type { TeamFixture, TeamReplica } from "./team-fixture.types";
 
 /**
- * Волна 5: реальная смерть владельца после commit до push, поздний writer и новый процесс recovery.
- * Сохраняет исходную очередь и возвращает новый changeset для полного exact proof set AC-50.
+ * Проверяет реальную смерть владельца после commit до push, поздний writer и новый процесс recovery.
+ * Сохраняет исходную очередь и возвращает новый changeset для полного exact proof set команды.
  */
 export async function crashDuringTeamPublication(
   team: TeamFixture,

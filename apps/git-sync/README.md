@@ -257,3 +257,19 @@ Completed и конец обхода не означают пустой outbox. 
 [спецификация](../../GIT-SYNC-IMPLEMENTATION-SPEC.md). Проверки компонента размещены
 по [правилам наборов](../../tests/README.md); process-набор использует собственный
 собранный `dist/relay-git-sync` и изолированные fixtures.
+
+### Исходный запуск и helper-процессы
+
+Source entry использует `withGitProcessRuntime`: один свежий минимальный Runtime helper
+с bytecode на lifetime сценария. Он собирается лениво перед первой внешней командой текущим Bun
+из текущих исходников; cached status без процессов сборку не запускает.
+старый `dist` не служит заменой source-проверкам. Scope ожидает начатые guarded commands
+перед удалением helper. При прямом библиотечном вызове вне scope доступен raw source entry
+Runtime. Standalone сборка приложения также содержит bytecode и обслуживает свою private роль.
+
+Для source entry временный helper находится в `.artifacts/<дата>/git-sync-source-runtime`
+этого checkout; при source Git-обмене checkout должен быть доступен для записи артефактов. Fixtures
+используют ту же композицию с собственным каталогом и сохраняют независимые SQLite/Git/HOME.
+На отказ конечного team-сценария публикуется bounded phase/Git-cost summary в подкаталог
+`CI_LOG_DIR/git-sync-team`, а без CI — в артефакты fixture. Wrapper durations и native
+Git trace2 `t_abs` отражаются отдельно; отчёт не задаёт порогов производительности.

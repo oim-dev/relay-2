@@ -9,6 +9,7 @@ import type { SshProfile } from "./ssh-profile.types";
 import { saveSshCapability } from "./ssh-state";
 import { isGitObjectId, readGitObjects, readGitTrees } from "./git-objects";
 import { importGitSnapshot } from "./git-import";
+import { redact } from "./process";
 
 const REMOTE_REF = "refs/relay/remote";
 const LOCAL_REF = "refs/heads/data";
@@ -157,22 +158,23 @@ export class DataRepository {
 
   /**
    * Читает три служебных refs одним Git запросом; отсутствие каждого сохраняется как null.
-   * Cache публикуется целиком после разбора. Предупреждение о повреждённом ref не считается отсутствием.
+   * show-ref отклоняет broken refs кодом выхода, не смешивая их с пользовательским trace в stderr.
+   * Cache публикуется целиком после разбора; exit 1 допустим только с пустым stdout (нет совпадений).
    */
   private async readRefs(): Promise<void> {
-    const result = await this.run([
-      "for-each-ref",
-      "--format=%(refname) %(objectname)",
-      ...STATE_REFS,
-    ]);
-    const output = requireGit(result, "read-state-refs");
-    if (result.stderr.length !== 0) {
-      throw new RelayError("GIT_INVALID_REPOSITORY", transportMessages.invalidRepository, 4);
+    const result = await this.run(["show-ref", "--", ...STATE_REFS]);
+    if (result.exitCode !== 0 && !(result.exitCode === 1 && result.stdout.length === 0)) {
+      throw new RelayError("GIT_INVALID_REPOSITORY", transportMessages.invalidRepository, 4, {
+        operation: "read-state-refs",
+        exitCode: result.exitCode,
+        reason: redact(result.stderr.subarray(-8192).toString("utf8")),
+      });
     }
+    const output = result.stdout.toString("utf8").trim();
     const refs = new Map<string, string>();
     for (const line of output.split("\n").filter(Boolean)) {
-      const [name, head, ...extra] = line.split(" ");
-      // for-each-ref также возвращает descendants заданных prefixes, но они не заменяют exact refs.
+      const [head, name, ...extra] = line.split(" ");
+      // show-ref сопоставляет окончания имён по компонентам; принимаем только exact служебные refs.
       if (name === undefined || !STATE_REFS.includes(name)) {
         continue;
       }

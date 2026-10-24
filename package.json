@@ -25,6 +25,7 @@
     "test": "bun run test:unit",
     "test:unit": "bun --bun turbo run test:unit",
     "test:integration": "bun --bun turbo run test:integration",
+    "test:extended-replication": "bun run --filter @relay/core test:extended-replication && bun run --filter @relay/git-sync test:extended-replication",
     "test:process": "bun --bun turbo run test:process --filter=@relay/cli --filter=@relay/git-sync",
     "test:native-service": "bun run --filter @relay/project-runtime test:native-service",
     "test:e2e": "bun run build:cli && bun test --no-orphans ./tests/e2e",

@@ -168,7 +168,8 @@ $observation | ConvertTo-Json -Compress -Depth 8
 
 /**
  * Аварийно завершает подтверждённый supervisor; /End здесь нельзя использовать:
- * намеренная остановка задачи не проверяет RestartOnFailure.
+ * намеренная остановка задачи не проверяет RestartOnFailure. Удерживает отдельный process handle,
+ * записывает настоящий ExitCode и отвергает успешный exit как некорректное внедрение аварии.
  */
 export async function crashWindowsSupervisor(
   commands: NativeCommands,
@@ -180,10 +181,26 @@ $process=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'
 if ($null -eq $process -or $process.ExecutablePath -ne ${psString(binary)}) { throw 'Чужой или исчезнувший PID' }
 $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
 if ($owner.Sid -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) { throw 'Чужой пользователь процесса' }
-Stop-Process -Id ${pid} -Force -ErrorAction Stop
-$true | ConvertTo-Json
+$watched=[Diagnostics.Process]::GetProcessById(${pid})
+try {
+  $null=$watched.Handle
+  if ($watched.MainModule.FileName -ne ${psString(binary)}) { throw 'Исполняемый файл PID изменился до crash' }
+  Stop-Process -Id ${pid} -Force -ErrorAction Stop
+  if (-not $watched.WaitForExit(5000)) { throw 'Supervisor не завершился после Stop-Process' }
+  @{ pid=${pid}; method='Stop-Process'; exitCode=$watched.ExitCode;
+     exitCodeHex=('0x{0:X8}' -f $watched.ExitCode); exitedAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+} finally { $watched.Dispose() }
 `);
-  expect(result).toBe(true);
+  expect(result).toMatchObject({ pid, method: "Stop-Process" });
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !("exitCode" in result) ||
+    typeof result.exitCode !== "number"
+  ) {
+    throw new Error("Нет фактического exit code после внедрённой аварии");
+  }
+  expect(result.exitCode).not.toBe(0);
 }
 
 /**

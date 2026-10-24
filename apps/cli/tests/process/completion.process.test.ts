@@ -181,6 +181,8 @@ const stdoutFailures = [
 
 // Shim задаёт уже выделенные оболочкой слова; проверяется настоящий Bash-транспорт
 // и бинарник, без зависимости тестового runner от системного пакета bash-completion.
+// Подключаем сохранённый файл, как в руководстве CLI: source <(...) в Bash 3.2
+// читает нулевой размер pipe из fstat и успешно пропускает его содержимое.
 const bashSetup = `
 set -e
 _get_comp_words_by_ref() {
@@ -189,8 +191,10 @@ _get_comp_words_by_ref() {
     cur="\${COMP_WORDS[COMP_CWORD]}"
     prev="\${COMP_WORDS[COMP_CWORD-1]}"
 }
-source <(relay complete bash)
-source <(relay complete bash)
+relay complete bash > relay-completion.bash
+source ./relay-completion.bash
+source ./relay-completion.bash
+rm ./relay-completion.bash
 `;
 const bashAction = `
 COMP_WORDS=("$@")
@@ -324,7 +328,7 @@ describe("Shell completion собранного CLI", () => {
     },
   );
 
-  // POSIX Bash-транспорт использует process substitution и исполняемый shell-wrapper.
+  // POSIX Bash-транспорт использует исполняемый shell-wrapper.
   // Протокол кандидатов и генерация всех четырёх shell-скриптов выше остаются native-кроссплатформенными.
   test.skipIf(process.platform === "win32")(
     "Bash сохраняет пробелы и буквальную подстановку в аргументе при повторном подключении",

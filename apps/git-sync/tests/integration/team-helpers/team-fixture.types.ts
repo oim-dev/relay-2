@@ -9,6 +9,14 @@ import type {
 } from "../helpers/crash-exchange.types";
 
 /**
+ * Конечный бюджет сценария; отмена не отделяет ожидание ресурсов от lifetime fixture.
+ */
+export interface TeamFixtureOptions {
+  /* Общий deadline в миллисекундах; по умолчанию 240000 для extended-команды из 50 реплик. */
+  readonly deadlineMs?: number;
+}
+
+/**
  * Один независимый участник: своё файловое хранилище, Git и локальное окружение.
  * После reopen/restore и отдельного process fixture заменяет соединение и связанные с ним сервисы.
  */

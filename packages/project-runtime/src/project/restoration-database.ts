@@ -6,6 +6,7 @@ import { fileExists } from "../configuration/files";
 import type { ProjectLocation } from "./location.types";
 import { projectMessages } from "./project.messages";
 import { restorationMessages } from "./restoration.messages";
+import { requireSynchronousRestorationCallback } from "./restoration-callback";
 import {
   observeRestorationFile,
   requireNoRestorationJournals,
@@ -109,9 +110,12 @@ function cleanupSealedPrivateShm(path: string, expected: RestorationFileIdentity
  * До и внутри барьера сверяет точную идентичность единственного datafile. Остаточный SHM разрешён
  * только как ранее наблюдённый неалиасный private-индекс: он очищается под барьером до public link.
  * WAL/journal не удаляются через fs; публичный target и его companions сюда не передаются.
+ * Async callback отвергается до файловых эффектов; результат publish передаётся строгой проверке
+ * Storage. Отказ проверки результата не откатывает уже выполненные файловые эффекты публикации.
  * Занятость сохраняет прежний Runtime-код; остальные причины и файловые эффекты callback не подменяются.
  */
 export function withRestorationDatabasePublication(path: string, publish: () => void): void {
+  requireSynchronousRestorationCallback(publish, restorationMessages.synchronousPublication);
   const databaseIdentity = requirePrivateRestorationFile(path);
   const shmIdentity = fileExists(`${path}-shm`)
     ? requirePrivateRestorationFile(`${path}-shm`)
@@ -122,7 +126,7 @@ export function withRestorationDatabasePublication(path: string, publish: () => 
         throw restorationOwnershipError(path);
       }
       cleanupSealedPrivateShm(path, shmIdentity);
-      publish();
+      return publish();
     });
   } catch (cause) {
     if (!(cause instanceof RelayError && cause.code === "DATABASE_PUBLICATION_BUSY")) {

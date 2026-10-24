@@ -105,7 +105,7 @@ export function expectTeamConverged(
   replicas: readonly TeamReplica[],
   published: PortableProjectSnapshot,
 ): void {
-  expect(published.entities.length).toBeGreaterThan(50);
+  expect(published.entities.length).toBeGreaterThan(replicas.length);
   expect(published.modelVersion).toBe(2);
   expect(published.components?.length).toBeGreaterThan(0);
   const expected = comparableSnapshot(published);

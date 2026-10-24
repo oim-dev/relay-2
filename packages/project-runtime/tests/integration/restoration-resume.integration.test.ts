@@ -105,6 +105,27 @@ function validatePreservedData(path: string): void {
   expect(data.project.kind).toBe("project");
 }
 
+/**
+ * При отказе живого соединения запускает изолированную vnode-диагностику и сохраняет исходную ошибку.
+ * Probe сравнивает readonly-проверку с одиночным unlink staging; успешный тест его не запускает.
+ */
+async function reportLiveWalFailure(fixture: RuntimeFixture, cause: unknown): Promise<never> {
+  let diagnosis: string;
+  try {
+    const probe = await runNativeProcess({
+      executable: process.execPath,
+      args: [join(import.meta.dir, "helpers/restoration-vnode-probe.ts"), fixture.root],
+      cwd: fixture.cwd,
+      env: { ...process.env, HOME: fixture.root, USERPROFILE: fixture.root },
+      timeoutMs: 5000,
+    });
+    diagnosis = `exit=${probe.exitCode}\n${probe.stdout}\n${probe.stderr}`;
+  } catch (error) {
+    diagnosis = `Probe не завершён: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  throw new Error(`Диагностика живого public WAL после resume:\n${diagnosis}`, { cause });
+}
+
 describe("Явное продолжение публикации restore", () => {
   test("закрытый persistent WAL private staging сохраняет позднюю запись, replicaId и outbox при resume", async () => {
     const fixture = new RuntimeFixture(group);
@@ -609,19 +630,23 @@ describe("Явное продолжение публикации restore", () =>
       const outbox = opened.getReplicationOutbox();
       expect(existsSync(`${pending.location.databasePath}-wal`)).toBe(true);
 
-      const resumed = resumeProjectRestoration(
-        { cwd: fixture.cwd, home: fixture.home },
-        projectId,
-        (path) => {
-          expect(path).toBe(pending.location.databasePath);
-          expect(readPreservedData(path).project.data.name).toBe("Живой WAL");
-          expect(existsSync(join(pending.stagingPath, "project.sqlite-wal"))).toBe(false);
-        },
-      );
+      try {
+        const resumed = resumeProjectRestoration(
+          { cwd: fixture.cwd, home: fixture.home },
+          projectId,
+          (path) => {
+            expect(path).toBe(pending.location.databasePath);
+            expect(readPreservedData(path).project.data.name).toBe("Живой WAL");
+            expect(existsSync(join(pending.stagingPath, "project.sqlite-wal"))).toBe(false);
+          },
+        );
 
-      expect(resumed.recovery).toBeNull();
-      expect(opened.getReplicationOutbox()).toEqual(outbox);
-      expect(opened.get(projectId)?.data.name).toBe("Живой WAL");
+        expect(resumed.recovery).toBeNull();
+        expect(opened.getReplicationOutbox()).toEqual(outbox);
+        expect(opened.get(projectId)?.data.name).toBe("Живой WAL");
+      } catch (cause) {
+        await reportLiveWalFailure(fixture, cause);
+      }
     } finally {
       opened?.close();
       await fixture.dispose();

@@ -1,10 +1,6 @@
 import { RelayError } from "@relay/contracts";
-import {
-  runGuardedCommand,
-  GuardedCommandError,
-  sourceGuardianComponent,
-} from "@relay/project-runtime";
-import { componentCommand } from "./component-command";
+import { GuardedCommandError } from "@relay/project-runtime";
+import { runGitCommand } from "./process-runtime";
 import type { ProcessInput, ProcessResult } from "./process.types";
 import { transportMessages } from "./transport.messages";
 
@@ -49,19 +45,14 @@ function guardedFailure(error: GuardedCommandError): RelayError {
 }
 
 /**
- * Делегирует process lifetime узкому source helper Runtime либо private роли своего compiled binary.
+ * Делегирует process lifetime helper текущего source scope либо private роли своего compiled binary.
  * При отсутствии source helper отклоняет запуск до target. Deadline, отмена,
  * bounded streams и очистка Git/SSH после смерти владельца имеют единственного владельца.
  * Ненулевой exit самого Git возвращается вызывающему без смешивания с инфраструктурным отказом.
  */
 export async function runProcess(input: ProcessInput): Promise<ProcessResult> {
   try {
-    const component = Bun.isStandaloneExecutable ? componentCommand([]) : sourceGuardianComponent();
-    if (component === undefined) {
-      throw new GuardedCommandError("guardian");
-    }
-    const result = await runGuardedCommand({
-      component,
+    const result = await runGitCommand({
       argv: [input.executable, ...input.args],
       cwd: input.cwd,
       env: { ...process.env, ...input.env },

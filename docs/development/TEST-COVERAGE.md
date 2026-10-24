@@ -376,15 +376,26 @@ origin, новый instance после crash и сохранение desired `st
 позже возвращает completed. Платформенные условия этого сценария не подменяются
 результатом запуска на другой ОС.
 
-[Командный сценарий](../../apps/git-sync/tests/integration/team-replication.integration.test.ts)
-содержит конечные волны 50 независимых SQLite/Git-реплик: одинаковые предварительные
-ключи, конкретные ID-связи и квитанции, non-FF, конфликт, offline-return, потерянный
-ответ и restore. Assertions сравнивают ожидаемые записи, публичные журналы и ack,
-а также одну общую ветку. Число реплик здесь описывает сценарий корректности,
-не измеренную одновременную пропускную способность.
-Встроенная [волна recovery](../../apps/git-sync/tests/integration/team-helpers/team-recovery.ts)
+[Штатный командный сценарий](../../apps/git-sync/tests/integration/team-replication.integration.test.ts)
+проверяет [AC-TEAM](../../GIT-SYNC-IMPLEMENTATION-SPEC.md#командный-сценарий-23-независимых-реплик)
+на трёх независимых SQLite/Git-репликах: два активных писателя и offline-return третьего
+участника. Он связывает коллизии ключей, настоящий non-FF, потерянный ответ push,
+crash с поздней записью, whole-batch конфликт с зависимым и независимым продолжением,
+явное решение и restore. Assertions сравнивают исходные ID/ссылки, точные тексты,
+первоначальные receipts, публичный порядок комментариев и полный набор source proofs.
+Idle всех участников сохраняет локальные CAS, поколения, очереди и Git HEAD без echo.
+Подробные варианты этих гарантий остаются в адресных двухрепличных проверках владельцев.
+Общая [волна recovery](../../apps/git-sync/tests/integration/team-helpers/team-recovery.ts)
 сохраняет позднюю запись между materialization и push и исходный outbox после аварии;
 новый процесс публикует те же IDs/digests, которые затем входят в общий exact proof set.
+
+Расширенные сценарии на 50 репликах входят только в
+[ручной extended-набор](../../tests/README.md#расширенная-проверка-репликации):
+[Git Sync](../../apps/git-sync/tests/extended/team-replication.extended.test.ts) сохраняет
+полные командные волны с конфликтом и recovery,
+[Core](../../packages/core/tests/extended/replication-team.extended.test.ts) — независимые
+offline-назначения, точный набор ID и отсутствие echo после приёма. Их размер не задаёт
+обязательный порог CI и не измеряет одновременную пропускную способность.
 
 ## CLI: ввод, вывод и соединение компонентов
 

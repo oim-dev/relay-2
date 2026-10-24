@@ -34,8 +34,10 @@ describe("Настоящий пользовательский manager Git Sync",
       expect(restarted.instance).not.toBe(first.instance);
       await fixture.assertExited([first.pid]);
 
+      fixture.beginStage("crash-injection");
       await fixture.manager.crash(restarted.pid);
       // Здесь не вызывается ни service enable, ни native start/restart: восстанавливает только manager.
+      fixture.beginStage("crash-recovery");
       const recovered = await waitForGitSyncSupervisor(fixture.options.home, {
         version: fixture.version,
         previousInstance: restarted.instance,

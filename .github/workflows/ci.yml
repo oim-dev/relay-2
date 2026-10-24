@@ -99,7 +99,7 @@ jobs:
 
       - name: Процессные тесты CLI и Git Sync
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: bun run test:process 2>&1 | tee "$CI_LOG_DIR/process.log"
+        run: bun --bun turbo run test:process --filter=@relay/cli --filter=@relay/git-sync --continue=always 2>&1 | tee "$CI_LOG_DIR/process.log"
 
       - name: Сквозные сценарии
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import type { GitSyncEnvironment } from "./client.types";
 import type { ProcessCommand, ProcessResult } from "./process.types";
@@ -501,6 +502,113 @@ describe("Конфигурации пользовательского supervisor
     if (outcome !== "stop-timeout") {
       expect(stopReads).toBe(3);
     }
+  });
+
+  test.each([
+    {
+      name: "откат wall clock на минуту не увеличивает остаток stop budget",
+      scenario: "rollback",
+      pollBudgets: [75],
+      mutations: ["/End", "/Create", "/Run"],
+      result: {
+        registered: true,
+        state: "running",
+        failureCode: null,
+        failureExit: null,
+        failurePhase: null,
+      },
+    },
+    {
+      name: "положительная четверть миллисекунды передаётся native как одна миллисекунда",
+      scenario: "fractional",
+      pollBudgets: [1],
+      mutations: ["/End", "/Create", "/Run"],
+      result: {
+        registered: true,
+        state: "running",
+        failureCode: null,
+        failureExit: null,
+        failurePhase: null,
+      },
+    },
+    {
+      name: "истёкший во время End deadline запрещает первый COM poll",
+      scenario: "expired-before-probe",
+      pollBudgets: [],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "wait-stopped",
+      },
+    },
+    {
+      name: "истёкший во время COM deadline запрещает следующий poll и Run",
+      scenario: "expired-after-probe",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "wait-stopped",
+      },
+    },
+    {
+      name: "SIGTERM во время ожидания сохраняет код отмены и запрещает Run",
+      scenario: "cancelled",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_CANCELLED",
+        failureExit: 143,
+        failurePhase: null,
+      },
+    },
+    {
+      name: "SIGTERM после COM сохраняет код отмены и при исчерпании deadline",
+      scenario: "cancelled-at-deadline",
+      pollBudgets: [75],
+      mutations: ["/End"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_CANCELLED",
+        failureExit: 143,
+        failurePhase: null,
+      },
+    },
+  ])("Windows monotonic stop: $name", ({ scenario, pollBudgets, mutations, result }) => {
+    const child = Bun.spawnSync(
+      [process.execPath, join(import.meta.dir, "service-clock.test-worker.ts"), scenario],
+      {
+        cwd: import.meta.dir,
+        env: process.env,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 5000,
+      },
+    );
+
+    expect({ exitCode: child.exitCode, stderr: child.stderr.toString() }).toEqual({
+      exitCode: 0,
+      stderr: "",
+    });
+    const observation: unknown = JSON.parse(child.stdout.toString());
+    expect(observation).toEqual({
+      configuredBudget: 100,
+      wallClock: 940_000,
+      signalsPreserved: true,
+      pollBudgets,
+      mutations,
+      ...result,
+    });
   });
 
   test("native отказ сохраняет реальный код и диагностику вместо успешной установки", async () => {

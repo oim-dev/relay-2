@@ -115,6 +115,7 @@ export async function windowsState(
  * Останавливает старую регистрацию до замены definition и ждёт подтверждения manager.
  * End выполняется один раз; затем повторяются только readonly COM-наблюдения.
  * Ready/Disabled без исчезновения running instances не разрешают новый Run.
+ * Монотонный бюджет не зависит от коррекции часов ОС; native timeout округляется вверх до ms.
  */
 async function stopWindowsTask(
   config: ServiceConfiguration,
@@ -128,11 +129,11 @@ async function stopWindowsTask(
     return initial;
   }
   const timeoutMs = environment.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS;
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   await native(environment, "schtasks.exe", ["/End", "/TN", config.id]);
   let current = initial;
   for (;;) {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - performance.now();
     if (remaining <= 0) {
       throw new RelayError("GIT_SYNC_SERVICE_FAILED", messages.nativeFailed, 4, {
         id: config.id,
@@ -142,17 +143,29 @@ async function stopWindowsTask(
         runningInstances: current.runningInstances,
       });
     }
-    current = await readWindowsSnapshot(config, { ...environment, timeoutMs: remaining });
+    current = await readWindowsSnapshot(config, {
+      ...environment,
+      timeoutMs: Math.ceil(remaining),
+    });
     if (
       !current.native.registered ||
       (current.native.state === "stopped" && current.runningInstances === 0)
     ) {
       return current;
     }
+    const pauseRemaining = deadline - performance.now();
+    // Полученный во время COM abort сохраняет прежний CANCELLED и при истёкшем deadline.
+    if (pauseRemaining <= 0 && !environment.signal?.aborted) {
+      continue;
+    }
     try {
-      await pause(Math.min(SERVICE_STOP_POLL_MS, Math.max(1, deadline - Date.now())), undefined, {
-        signal: environment.signal,
-      });
+      await pause(
+        Math.min(SERVICE_STOP_POLL_MS, Math.max(1, Math.ceil(pauseRemaining))),
+        undefined,
+        {
+          signal: environment.signal,
+        },
+      );
     } catch (cause) {
       if (!environment.signal?.aborted) {
         throw cause;

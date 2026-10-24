@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { ProjectDatabase } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { ReplicationService } from "../../src/replication/replication";
-import { createReplicationFixture } from "./helpers/replication-fixture";
-import type { OwnedReplicationFixture } from "./helpers/replication-fixture.types";
+import { createReplicationFixture } from "../integration/helpers/replication-fixture";
+import type { OwnedReplicationFixture } from "../integration/helpers/replication-fixture.types";
 
 describe("Согласование пятидесяти реальных SQLite", () => {
   let fixture: OwnedReplicationFixture | undefined;
