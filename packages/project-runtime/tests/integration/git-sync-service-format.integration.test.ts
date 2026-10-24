@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createServiceConfiguration, runNativeProcess } from "@relay/project-runtime";
 import { RuntimeFixture } from "./helpers/runtime-fixture";
+import { parseWindowsArguments } from "./helpers/windows-arguments";
 
 const group = "git-sync-implementation/cli-runtime";
 
@@ -23,23 +24,8 @@ describe("Нативное чтение формата Windows service", () => {
 $ErrorActionPreference='Stop'
 [Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: entered')
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class RelayArgumentFixture {
-  [DllImport("shell32.dll", SetLastError=true)] static extern IntPtr CommandLineToArgvW([MarshalAs(UnmanagedType.LPWStr)] string command, out int count);
-  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
-  public static string[] Parse(string command) {
-    int count; IntPtr memory=CommandLineToArgvW(command, out count);
-    if(memory==IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
-    try { string[] args=new string[count]; for(int i=0;i<count;i++) args[i]=Marshal.PtrToStringUni(Marshal.ReadIntPtr(memory,i*IntPtr.Size)); return args; }
-    finally { LocalFree(memory); }
-  }
-}
-'@
-[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: native-parser-compiled')
 $xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(config.content, "utf8").toString("base64")}'))
-@{binary=$xml.Task.Actions.Exec.Command; args=[RelayArgumentFixture]::Parse('unused.exe '+$xml.Task.Actions.Exec.Arguments)} | ConvertTo-Json -Compress
+@{binary=$xml.Task.Actions.Exec.Command; arguments=$xml.Task.Actions.Exec.Arguments} | ConvertTo-Json -Compress
 [Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: completed')
 `;
       try {
@@ -58,10 +44,22 @@ $xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.
         });
 
         expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout.replace(/^\uFEFF/u, ""))).toEqual({
-          binary,
-          args: ["unused.exe", "supervise", "--home", home],
-        });
+        const decoded: unknown = JSON.parse(result.stdout.replace(/^\uFEFF/u, ""));
+        expect(decoded).toMatchObject({ binary, arguments: expect.any(String) });
+        if (
+          !decoded ||
+          typeof decoded !== "object" ||
+          !("arguments" in decoded) ||
+          typeof decoded.arguments !== "string"
+        ) {
+          throw new Error("XML-декодер не вернул строку аргументов Windows");
+        }
+        expect(parseWindowsArguments(`unused.exe ${decoded.arguments}`)).toEqual([
+          "unused.exe",
+          "supervise",
+          "--home",
+          home,
+        ]);
       } finally {
         await fixture.dispose();
       }

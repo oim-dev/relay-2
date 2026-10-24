@@ -54,8 +54,6 @@ export interface SshProbe {
 export interface SshProbeContext {
   /* Найденный в Git окружении executable, null при его отсутствии. */
   readonly executable: string | null;
-  /* Cwd только дочернего probe. */
+  /* Абсолютный writable cwd дочернего probe; владеет временным каталогом с пустым config до завершения. */
   readonly cwd: string;
-  /* Платформа выбирает безопасный пустой config, а не пользовательский ~/.ssh/config. */
-  readonly platform: string;
 }

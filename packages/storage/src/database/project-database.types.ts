@@ -1,3 +1,5 @@
+import type { Database } from "bun:sqlite";
+
 /**
  * Исходные метаданные новой базы: все значения должны быть непустыми строками.
  */
@@ -48,4 +50,14 @@ export interface SchemaVersionRow {
 export interface ApplicationIdRow {
   /* Числовой маркер Relay; чужая база не переинициализируется. */
   readonly application_id: number;
+}
+
+/**
+ * Проверенное рабочее соединение; при успехе владение переходит ProjectDatabase.
+ */
+export interface OpenedProjectFile {
+  /* Соединение к текущему файлу; вызывающий обязан закрыть его после работы. */
+  readonly connection: Database;
+  /* Постоянный ID, проверенный именно через возвращённое соединение. */
+  readonly projectId: string;
 }

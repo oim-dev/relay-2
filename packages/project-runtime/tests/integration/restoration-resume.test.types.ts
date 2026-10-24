@@ -7,7 +7,7 @@ import type { ProjectLocation } from "@relay/project-runtime";
 export interface PendingRestorationFixture {
   /* Выбранные ID/публичная БД/config до resume. */
   readonly location: ProjectLocation;
-  /* Собственный staging с publication.json и SQLite. */
+  /* Собственный staging с marker; после Unix rename datafile находится только по публичному пути. */
   readonly stagingPath: string;
   /* Публичный hardlink intent. */
   readonly publicationPath: string;

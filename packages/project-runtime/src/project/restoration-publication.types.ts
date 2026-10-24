@@ -16,22 +16,43 @@ interface RestorationPublicationPaths {
 }
 
 /**
- * Локальное намерение до первого изменения рабочего пути БД. v2 исключает разрушительный recovery
- * старого reader v1; ранний v1 читается только для сохраняющего отказа, без resume и cleanup.
+ * Способ публикации datafile: rename не оставляет private alias; hardlink используется на Windows,
+ * где SQLite-handle запрещает rename и ОС отклоняет unlink, пока чужое соединение держит файл.
  */
-export type RestorationPublication = RestorationPublicationPaths &
-  (
-    | {
-        /* Ранний формат без достаточной идентичности datafile. */
-        readonly version: 1;
-      }
-    | {
-        /* Сохраняющий протокол с обязательной физической идентичностью до экспозиции. */
-        readonly version: 2;
-        /* Исходный datafile, не меняющий идентичность при поздних пользовательских commits. */
-        readonly databaseIdentity: RestorationFileIdentity;
-      }
-  );
+export type RestorationTransfer = "rename" | "hardlink";
+
+/**
+ * Intent v3: прежние readers v1/v2 должны отвергнуть его до своей работы с private datafile.
+ */
+export interface CurrentRestorationPublication extends RestorationPublicationPaths {
+  /* Версия alias-free протокола Unix и явно обозначенного hardlink-протокола Windows. */
+  readonly version: 3;
+  /* Исходный datafile; поздние commits не меняют его физическую идентичность. */
+  readonly databaseIdentity: RestorationFileIdentity;
+  /* Физическая идентичность самого marker; позволяет завершить crash в cleanup без copied-marker adoption. */
+  readonly markerIdentity: RestorationFileIdentity;
+  /* Атомарный перенос имени либо эксклюзивный hardlink; определяет recovery-состояния. */
+  readonly transfer: RestorationTransfer;
+}
+
+/**
+ * Прежние намерения читаются только для сохраняющего отказа; автоматическая миграция aliases запрещена.
+ */
+export type RestorationPublication =
+  | CurrentRestorationPublication
+  | (RestorationPublicationPaths &
+      (
+        | {
+            /* Ранний формат без достаточной идентичности datafile. */
+            readonly version: 1;
+          }
+        | {
+            /* Сохраняющий протокол с обязательной физической идентичностью до экспозиции. */
+            readonly version: 2;
+            /* Исходный datafile, не меняющий идентичность при поздних пользовательских commits. */
+            readonly databaseIdentity: RestorationFileIdentity;
+          }
+      ));
 
 /**
  * Явный отказ завершить неопределённую публикацию без потери принятого локального состояния.

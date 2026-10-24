@@ -1,12 +1,4 @@
-import {
-  closeSync,
-  fsyncSync,
-  linkSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { closeSync, fsyncSync, linkSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { fileExists } from "../configuration/files";
@@ -14,13 +6,16 @@ import type { ProjectLocation } from "./location.types";
 import type {
   RestorationPublication,
   RestorationRecoveryDetails,
+  CurrentRestorationPublication,
 } from "./restoration-publication.types";
 import { projectMessages as messages } from "./project.messages";
 import {
   isRestorationFileIdentity,
   observeRestorationFile,
   RESTORATION_STAGING_MARKER,
+  cleanupResumedRestoration,
 } from "./restoration-ownership";
+import { restorationTransfer } from "./restoration-transfer";
 
 const PUBLICATION_FILE = ".restore-publication.json";
 
@@ -62,7 +57,7 @@ export function readRestorationPublication(
     !value ||
     typeof value !== "object" ||
     !("version" in value) ||
-    (value.version !== 1 && value.version !== 2) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3) ||
     !("projectId" in value) ||
     value.projectId !== location.projectId ||
     !("configPath" in value) ||
@@ -88,31 +83,54 @@ export function readRestorationPublication(
   if (!("databaseIdentity" in value) || !isRestorationFileIdentity(value.databaseIdentity)) {
     throw invalidPublication(path);
   }
-  return { version: 2, ...paths, databaseIdentity: value.databaseIdentity };
+  if (value.version === 2) {
+    return { version: 2, ...paths, databaseIdentity: value.databaseIdentity };
+  }
+  if (
+    !("transfer" in value) ||
+    (value.transfer !== "rename" && value.transfer !== "hardlink") ||
+    !("markerIdentity" in value) ||
+    !isRestorationFileIdentity(value.markerIdentity)
+  ) {
+    throw invalidPublication(path);
+  }
+  return {
+    version: 3,
+    ...paths,
+    databaseIdentity: value.databaseIdentity,
+    markerIdentity: value.markerIdentity,
+    transfer: value.transfer,
+  };
 }
 
 /**
- * Эксклюзивно публикует fsync-нутый маркер до hardlink рабочей базы; вызывающий удерживает restore mutex.
+ * Эксклюзивно публикует fsync-нутый v3 marker до переноса datafile; вызывающий удерживает restore mutex.
+ * Старые readers v1/v2 отвергают новый intent до попытки восстановить прежний private hardlink.
  */
-export function beginRestorationPublication(location: ProjectLocation, staging: string): void {
+export function beginRestorationPublication(
+  location: ProjectLocation,
+  staging: string,
+): CurrentRestorationPublication {
   const temporary = join(staging, RESTORATION_STAGING_MARKER);
   const descriptor = openSync(temporary, "wx", 0o600);
   try {
-    const value: RestorationPublication = {
-      // Старый reader v1 не должен применить свой разрушительный rollback к этому intent.
-      version: 2,
+    const value: CurrentRestorationPublication = {
+      version: 3,
       projectId: location.projectId,
       configPath: location.configPath,
       databasePath: location.databasePath,
       staging,
       databaseIdentity: observeRestorationFile(join(staging, "project.sqlite")).identity,
+      markerIdentity: observeRestorationFile(temporary).identity,
+      transfer: restorationTransfer(),
     };
     writeFileSync(descriptor, JSON.stringify(value), "utf8");
     fsyncSync(descriptor);
+    linkSync(temporary, restorationPublicationPath(location));
+    return value;
   } finally {
     closeSync(descriptor);
   }
-  linkSync(temporary, restorationPublicationPath(location));
 }
 
 /**
@@ -122,8 +140,10 @@ export function beginRestorationPublication(location: ProjectLocation, staging: 
  */
 export function finishRestorationPublication(location: ProjectLocation, staging: string): void {
   try {
-    rmSync(staging, { recursive: true, force: true });
-    rmSync(restorationPublicationPath(location), { force: true });
+    const publication = readRestorationPublication(location);
+    if (publication?.staging === staging) {
+      cleanupResumedRestoration(publication, restorationPublicationPath(location));
+    }
   } catch {
     // Маркер остаётся для следующего восстановления; пользовательская БД не откатывается из-за уборки.
   }

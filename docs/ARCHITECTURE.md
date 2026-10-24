@@ -438,7 +438,7 @@ Resume сохраняет БД, `replicaId` и поздний outbox; `sourceChe
 что Git HEAD не установлен этой операцией. Это завершение локальной привязки без supervisor,
 а не новый Git-checkpoint или подтверждение доставки.
 
-Intent v2 защищает новую публикацию от прежнего rollback reader v1; legacy intent,
+Intent v3 фиксирует способ публикации и отвергается прежними readers v1/v2; legacy intent,
 чужой target и сомнительная идентичность отклоняются с сохранением материалов.
 Неполная private cleanup отражается отдельным `recovery` после успешной привязки,
 а повтор после полной уборки даёт `RESTORE_NOT_PENDING`, exit 3. Ошибка владения БД

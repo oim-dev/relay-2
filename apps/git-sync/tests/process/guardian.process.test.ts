@@ -13,6 +13,7 @@ import {
   withGuardianFixture,
 } from "./guardian-helpers/fixture";
 import type { TreeReady } from "./guardian-helpers/fixture.types";
+import { withOwnerObservation } from "./guardian-helpers/owner-observation";
 
 const brokenEntry = fileURLToPath(new URL("./guardian-helpers/broken-entry.ts", import.meta.url));
 const sourceEntry = fileURLToPath(new URL("./guardian-helpers/entry.ts", import.meta.url));
@@ -253,13 +254,17 @@ describe("Владение деревом защищённой команды", 
       await withGuardianFixture(async ({ options, actor, root }) => {
         const owner = startOwner(root, { ...options, argv: [...actor, "tree-detached", root] });
         try {
-          const tree = await ready(root);
-          expect(Object.values(tree).every(running)).toBe(true);
+          await withOwnerObservation(root, owner, async (phase) => {
+            const tree = await ready(root);
+            expect(Object.values(tree).every(running)).toBe(true);
 
-          owner.child.kill("SIGKILL");
-          await owner.exited;
+            phase("owner-exit");
+            owner.child.kill("SIGKILL");
+            await owner.exited;
 
-          await expectTreeStopped(tree);
+            phase("tree-stop");
+            await expectTreeStopped(tree);
+          });
         } finally {
           owner.child.kill("SIGKILL");
           await owner.exited;

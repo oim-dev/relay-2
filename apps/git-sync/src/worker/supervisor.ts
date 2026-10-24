@@ -11,14 +11,30 @@ import { WorkerLauncher } from "./launch";
 import { waitUntil } from "../local/deadline";
 import { ProjectController } from "./project-control";
 import { NetworkLeases } from "./network-leases";
+import { recordSupervisorFailure } from "./supervisor-failure";
 
 /**
  * Обслуживает явные конфиги одного home; независимые ошибки проектов не прерывают обход.
  * Не более четырёх запусков/проверок и четырёх сетевых циклов проектов одновременно.
+ * После канонизации home сохраняет bounded fatal-record и пробрасывает исходную ошибку;
+ * диагностическая запись не служит readiness и не меняет владение процессами.
  */
 export async function runSupervisor(home: string, shutdown: AbortController): Promise<void> {
   mkdirSync(home, { recursive: true, mode: 0o700 });
   home = realpathSync(home);
+  try {
+    await superviseHome(home, shutdown);
+  } catch (error) {
+    recordSupervisorFailure(home, error);
+    throw error;
+  }
+}
+
+/**
+ * Удерживает control owner и workers уже проверенного home до shutdown; исходный fatal error
+ * передаётся внешней границе записи диагностики без изменения кода, cause и cleanup-семантики.
+ */
+async function superviseHome(home: string, shutdown: AbortController): Promise<void> {
   const directory = join(home, "git-sync");
   const permits = new NetworkLeases();
   const retries = new Map<string, { failures: number; next: number }>();

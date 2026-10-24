@@ -10,8 +10,12 @@ export interface GitProcessRuntime {
   preparationMs: number;
   /* Начатые команды, чьё завершение предшествует удалению helper. */
   readonly pending: Set<Promise<GuardedCommandResult>>;
-  /* Необязательное наблюдение завершённых процессов без stdout, stdin и payload снимков. */
+  /* Metadata без потоков/payload; ошибки observer накапливаются отдельно до завершения scope. */
   readonly observe?: (observation: GitProcessObservation) => void;
+  /* Первая ошибка observer; остальные учитываются только счётчиком для ограничения памяти. */
+  observationFailure: unknown;
+  /* Число отказов observer; его ошибка не меняет результата или отказа отдельной команды. */
+  observationFailures: number;
   /* Завершённый caller больше не может запускать команды через унаследованный async context. */
   closed: boolean;
 }

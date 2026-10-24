@@ -56,7 +56,7 @@ export async function crashDuringTeamPublication(
 
   const recovered = await team.exchangeInProcess(replica, { point: "complete" });
 
-  expect(recovered.pid).not.toBe(crashed.pid);
+  expect(recovered.instance).not.toBe(crashed.instance);
   expect(recovered.beforePush).toEqual(crashed.state);
   expect(recovered.state.outbox).toEqual([]);
   expect(replica.replication.status().replicaId).toBe(replicaId);

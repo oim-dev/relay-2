@@ -37,6 +37,7 @@ export { buildSourceGuardianComponent } from "./process-guardian/component-build
 export { runGuardedCommand } from "./process-guardian/runner";
 export { runGuardianEntry } from "./process-guardian/entry";
 export { GuardedCommandError } from "./process-guardian/errors";
+export { combineProcessFailures } from "./process-guardian/component-failures";
 export type {
   GuardedCommandOptions,
   GuardedCommandResult,

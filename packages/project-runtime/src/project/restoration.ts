@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { withLocalFileLock } from "@relay/storage";
@@ -10,7 +10,14 @@ import {
   withRestorationDatabasePublication,
   requirePrivateRestorationFile,
 } from "./restoration-database";
-import { requireNoRestorationJournals } from "./restoration-ownership";
+import {
+  requireNoRestorationJournals,
+  requirePublishedRestorationDatabase,
+  observeRestorationFile,
+  restorationOwnershipError,
+  sameRestorationFile,
+} from "./restoration-ownership";
+import { transferRestorationDatabase } from "./restoration-transfer";
 import { projectMessages as messages } from "./project.messages";
 import {
   selectRestorationTarget,
@@ -72,7 +79,7 @@ export function restoreProject(
       let preserveStaging = false;
       try {
         invokeRestorationCallback(writeDatabase, stagedDatabase, messages.restoreSynchronous);
-        requirePrivateRestorationFile(stagedDatabase);
+        const databaseIdentity = requirePrivateRestorationFile(stagedDatabase);
         if (fileExists(`${stagedDatabase}-shm`)) {
           // Даже readonly WAL-открытие может менять индекс: чужой SHM нельзя передавать SQLite.
           requirePrivateRestorationFile(`${stagedDatabase}-shm`);
@@ -86,14 +93,22 @@ export function restoreProject(
           requirePrivateRestorationFile(stagedDatabase);
           requireNoRestorationJournals(stagedDatabase);
           requireVacantDatabase(location.databasePath);
-          beginRestorationPublication(location, staging);
+          const publication = beginRestorationPublication(location, staging);
           publicationStarted = true;
-          // Пустая DELETE-транзакция удерживает SQLite-lock до создания нового имени.
-          linkSync(stagedDatabase, location.databasePath);
+          transferRestorationDatabase(publication);
+          requirePublishedRestorationDatabase(publication);
         });
         if (!existingConfig) {
           mkdirSync(dirname(resolve(location.configPath)), { recursive: true });
           writeJsonAtomic(location.configPath, { version: 1, projectId }, "create");
+        }
+        if (
+          !sameRestorationFile(
+            databaseIdentity,
+            observeRestorationFile(location.databasePath).identity,
+          )
+        ) {
+          throw restorationOwnershipError(location.databasePath);
         }
         committed = true;
         return location;

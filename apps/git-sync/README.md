@@ -167,7 +167,7 @@ Linux использует группу и subreaper, Windows — Job Object. Н
 POSIX-группа: потомок, самостоятельно выполнивший `setsid`, выходит за текущую гарантию.
 Каждый Git-вызов задаёт `gc.autoDetach=false` и `maintenance.autoDetach=false` без изменения
 global config. Для default OpenSSH профиль определяется в точном Git окружении через `-V`
-и безопасный `-G -F <null>` probe. Реальное соединение получает проверенный
+и безопасный `-G -F <собственный пустой файл>` probe. Реальное соединение получает проверенный
 `ControlPersist=no` и, если клиент его поддерживает, `ForkAfterAuthentication=no`.
 В реальном соединении `-F` не добавляется: identity, proxy, Keychain и обычный SSH config
 сохраняются. Существующие внешние ssh-agent/master не относятся к нашим потомкам.
@@ -263,8 +263,12 @@ Completed и конец обхода не означают пустой outbox. 
 Source entry использует `withGitProcessRuntime`: один свежий минимальный Runtime helper
 с bytecode на lifetime сценария. Он собирается лениво перед первой внешней командой текущим Bun
 из текущих исходников; cached status без процессов сборку не запускает.
-старый `dist` не служит заменой source-проверкам. Scope ожидает начатые guarded commands
-перед удалением helper. При прямом библиотечном вызове вне scope доступен raw source entry
+Старый `dist` не служит заменой source-проверкам. Scope ожидает начатые guarded commands
+перед удалением helper; pending/closed действуют и в standalone независимо от observer.
+Если cleanup также отказал, исходные ошибки сохраняются вместе в cause/aggregate без смены
+кода и exitCode первичного `RelayError`. Observer не меняет результат команды: scope отдельно
+возвращает `GIT_OBSERVER_FAILED` с первой причиной и числом отказов диагностики либо присоединяет
+её к уже возникшей ошибке. При прямом библиотечном вызове вне scope доступен raw source entry
 Runtime. Standalone сборка приложения также содержит bytecode и обслуживает свою private роль.
 
 Для source entry временный helper находится в `.artifacts/<дата>/git-sync-source-runtime`

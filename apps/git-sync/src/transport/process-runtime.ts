@@ -2,8 +2,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { RelayError } from "@relay/contracts";
 import {
   buildSourceGuardianComponent,
+  combineProcessFailures,
   GuardedCommandError,
   runGuardedCommand,
   sourceGuardianComponent,
@@ -12,6 +14,7 @@ import {
 } from "@relay/project-runtime";
 import { componentCommand } from "./component-command";
 import type { GitProcessObservation, GitProcessRuntime } from "./process-runtime.types";
+import { transportMessages } from "./transport.messages";
 
 const runtimes = new AsyncLocalStorage<GitProcessRuntime>();
 
@@ -33,13 +36,16 @@ function sourceDirectory(): string {
  * Вложенный scope переиспользует владельца; standalone приложение использует свою private роль.
  * При любом исходе ждёт уже начатые команды и удаляет только созданный этим scope каталог.
  * Callback обязан завершить свои workers/engines; новые команды после его выхода отклоняются.
+ * Cleanup/observer failures не заменяют primary: обе причины сохраняются; успешный cleanup
+ * оставляет исходную ошибку неизменной. Ошибка observer отдельно отклоняет завершение scope,
+ * сохраняя первую причину и число отказов, но никогда не меняет результат отдельной команды.
  */
 export async function withGitProcessRuntime<T>(
   operation: () => Promise<T>,
   directory?: string,
   observe?: (observation: GitProcessObservation) => void,
 ): Promise<T> {
-  if (runtimes.getStore() !== undefined || (Bun.isStandaloneExecutable && observe === undefined)) {
+  if (runtimes.getStore() !== undefined) {
     return operation();
   }
   let ownedDirectory: string | null = null;
@@ -69,17 +75,45 @@ export async function withGitProcessRuntime<T>(
     preparationMs: 0,
     pending: new Set(),
     closed: false,
+    observationFailure: undefined,
+    observationFailures: 0,
     ...(observe === undefined ? {} : { observe }),
   };
+  let outcome: PromiseSettledResult<T>;
   try {
-    return await runtimes.run(runtime, operation);
-  } finally {
-    runtime.closed = true;
-    await Promise.allSettled([...runtime.pending]);
-    if (ownedDirectory !== null) {
+    outcome = { status: "fulfilled", value: await runtimes.run(runtime, operation) };
+  } catch (reason) {
+    outcome = { status: "rejected", reason };
+  }
+  /**
+   * Сохраняет приоритет исходной ошибки и присоединяет последующий отказ завершения.
+   */
+  function failed(error: unknown): void {
+    outcome = {
+      status: "rejected",
+      reason: outcome.status === "rejected" ? combineProcessFailures(outcome.reason, error) : error,
+    };
+  }
+  runtime.closed = true;
+  await Promise.allSettled([...runtime.pending]);
+  if (ownedDirectory !== null) {
+    try {
       rmSync(ownedDirectory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      failed(cleanupError);
     }
   }
+  if (runtime.observationFailures > 0) {
+    const failure = new RelayError("GIT_OBSERVER_FAILED", transportMessages.observation, 1, {
+      failures: runtime.observationFailures,
+    });
+    failure.cause = runtime.observationFailure;
+    failed(failure);
+  }
+  if (outcome.status === "rejected") {
+    throw outcome.reason;
+  }
+  return outcome.value;
 }
 
 /**
@@ -126,19 +160,26 @@ export function runGitCommand(
    */
   function finished(result: GuardedCommandResult | null, error?: unknown): void {
     runtime?.pending.delete(command);
-    if (component === undefined) {
+    if (component === undefined || runtime === undefined || runtime.observe === undefined) {
       return;
     }
-    runtime?.observe?.({
-      argv: options.argv,
-      cwd: options.cwd,
-      component,
-      helperPreparationMs: runtime?.preparationMs ?? 0,
-      elapsedMs: performance.now() - started,
-      exitCode: result?.code ?? null,
-      failure:
-        result !== null ? null : error instanceof GuardedCommandError ? error.reason : "runner",
-    });
+    try {
+      runtime.observe({
+        argv: options.argv,
+        cwd: options.cwd,
+        component,
+        helperPreparationMs: runtime.preparationMs,
+        elapsedMs: performance.now() - started,
+        exitCode: result?.code ?? null,
+        failure:
+          result !== null ? null : error instanceof GuardedCommandError ? error.reason : "runner",
+      });
+    } catch (observationError) {
+      if (runtime.observationFailures === 0) {
+        runtime.observationFailure = observationError;
+      }
+      runtime.observationFailures++;
+    }
   }
   return command;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import {
   GuardedCommandError,
   openProject,
@@ -227,15 +227,19 @@ describe("Собранный процессный компонент Git Sync", 
     await withProcessFixture(async (fixture) => {
       const source = fixture.context("source");
       expect(
-        (await fixture.request(source.options, "connect", { remote: fixture.remote })).ok,
-      ).toBe(true);
-      expect((await fixture.request(source.options, "now")).ok).toBe(true);
+        await fixture.request(source.options, "connect", { remote: fixture.remote }),
+      ).toMatchObject({ ok: true, data: { connected: true } });
+      expect(await fixture.request(source.options, "now")).toMatchObject({
+        ok: true,
+        data: { pending: { changesets: 0 } },
+      });
       const target = fixture.context("target", false);
       expect(
-        (await fixture.request(target.options, "restore", { remote: fixture.remote })).ok,
-      ).toBe(true);
+        await fixture.request(target.options, "restore", { remote: fixture.remote }),
+      ).toMatchObject({ ok: true, data: { restored: true } });
       await withForegroundSupervisor(fixture, target.options, async (supervisor) => {
         const startOutcomes = await Promise.allSettled([
+          fixture.request(target.options, "worker.start"),
           fixture.request(target.options, "worker.start"),
           fixture.request(target.options, "worker.start"),
         ]);
@@ -246,12 +250,23 @@ describe("Собранный процессный компонент Git Sync", 
           return outcome.value;
         });
         for (const result of starts) {
-          expect(result.ok).toBe(true);
+          expect(result).toMatchObject({
+            ok: true,
+            data: {
+              worker: {
+                desired: "running",
+                actual: "running",
+                responsive: true,
+                supervisorInstance: supervisor.instance,
+              },
+            },
+          });
         }
         const instances = starts.map((result) =>
           result.ok ? requestObject(requestObject(result.data).worker).instance : null,
         );
         expect(instances[0]).toBe(instances[1]);
+        expect(instances[0]).toBe(instances[2]);
         expect(typeof instances[0]).toBe("string");
         const targetPath = await withProjectDatabase(target.options, (database) =>
           realpathSync(database.path),
@@ -259,10 +274,14 @@ describe("Собранный процессный компонент Git Sync", 
         const workerEndpoint = readEndpoint(join(stateDirectory(targetPath), "worker.json"));
         expect(workerEndpoint).toMatchObject({
           kind: "worker",
+          identity: targetPath,
           instance: instances[0],
           supervisorInstance: supervisor.instance,
         });
-        expect((await fixture.request(target.options, "auto.enable")).ok).toBe(true);
+        expect(await fixture.request(target.options, "auto.enable")).toMatchObject({
+          ok: true,
+          data: { mode: "auto", worker: { instance: instances[0], responsive: true } },
+        });
         const added = await withProjectDatabase(source.options, (database) =>
           new KnowledgeService(database).create(
             "feature",
@@ -271,7 +290,10 @@ describe("Собранный процессный компонент Git Sync", 
           ),
         );
 
-        expect((await fixture.request(source.options, "now")).ok).toBe(true);
+        expect(await fixture.request(source.options, "now")).toMatchObject({
+          ok: true,
+          data: { pending: { changesets: 0 } },
+        });
         await eventually(() => {
           const targetDb = openProject(target.options);
           try {
@@ -280,7 +302,10 @@ describe("Собранный процессный компонент Git Sync", 
             targetDb.database.close();
           }
         });
-        expect((await fixture.request(target.options, "auto.disable")).ok).toBe(true);
+        expect(await fixture.request(target.options, "auto.disable")).toMatchObject({
+          ok: true,
+          data: { mode: "manual", worker: { instance: instances[0], responsive: true } },
+        });
         const endpointPath = await withProjectDatabase(target.options, async (database) => {
           await new KnowledgeService(database).create(
             "feature",
@@ -291,16 +316,19 @@ describe("Собранный процессный компонент Git Sync", 
         });
         const status = await fixture.request(target.options, "status");
 
-        expect(status.ok).toBe(true);
-        if (status.ok) {
-          expect(status.data).toMatchObject({
+        expect(status).toMatchObject({
+          ok: true,
+          data: {
             mode: "manual",
             worker: { desired: "running", actual: "running", responsive: true },
             git: { ahead: 0, behind: 0 },
             pending: { changesets: 1, unexported: 1 },
-          });
-        }
-        expect((await fixture.request(target.options, "worker.stop")).ok).toBe(true);
+          },
+        });
+        expect(await fixture.request(target.options, "worker.stop")).toMatchObject({
+          ok: true,
+          data: { worker: { desired: "stopped", actual: "stopped", responsive: false } },
+        });
         expect(readEndpoint(endpointPath)).toBeNull();
       });
     });
@@ -309,22 +337,53 @@ describe("Собранный процессный компонент Git Sync", 
   test("restore без remote использует сохранённое подключение после утраты локальной БД", async () => {
     await withProcessFixture(async (fixture) => {
       const original = fixture.context("lost");
-      expect(
-        (await fixture.request(original.options, "connect", { remote: fixture.remote })).ok,
-      ).toBe(true);
-      expect((await fixture.request(original.options, "now")).ok).toBe(true);
       if (!original.location) {
         throw new Error("expected project");
       }
-      rmSync(original.location.databasePath);
+      const { document, replicaId } = await withProjectDatabase(
+        original.options,
+        async (database) => ({
+          document: await new KnowledgeService(database).create(
+            "document",
+            { name: "Сохранено в Git", body: "Содержимое утраченной реплики" },
+            "author",
+          ),
+          replicaId: new ReplicationService(database).status().replicaId,
+        }),
+      );
+      const branch = "saved-connection-data";
+      expect(
+        await fixture.request(original.options, "connect", { remote: fixture.remote, branch }),
+      ).toMatchObject({ ok: true, data: { connected: true, branch } });
+      expect(await fixture.request(original.options, "now")).toMatchObject({
+        ok: true,
+        data: { pending: { changesets: 0 } },
+      });
+      const connectionPath = join(
+        stateDirectory(original.location.databasePath),
+        "connection.json",
+      );
+      const savedConnection = readFileSync(connectionPath, "utf8");
+      // Все соединения и requests закрыты. Теряем только SQLite-семью fixture,
+      // сохраняя .git-sync с подключением; неизвестный WAL проверяется отдельно в Runtime.
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+        rmSync(`${original.location.databasePath}${suffix}`, { force: true });
+      }
+      expect(readFileSync(connectionPath, "utf8")).toBe(savedConnection);
 
       const result = await fixture.request(original.options, "restore");
 
-      expect(result.ok).toBe(true);
+      expect(result).toMatchObject({
+        ok: true,
+        data: { restored: true, projectId: original.location.projectId, branch },
+      });
       const projectId = original.location.projectId;
       await withProjectDatabase(original.options, (database) => {
         expect(database.projectId).toBe(projectId);
-        expect(new ReplicationService(database).status().pending).toBe(0);
+        expect(database.get(document.id)?.data.body).toBe("Содержимое утраченной реплики");
+        const status = new ReplicationService(database).status();
+        expect(status.replicaId).not.toBe(replicaId);
+        expect(status.pending).toBe(0);
       });
     });
   }, 15_000);

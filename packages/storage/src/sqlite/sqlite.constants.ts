@@ -3,3 +3,9 @@
  * Одинаково применяется к базе проекта и служебной базе блокировки JSON.
  */
 export const SQLITE_BUSY_TIMEOUT_MS = 1000;
+
+/**
+ * Короткая пауза после закрытия отказавшего WAL-opener, чтобы другие процессы освободили shared locks.
+ * Входит в общий monotonic budget открытия, а не прибавляется к нему.
+ */
+export const SQLITE_WAL_REOPEN_PAUSE_MS = 5;

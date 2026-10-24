@@ -1,15 +1,39 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git, requireGit } from "../../src/transport/git";
-import { redact } from "../../src/transport/process";
-import { selectSshProfile, shellWord } from "../../src/transport/ssh-profile";
+import { redact, runProcess } from "../../src/transport/process";
+import type { ProcessInput, ProcessResult } from "../../src/transport/process.types";
+import { probeSsh, selectSshProfile, shellWord } from "../../src/transport/ssh-profile";
+
+const modernClients = [
+  {
+    name: "MSYS OpenSSH из Windows CI",
+    executable: "C:\\Program Files\\Git\\usr\\bin\\ssh.exe",
+    stderr: "OpenSSH_10.5p1, OpenSSL 3.5.9 29 Sep 2026\n",
+    implementation: "OpenSSH_10.5p1",
+  },
+  {
+    name: "native Windows OpenSSH",
+    executable: "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+    stderr: "OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2\r\n",
+    implementation: "OpenSSH_for_Windows_9.5p1",
+  },
+];
 
 /**
- * Создаёт только bare Git и файлы настроек под artifacts; предметная БД и пользовательский SSH config не нужны.
+ * Владеет отдельным каталогом и файлами настроек под artifacts, удаляет их после callback при любом исходе.
  */
-async function withSshRepository(
+async function withSshDirectory(
   operation: (directory: string, env: Record<string, string | undefined>) => Promise<void>,
 ): Promise<void> {
   const parent = fileURLToPath(
@@ -19,7 +43,7 @@ async function withSshRepository(
     ),
   );
   mkdirSync(parent, { recursive: true });
-  const directory = mkdtempSync(join(parent, "profile-"));
+  const directory = mkdtempSync(join(parent, "SSH профиль 'с пробелом'-"));
   const empty = join(directory, "empty.gitconfig");
   writeFileSync(empty, "");
   const env = {
@@ -32,11 +56,46 @@ async function withSshRepository(
     GIT_SSH_VARIANT: undefined,
   };
   try {
-    requireGit(await git(directory, ["init", "--bare", "."], { env }), "init");
     await operation(directory, env);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+}
+
+/**
+ * Подготавливает bare Git в собственном каталоге; предметная БД и пользовательский SSH config не нужны.
+ */
+async function withSshRepository(
+  operation: (directory: string, env: Record<string, string | undefined>) => Promise<void>,
+): Promise<void> {
+  await withSshDirectory(async (directory, env) => {
+    requireGit(await git(directory, ["init", "--bare", "."], { env }), "init");
+    await operation(directory, env);
+  });
+}
+
+/**
+ * Проверяет, что -G читает реальный пустой файл внутри отдельного каталога probe, а не null device.
+ */
+function expectEmptyProbeConfiguration(command: ProcessInput, directory: string): string {
+  expect(command.args[0]).toBe("-G");
+  expect(command.args[1]).toBe("-F");
+  const configuration = command.args[2];
+  if (configuration === undefined) {
+    throw new Error("Путь пустого probe config отсутствует");
+  }
+  expect(isAbsolute(configuration)).toBe(true);
+  expect(dirname(dirname(configuration))).toBe(directory);
+  expect(statSync(configuration).isFile()).toBe(true);
+  expect(readFileSync(configuration, "utf8")).toBe("");
+  return configuration;
+}
+
+/**
+ * Создаёт ответ контролируемого исполнителя; файловый lifetime проверяется настоящей файловой системой.
+ */
+function result(exitCode: number, stdout = "", stderr = ""): ProcessResult {
+  return { exitCode, stdout: Buffer.from(stdout), stderr: Buffer.from(stderr) };
 }
 
 /**
@@ -70,6 +129,7 @@ describe("SSH profile в настоящем Git окружении", () => {
     "probe stdout отделён от протокола, identity/proxy и ControlMaster сохраняются",
     async () => {
       await withSshRepository(async (directory, env) => {
+        const before = readdirSync(directory);
         const profile = await selectSshProfile({
           directory,
           env,
@@ -82,6 +142,8 @@ describe("SSH profile в настоящем Git окружении", () => {
         }
         expect(profile.capability.mode).toBe("openssh-foreground");
         expect(profile.command).not.toBeNull();
+        expect(profile.command).not.toContain(" -F");
+        expect(readdirSync(directory)).toEqual(before);
         const key = join(directory, "ключ с пробелом");
         const config = join(directory, "ssh fixture.conf");
         const fork = profile.capability.options.includes("ForkAfterAuthentication=no")
@@ -153,4 +215,118 @@ describe("SSH profile в настоящем Git окружении", () => {
       ).toBe("true");
     });
   }, 15_000);
+});
+
+describe("Переносимый SSH probe и владение пустым config", () => {
+  test("старый OpenSSH получает только поддержанный ControlPersist; частичный отказ очищает config", async () => {
+    await withSshDirectory(async (directory) => {
+      const before = readdirSync(directory);
+      const calls: ProcessInput[] = [];
+
+      const probe = await probeSsh(
+        { executable: "/fixture/ssh", cwd: directory },
+        async (command) => {
+          calls.push(command);
+          if (command.args[0] === "-V") {
+            return result(0, "OpenSSH_7.9p1 fixture\n");
+          }
+          expectEmptyProbeConfiguration(command, directory);
+          if (command.args.includes("ForkAfterAuthentication=no")) {
+            return result(
+              255,
+              "",
+              "command-line: line 0: Bad configuration option: forkafterauthentication",
+            );
+          }
+          return result(0, "controlpersist no\n");
+        },
+      );
+
+      expect(probe).toMatchObject({
+        implementation: "OpenSSH_7.9p1",
+        options: ["ControlPersist=no"],
+      });
+      expect(
+        calls.every((command) => command.timeoutMs === 3000 && command.maxBytes === 65536),
+      ).toBe(true);
+      expect(readdirSync(directory)).toEqual(before);
+    });
+  });
+
+  test.each(modernClients)(
+    "$name: версия из stderr распознаётся, -G stdout остаётся диагностикой",
+    async (client) => {
+      await withSshDirectory(async (directory) => {
+        const before = readdirSync(directory);
+
+        const probe = await probeSsh(
+          { executable: client.executable, cwd: directory },
+          async (command) => {
+            if (command.args[0] === "-V") {
+              return result(0, "", client.stderr);
+            }
+            expectEmptyProbeConfiguration(command, directory);
+            return result(0, "identityfile user-key\nproxycommand ssh -W %h:%p gateway\n");
+          },
+        );
+
+        expect(probe).toEqual({
+          executable: client.executable,
+          implementation: client.implementation,
+          options: ["ForkAfterAuthentication=no", "ControlPersist=no"],
+        });
+        expect(readdirSync(directory)).toEqual(before);
+      });
+    },
+  );
+
+  test.skipIf(Bun.which("ssh") === null)(
+    "настоящий SSH читает owned пустой файл с Unicode/пробелами и сохраняет соседний config",
+    async () => {
+      await withSshDirectory(async (directory, env) => {
+        const occupied = join(directory, ".relay-ssh-probe-existing");
+        mkdirSync(occupied);
+        const userConfig = join(occupied, "empty.conf");
+        writeFileSync(userConfig, "Конфигурация другого владельца", { flag: "wx" });
+        const before = readdirSync(directory);
+        const configurations: string[] = [];
+
+        const probe = await probeSsh(
+          { executable: Bun.which("ssh"), cwd: directory },
+          async (command) => {
+            if (command.args[0] === "-G") {
+              configurations.push(expectEmptyProbeConfiguration(command, directory));
+            }
+            return runProcess({ ...command, env });
+          },
+        );
+
+        expect(probe.options).toContain("ControlPersist=no");
+        expect(configurations).toHaveLength(2);
+        expect(configurations[0]).toBe(configurations[1]);
+        expect(readFileSync(userConfig, "utf8")).toBe("Конфигурация другого владельца");
+        expect(readdirSync(directory)).toEqual(before);
+      });
+    },
+    15_000,
+  );
+
+  test("исключение исполнителя удаляет owned config и сохраняет исходную ошибку", async () => {
+    await withSshDirectory(async (directory) => {
+      const before = readdirSync(directory);
+      const failure = new Error("Остановка probe исполнителем");
+
+      await expect(
+        probeSsh({ executable: "/fixture/ssh", cwd: directory }, async (command) => {
+          if (command.args[0] === "-V") {
+            return result(0, "", "OpenSSH_10.5p1\n");
+          }
+          expectEmptyProbeConfiguration(command, directory);
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+
+      expect(readdirSync(directory)).toEqual(before);
+    });
+  });
 });

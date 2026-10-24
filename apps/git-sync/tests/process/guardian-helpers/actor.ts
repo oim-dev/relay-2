@@ -36,6 +36,16 @@ function descendant(role: string, root: string, detached: boolean): void {
       detached,
     },
   );
+  child.once("spawn", () => {
+    publish(join(root, `${role}.spawned`), { pid: child.pid, parent: process.pid });
+  });
+  child.once("error", (error) => {
+    publish(join(root, `${role}.spawn-error`), {
+      parent: process.pid,
+      code: "code" in error ? String(error.code) : "UNKNOWN",
+    });
+    throw error;
+  });
   child.unref();
 }
 
@@ -68,6 +78,7 @@ async function runActor(): Promise<void> {
   if (!root) {
     throw new Error("Не указан каталог процессной fixture");
   }
+  publish(join(root, `${role}.started`), { pid: process.pid, parent: process.ppid });
   process.on("SIGTERM", () => {});
   if (role === "leaf") {
     publish(join(root, "leaf.ready"), process.pid);

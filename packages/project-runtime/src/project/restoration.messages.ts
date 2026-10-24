@@ -9,6 +9,14 @@ export const restorationMessages = {
   synchronousValidator:
     "Проверка сохранённой базы при resume должна быть строго синхронной и только читающей.",
   synchronousPublication: "Публикация восстановленной базы должна быть строго синхронной.",
+  legacyPublication:
+    "Незавершённый intent прежнего формата сохранён; автоматическое продолжение с SQLite-alias не поддерживается.",
+  transferUnavailable: "Платформа не поддерживает сохранённый способ безопасной публикации базы.",
+  /**
+   * Описывает точный нативный отказ без замены существующего назначения.
+   */
+  moveFailed: (syscall: string, errno: number): string =>
+    `Не выполнен эксклюзивный перенос базы: ${syscall}, errno ${errno}.`,
   cleanupUnknownFiles:
     "В staging есть дополнительные файлы; автоматическая уборка остановлена, материалы сохранены.",
 } as const;

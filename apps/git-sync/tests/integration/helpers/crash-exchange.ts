@@ -4,7 +4,8 @@ import type { ExchangeProcessInput, ExchangeProcessObservation } from "./crash-e
 
 /**
  * Владеет отдельным Bun-процессом через production guardian с deadline и отменой fixture.
- * Проверяет именно аварийный exit 86, а не обработанный throw или штатный close SQLite.
+ * Возвращается только после ожидаемого exit 86/0 и drain guardian, до повторного открытия БД.
+ * Авария — настоящий process.exit, не обработанный throw или штатный close SQLite.
  */
 export async function runExchangeProcess(
   input: ExchangeProcessInput,
@@ -29,8 +30,13 @@ export async function runExchangeProcess(
   const observation = JSON.parse(result.stdout.toString("utf8")) as ExchangeProcessObservation;
   if (
     observation.point !== input.point ||
+    typeof observation.instance !== "string" ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
+      observation.instance,
+    ) ||
     observation.pid === process.pid ||
     !Number.isInteger(observation.pid) ||
+    observation.pid <= 0 ||
     !/^[a-f0-9]{40,64}$/.test(observation.head)
   ) {
     throw new Error("Не получено свидетельство аварийной границы от отдельного процесса");

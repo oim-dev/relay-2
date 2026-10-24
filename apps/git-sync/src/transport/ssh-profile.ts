@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { gitCommand, checkGit } from "./git";
 import { componentCommand } from "./component-command";
 import { runProcess } from "./process";
@@ -35,7 +37,9 @@ export function shellWord(value: string, platform: string = process.platform): s
 }
 
 /**
- * Проверяет известный default SSH внутри Git окружения; -G/-F null исключают сеть и пользовательский Match exec.
+ * Проверяет известный default SSH внутри Git окружения; -G с собственным пустым -F исключает сеть и Match exec.
+ * После распознавания версии создаёт отдельный каталог в cwd и удаляет его в finally, включая отказ runner.
+ * Обычный файл переносим между native Windows и MSYS OpenSSH, в отличие от NUL или /dev/null.
  * Старому клиенту неподдерживаемый ForkAfterAuthentication не передаётся в реальном соединении.
  */
 export async function probeSsh(context: SshProbeContext, run: ProcessExecutor): Promise<SshProbe> {
@@ -51,28 +55,31 @@ export async function probeSsh(context: SshProbeContext, run: ProcessExecutor): 
   if (version.exitCode !== 0 || !banner) {
     return { executable, implementation: null, options: [] };
   }
-  const configuration = context.platform === "win32" ? "NUL" : "/dev/null";
-  const supported: string[] = [];
-  for (const option of FOREGROUND_OPTIONS) {
-    const probe = await run({
-      ...options,
-      args: ["-G", "-F", configuration, "-o", option, "relay-ssh-profile.invalid"],
-    });
-    if (probe.exitCode === 0) {
-      supported.push(option);
+  const directory = mkdtempSync(join(context.cwd, ".relay-ssh-probe-"));
+  try {
+    const configuration = join(directory, "empty.conf");
+    writeFileSync(configuration, "", { flag: "wx", mode: 0o600 });
+    const supported: string[] = [];
+    for (const option of FOREGROUND_OPTIONS) {
+      const probe = await run({
+        ...options,
+        args: ["-G", "-F", configuration, "-o", option, "relay-ssh-profile.invalid"],
+      });
+      if (probe.exitCode === 0) {
+        supported.push(option);
+      }
     }
+    return { executable, implementation: banner, options: supported };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
-  return { executable, implementation: banner, options: supported };
 }
 
 /**
  * Приватный entrypoint вызывается Git alias и разрешает ssh именно из переданного Git PATH.
  */
 export function probeDefaultSsh(): Promise<SshProbe> {
-  return probeSsh(
-    { executable: Bun.which("ssh"), cwd: process.cwd(), platform: process.platform },
-    runProcess,
-  );
+  return probeSsh({ executable: Bun.which("ssh"), cwd: process.cwd() }, runProcess);
 }
 
 /**

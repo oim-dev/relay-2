@@ -30,51 +30,22 @@ describe("Foreground Git/OpenSSH профиль", () => {
     expect(command.env?.GIT_CONFIG_VALUE_0).toBe("Auth: secret");
   });
 
-  test("старый OpenSSH получает только реально поддержанный ControlPersist без сети и user config в probe", async () => {
+  test.each([
+    { name: "неизвестный клиент", version: result(0, "", "OtherSSH_1.0\n") },
+    { name: "отказ -V", version: result(255, "OpenSSH_for_Windows_9.5\n") },
+  ])("$name: после -V не создаётся config и не исполняется -G", async ({ version }) => {
     const calls: ProcessInput[] = [];
 
     const probe = await probeSsh(
-      { executable: "/fixture/ssh", cwd: "/fixture", platform: "darwin" },
+      { executable: "/fixture/ssh", cwd: "/несуществующий-probe-cwd" },
       async (command) => {
         calls.push(command);
-        if (command.args.includes("-V")) {
-          return result(0, "", "OpenSSH_7.9p1 fixture\n");
-        }
-        if (command.args.includes("ForkAfterAuthentication=no")) {
-          return result(255, "", "unknown option");
-        }
-        return result(0, "controlpersist no\n");
+        return version;
       },
     );
 
-    expect(probe).toMatchObject({
-      implementation: "OpenSSH_7.9p1",
-      options: ["ControlPersist=no"],
-    });
-    expect(
-      calls
-        .slice(1)
-        .every((command) => command.args.includes("-G") && command.args.includes("/dev/null")),
-    ).toBe(true);
-    expect(calls.every((command) => command.timeoutMs === 3000 && command.maxBytes === 65536)).toBe(
-      true,
-    );
-  });
-
-  test("современный OpenSSH проверяет оба foreground options, диагностический stdout не становится командой", async () => {
-    const probe = await probeSsh(
-      { executable: "C:/SSH/ssh.exe", cwd: "C:/fixture", platform: "win32" },
-      async (command) => {
-        if (command.args.includes("-V")) {
-          return result(0, "OpenSSH_for_Windows_9.5\n");
-        }
-        expect(command.args).toContain("NUL");
-        return result(0, "identityfile user-key\nproxycommand ssh -W %h:%p gateway\n");
-      },
-    );
-
-    expect(probe.options).toEqual(["ForkAfterAuthentication=no", "ControlPersist=no"]);
-    expect(probe.executable).toBe("C:/SSH/ssh.exe");
+    expect(probe).toEqual({ executable: "/fixture/ssh", implementation: null, options: [] });
+    expect(calls.map((call) => call.args)).toEqual([["-V"]]);
   });
 
   test("явный GIT_SSH_COMMAND не исполняется для probe и не переписывается", async () => {
@@ -158,5 +129,38 @@ describe("Foreground Git/OpenSSH профиль", () => {
     );
     expect(usesSsh("C:\\repo", "win32")).toBe(false);
     expect(usesSsh("git@host:repo", "linux")).toBe(true);
+  });
+
+  test("версия OpenSSH без успешного ControlPersist probe остаётся unverified без подмены команды", async () => {
+    const profile = await selectSshProfile(
+      {
+        directory: "/fixture",
+        remote: "ssh://host/repo",
+        branch: "data",
+        env: { GIT_SSH_COMMAND: undefined, GIT_SSH: undefined, GIT_SSH_VARIANT: undefined },
+      },
+      undefined,
+      async (command) =>
+        command.args.includes("config")
+          ? result(1)
+          : result(
+              0,
+              JSON.stringify({
+                executable: "C:\\Program Files\\Git\\usr\\bin\\ssh.exe",
+                implementation: "OpenSSH_10.5p1",
+                options: ["ForkAfterAuthentication=no"],
+              }),
+            ),
+    );
+
+    expect(profile).toEqual({
+      command: null,
+      capability: {
+        mode: "unverified",
+        source: "default",
+        implementation: "OpenSSH_10.5p1",
+        options: [],
+      },
+    });
   });
 });

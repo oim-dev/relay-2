@@ -108,8 +108,8 @@ describe("Восстановление независимой реплики", (
   );
 
   test.each([
-    { name: "до hardlink БД", beforeDatabase: true, afterConfig: false },
-    { name: "между hardlink и config", beforeDatabase: false, afterConfig: false },
+    { name: "до атомарной публикации БД", beforeDatabase: true, afterConfig: false },
+    { name: "после публикации БД до закрытия barrier", beforeDatabase: false, afterConfig: false },
     { name: "после config", beforeDatabase: false, afterConfig: true },
   ])(
     "авария $name сохраняет публикацию без автоматического adoption или нового materializer",
@@ -154,9 +154,9 @@ describe("Восстановление независимой реплики", (
         if (!staging) {
           throw new Error("Потерян staging незавершённой публикации");
         }
-        const database = ProjectDatabase.open(
-          join(dirname(databasePath), staging.name, "project.sqlite"),
-        );
+        const stagedPath = join(dirname(databasePath), staging.name, "project.sqlite");
+        expect(existsSync(stagedPath)).toBe(beforeDatabase || process.platform === "win32");
+        const database = ProjectDatabase.openReadonly(beforeDatabase ? stagedPath : databasePath);
         try {
           expect(database.get(projectId)?.data.name).toBe("Прерванная копия");
         } finally {
@@ -204,6 +204,59 @@ describe("Восстановление независимой реплики", (
 
       expect(code).toBe("RESTORE_RECOVERY_REQUIRED");
       expect(readFileSync(databasePath)).toEqual(original);
+      expect(existsSync(join(fixture.cwd, "relay.config.json"))).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  test("target, занятый после intent, не заменяется атомарной публикацией", async () => {
+    const fixture = new RuntimeFixture(group);
+    const projectId = "interrupted-project";
+    const databasePath = join(fixture.home, "projects", projectId, "project.sqlite");
+    try {
+      const result = await runNativeProcess({
+        executable: process.execPath,
+        args: [join(import.meta.dir, "restoration-worker.ts")],
+        cwd: fixture.cwd,
+        env: {
+          ...process.env,
+          HOME: fixture.root,
+          USERPROFILE: fixture.root,
+          RELAY_TEST_CWD: fixture.cwd,
+          RELAY_TEST_HOME: fixture.home,
+          RELAY_TEST_PROJECT: projectId,
+          RELAY_TEST_OCCUPY_TARGET_AFTER_INTENT: "1",
+        },
+        timeoutMs: 5000,
+      });
+
+      expect(result).toEqual({
+        exitCode: 0,
+        stdout: '{"code":"RESTORE_RECOVERY_REQUIRED"}\n',
+        stderr: "",
+      });
+      const foreign = ProjectDatabase.openReadonly(databasePath);
+      try {
+        expect(foreign.get("foreign-project")?.data.name).toBe("Победитель гонки");
+      } finally {
+        foreign.close();
+      }
+      const directory = readdirSync(dirname(databasePath), { withFileTypes: true }).find(
+        (entry) => entry.isDirectory() && entry.name.startsWith(".restore-"),
+      );
+      if (!directory) {
+        throw new Error("Потерян staging проигравшей публикации");
+      }
+      const original = ProjectDatabase.openReadonly(
+        join(dirname(databasePath), directory.name, "project.sqlite"),
+      );
+      try {
+        expect(original.get(projectId)?.data.name).toBe("Прерванная копия");
+      } finally {
+        original.close();
+      }
+      expect(existsSync(join(dirname(databasePath), ".restore-publication.json"))).toBe(true);
       expect(existsSync(join(fixture.cwd, "relay.config.json"))).toBe(false);
     } finally {
       await fixture.dispose();

@@ -21,7 +21,7 @@ import { assertSqlText } from "../entities/entity-sql-text";
 import { assertLegacyTextEncoding } from "../entities/entity-legacy-text";
 import { upgradeCommentTextStorage } from "../entities/comment-text";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
-import { SQLITE_BUSY_TIMEOUT_MS } from "../sqlite/sqlite.constants";
+import { SQLITE_BUSY_TIMEOUT_MS, SQLITE_WAL_REOPEN_PAUSE_MS } from "../sqlite/sqlite.constants";
 import { projectDatabaseMessages } from "./project-database.messages";
 import type {
   ApplicationIdRow,
@@ -29,6 +29,7 @@ import type {
   ProjectMetadata,
   ProjectStateRow,
   SchemaVersionRow,
+  OpenedProjectFile,
 } from "./project-database.types";
 
 /**
@@ -105,6 +106,65 @@ export function configureProjectWal(connection: Database): void {
     throw new RelayError("STORAGE_ERROR", projectDatabaseMessages.walUnavailable);
   }
   connection.exec("PRAGMA synchronous = FULL;");
+}
+
+/**
+ * Открывает и проверяет проект; миграция выполняется не более одного раза в этом вызове.
+ * При конкурирующем DELETE→WAL повторяется только техническое открытие/проверка текущей схемы:
+ * отказавшее соединение закрывается до паузы, освобождая его shared lock для другого opener.
+ * Повторы и SQLite busy handler ограничены одним monotonic budget. Readonly не включает WAL
+ * и не повторяет открытие. Любая ошибка закрывает принадлежащее функции соединение.
+ */
+export function openExistingProjectFile(
+  path: string,
+  mode: "readwrite" | "readonly",
+): OpenedProjectFile {
+  let connection: Database | undefined = connectProjectFile(path, mode);
+  try {
+    let projectId = readProjectId(connection, path, mode === "readonly" ? "readonly" : "migrate");
+    if (mode === "readonly") {
+      return { connection, projectId };
+    }
+    const deadline = performance.now() + SQLITE_BUSY_TIMEOUT_MS;
+    let contention: unknown;
+    for (;;) {
+      try {
+        if (!connection) {
+          if (performance.now() >= deadline) {
+            throw contention;
+          }
+          connection = connectProjectFile(path);
+          connection.exec(
+            `PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`,
+          );
+          // Миграция уже завершена; её нельзя повторять после отказа последующего WAL-перехода.
+          projectId = readProjectId(connection, path, "readonly");
+        }
+        connection.exec(
+          `PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`,
+        );
+        configureProjectWal(connection);
+        connection.exec(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
+        return { connection, projectId };
+      } catch (error) {
+        const code = errorCode(error);
+        if (!code.startsWith("SQLITE_BUSY") && !code.startsWith("SQLITE_LOCKED")) {
+          throw error;
+        }
+        contention = error;
+        connection?.close(true);
+        connection = undefined;
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) {
+          throw error;
+        }
+        Bun.sleepSync(Math.min(SQLITE_WAL_REOPEN_PAUSE_MS, remaining));
+      }
+    }
+  } catch (error) {
+    connection?.close(true);
+    throw error;
+  }
 }
 
 /**

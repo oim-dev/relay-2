@@ -1,30 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { runProcess } from "../../src/transport/process";
 import type { ProcessResult } from "../../src/transport/process.types";
 import { withGitProcessRuntime } from "../../src/transport/process-runtime";
-
-/**
- * Создаёт только собственный root для fresh helper и target; удаляет остатки и при отказе сборки.
- */
-async function withRuntimeDirectory(operation: (root: string) => Promise<void>): Promise<void> {
-  const parent = fileURLToPath(
-    new URL(
-      `../../../../.artifacts/${new Date().toISOString().slice(0, 10)}/git-sync-implementation/git-sync/source-runtime/`,
-      import.meta.url,
-    ),
-  );
-  mkdirSync(parent, { recursive: true });
-  const root = mkdtempSync(join(parent, "runtime-"));
-  try {
-    await operation(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
+import { withRuntimeDirectory } from "./helpers/source-runtime-fixture";
 
 describe("Владение fresh source Git helper", () => {
   test.each([false, true])(

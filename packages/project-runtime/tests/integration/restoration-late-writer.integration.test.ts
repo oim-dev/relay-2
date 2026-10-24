@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { restoreProject, runNativeProcess, type ProcessResult } from "@relay/project-runtime";
 import { RuntimeFixture, runtimeErrorCode } from "./helpers/runtime-fixture";
@@ -127,7 +135,7 @@ describe("Restore после принятой записи другого про
     }
   });
 
-  test("при утраченном рабочем пути повтор сохраняет staging с последней копией принятой записи", async () => {
+  test("legacy v2 с утраченным рабочим путём сохраняет staging с последней копией принятой записи", async () => {
     const fixture = new RuntimeFixture(group);
     const databasePath = join(fixture.home, "projects", projectId, "project.sqlite");
     let materialized = false;
@@ -141,6 +149,15 @@ describe("Restore после принятой записи другого про
         throw new Error("Не найден staging после аварии");
       }
       const stagedDatabase = join(dirname(databasePath), staging.name, "project.sqlite");
+      // Прежний v2 действительно оставлял alias: воспроизводим именно старый сохранённый intent.
+      if (!existsSync(stagedDatabase)) {
+        linkSync(databasePath, stagedDatabase);
+      }
+      const publicationPath = join(dirname(databasePath), ".restore-publication.json");
+      const intent = JSON.parse(readFileSync(publicationPath, "utf8"));
+      intent.version = 2;
+      delete intent.transfer;
+      writeFileSync(publicationPath, JSON.stringify(intent));
       const acceptedBytes = readFileSync(stagedDatabase);
       // Утрачен только рабочий путь: staging теперь единственная ссылка на БД с принятым commit.
       rmSync(databasePath);

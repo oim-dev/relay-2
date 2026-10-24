@@ -42,14 +42,15 @@ function sealPrivateDatabase(path: string): void {
 /**
  * Публикует только private staging, которым эксклюзивно владеет вызывающий: публичных имён ещё нет,
  * все materializer/validator соединения закрыты, отложенные открытия staging запрещены.
- * Переход WAL → DELETE и закрытие выполняются до callback. Затем новая неизменяющая EXCLUSIVE
- * транзакция повторно проверяет DELETE: открытие writer в промежутке не создаёт TOCTOU-разрешения.
+ * Переход WAL → DELETE и закрытие выполняются до callback. Новое соединение получает EXCLUSIVE
+ * locking_mode и пустой BEGIN EXCLUSIVE, проверяет DELETE и завершает транзакцию до callback.
+ * EXCLUSIVE locking_mode удерживает main-file lock до close, в том числе после ROLLBACK.
  * Наличие остаточного SHM не отменяет барьер; владение и очистка файлов принадлежат вызывающему.
- * Callback синхронно завершает private-file подготовку и создаёт hardlink, не меняя datafile;
- * SQLite-lock удерживается до его завершения.
+ * Callback синхронно завершает private-file подготовку и публикует имя, не меняя datafile.
+ * Допускается no-replace rename: после callback соединение только закрывается, SQL больше нет.
  * Callback не открывает/закрывает посторонние FD datafile или его hardlink: на POSIX такой close
  * снимает процессные fcntl-locks. Файловое чтение datafile допустимо только после завершения барьера.
- * После link выполняются лишь откат пустой транзакции и close, без записи по прежнему имени.
+ * После публикации нет транзакции, journal или SQL, использующих прежнее имя; чужие соединения не закрываются.
  * Ошибка callback не откатывает его файловые эффекты. К уже опубликованной БД API неприменим.
  */
 export function withProjectDatabasePublication(path: string, publish: () => void): void {
@@ -61,11 +62,12 @@ export function withProjectDatabasePublication(path: string, publish: () => void
   try {
     sealPrivateDatabase(path);
     connection = connectProjectFile(path);
-    connection.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
+    connection.exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE");
     const mode = connection.query<JournalModeRow, []>("PRAGMA journal_mode").get();
     if (mode?.journal_mode !== "delete") {
       throw publicationBusy(path);
     }
+    connection.exec("ROLLBACK");
     publishing = true;
     const result: unknown = publish();
     if (result !== undefined) {
@@ -84,14 +86,6 @@ export function withProjectDatabasePublication(path: string, publish: () => void
     }
     throw storageError(cause, path);
   } finally {
-    if (connection) {
-      try {
-        if (connection.inTransaction) {
-          connection.exec("ROLLBACK");
-        }
-      } finally {
-        connection.close(true);
-      }
-    }
+    connection?.close(true);
   }
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database, constants } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
-import { existsSync, linkSync, readFileSync } from "node:fs";
+import { existsSync, linkSync, readFileSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ProjectDatabase } from "../../src/database/project-database";
 import { withProjectDatabasePublication } from "../../src/database/project-publication";
@@ -52,6 +52,32 @@ afterEach(() => {
 });
 
 describe("SQLite-барьер публикации private БД", () => {
+  test("публикация выбранным для платформы способом сохраняет kernel lock и данные", () => {
+    const database = fixture.create();
+    const initial = database.list();
+    database.close();
+    const target = join(fixture.directory, "published.sqlite");
+
+    withProjectDatabasePublication(fixture.path, () => {
+      if (process.platform === "win32") {
+        linkSync(fixture.path, target);
+      } else {
+        // Namespace здесь принадлежит одному тесту; no-replace race проверяет вызывающий Runtime.
+        renameSync(fixture.path, target);
+      }
+      expectPublicationWriterProbe(target, "SQLITE_BUSY");
+    });
+
+    expectPublicationWriterProbe(target, "ACQUIRED");
+    expect(existsSync(fixture.path)).toBe(process.platform === "win32");
+    const published = ProjectDatabase.openReadonly(target);
+    try {
+      expect(published.list()).toEqual(initial);
+    } finally {
+      published.close();
+    }
+  });
+
   test("закрытый persistent WAL публикуется целиком; публичный writer ждёт освобождения SQLite-lock", () => {
     const database = fixture.create();
     const document = createDocument();

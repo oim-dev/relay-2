@@ -1,6 +1,6 @@
 import { spyOn } from "bun:test";
 import * as files from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { resumeProjectRestoration } from "@relay/project-runtime";
 import { ProjectDatabase } from "@relay/storage";
@@ -13,10 +13,11 @@ if (!cwd || !home || !projectId) {
 }
 const configPath = join(cwd, "relay.config.json");
 const databasePath = join(home, "projects", projectId, "project.sqlite");
+const cleanupCrash = process.env.RELAY_TEST_CLEANUP_CRASH;
 const nativeLink = files.linkSync;
 spyOn(files, "linkSync").mockImplementation((source, target) => {
   nativeLink(source, target);
-  if (target !== configPath) {
+  if (target !== configPath || cleanupCrash) {
     return;
   }
   // Fault injection: после публикации config путь БД занимает другая валидная реплика того же ID.
@@ -28,6 +29,22 @@ spyOn(files, "linkSync").mockImplementation((source, target) => {
   });
   foreign.close();
 });
+if (cleanupCrash) {
+  const unlink = files.unlinkSync;
+  spyOn(files, "unlinkSync").mockImplementation((path) => {
+    unlink(path);
+    if (cleanupCrash === "after-private-marker" && basename(String(path)) === "publication.json") {
+      process.exit(73);
+    }
+  });
+  const rmdir = files.rmdirSync;
+  spyOn(files, "rmdirSync").mockImplementation((path) => {
+    rmdir(path);
+    if (cleanupCrash === "after-directory" && dirname(String(path)) === dirname(databasePath)) {
+      process.exit(73);
+    }
+  });
+}
 try {
   const result = resumeProjectRestoration({ cwd, home }, projectId, (path) => {
     const database = ProjectDatabase.openReadonly(path);

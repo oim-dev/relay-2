@@ -4,7 +4,10 @@ import { RelayError } from "@relay/contracts";
 import { fileExists } from "../configuration/files";
 import { projectMessages } from "./project.messages";
 import { restorationMessages } from "./restoration.messages";
-import type { RestorationPublication } from "./restoration-publication.types";
+import type {
+  CurrentRestorationPublication,
+  RestorationPublication,
+} from "./restoration-publication.types";
 import type {
   RestorationCleanupFailure,
   RestorationFileIdentity,
@@ -95,31 +98,51 @@ export function sameRestorationFile(
 }
 
 /**
- * Проверяет private directory, hardlink пары маркеров и исходную идентичность staging-БД.
- * Старый intent v1 сохраняется, но не даёт разрешения на resume/cleanup.
+ * Проверяет точную идентичность v3 marker, его private hardlink (пока он есть) и исходный datafile.
+ * После rename datafile разрешён только под public именем; до rename — только в staging.
+ * После public publication отсутствие private marker/directory допускается как прерванная cleanup:
+ * сохранённая идентичность самого marker отличает её от копии и позволяет завершить уборку.
+ * Прежние intents v1/v2 отвергаются без чтения SQLite и уборки их aliases.
  */
 export function requireRestorationOwnership(
   publication: RestorationPublication,
   markerPath: string,
-): void {
+): asserts publication is CurrentRestorationPublication {
+  if (publication.version !== 3) {
+    throw new RelayError("RESTORE_RECOVERY_REQUIRED", restorationMessages.legacyPublication, 4, {
+      path: markerPath,
+      reason: "legacy-publication",
+      version: publication.version,
+    });
+  }
   try {
-    if (!lstatSync(publication.staging).isDirectory()) {
+    const directoryExists = fileExists(publication.staging);
+    if (directoryExists && !lstatSync(publication.staging).isDirectory()) {
       throw restorationOwnershipError(publication.staging);
     }
     const marker = observeRestorationFile(markerPath);
-    const privateMarker = observeRestorationFile(
-      join(publication.staging, RESTORATION_STAGING_MARKER),
-    );
-    if (marker.links < 2n || !sameRestorationFile(marker.identity, privateMarker.identity)) {
+    if (!sameRestorationFile(marker.identity, publication.markerIdentity)) {
       throw restorationOwnershipError(markerPath);
     }
-    const stagedPath = join(publication.staging, "project.sqlite");
-    const staged = observeRestorationFile(stagedPath);
+    const privateMarkerPath = join(publication.staging, RESTORATION_STAGING_MARKER);
+    const privateMarkerExists = fileExists(privateMarkerPath);
     if (
-      publication.version !== 2 ||
-      !sameRestorationFile(staged.identity, publication.databaseIdentity)
+      privateMarkerExists &&
+      !sameRestorationFile(marker.identity, observeRestorationFile(privateMarkerPath).identity)
     ) {
-      throw restorationOwnershipError(stagedPath);
+      throw restorationOwnershipError(privateMarkerPath);
+    }
+    const stagedPath = join(publication.staging, "project.sqlite");
+    if (fileExists(publication.databasePath)) {
+      requirePublishedRestorationDatabase(publication);
+    } else {
+      if (!directoryExists || !privateMarkerExists) {
+        throw restorationOwnershipError(publication.staging);
+      }
+      const staged = observeRestorationFile(stagedPath);
+      if (!sameRestorationFile(staged.identity, publication.databaseIdentity)) {
+        throw restorationOwnershipError(stagedPath);
+      }
     }
   } catch (cause) {
     if (cause instanceof RelayError) {
@@ -130,18 +153,31 @@ export function requireRestorationOwnership(
 }
 
 /**
- * Принимает только исходный опубликованный hardlink; чужой файл даже того же projectId сохраняется и отвергается.
+ * Принимает только исходный опубликованный datafile; совпавший projectId чужого файла не даёт ownership.
+ * Rename не может оставить staging alias. Hardlink допустим только на Windows, где ОС защищает live handles.
  */
-export function requireRestorationDatabaseLink(publication: RestorationPublication): void {
+export function requirePublishedRestorationDatabase(
+  publication: CurrentRestorationPublication,
+): void {
   const target = observeRestorationFile(publication.databasePath);
-  const staged = observeRestorationFile(join(publication.staging, "project.sqlite"));
-  if (
-    publication.version !== 2 ||
-    target.links < 2n ||
-    !sameRestorationFile(target.identity, publication.databaseIdentity) ||
-    !sameRestorationFile(target.identity, staged.identity)
-  ) {
+  const stagedPath = join(publication.staging, "project.sqlite");
+  if (!sameRestorationFile(target.identity, publication.databaseIdentity)) {
     throw restorationOwnershipError(publication.databasePath);
+  }
+  if (publication.transfer === "rename") {
+    if (fileExists(stagedPath)) {
+      throw restorationOwnershipError(stagedPath);
+    }
+    return;
+  }
+  if (process.platform !== "win32") {
+    throw restorationOwnershipError(publication.databasePath);
+  }
+  if (fileExists(stagedPath)) {
+    const staged = observeRestorationFile(stagedPath);
+    if (target.links < 2n || !sameRestorationFile(target.identity, staged.identity)) {
+      throw restorationOwnershipError(publication.databasePath);
+    }
   }
 }
 
@@ -166,7 +202,8 @@ export function requireNoRestorationJournals(
 }
 
 /**
- * После успешной привязки убирает лишь доказанные private links/пустой directory и общий intent.
+ * После успешной привязки убирает доказанные private metadata/пустой directory и общий intent.
+ * Unix datafile уже перемещён и не затрагивается. На Windows sharing-отказ оставляет alias для retry.
  * Публичный datafile не удаляет. null означает завершение; иначе возвращается причина отказа:
  * вызывающий возвращает recovery-info, а не объявляет очистку успешной и не откатывает готовую БД.
  * Утрата владения или journals до уборки выбрасывают отказ, а не маскируются успешным resume с warning.
@@ -176,19 +213,34 @@ export function cleanupResumedRestoration(
   markerPath: string,
 ): RestorationCleanupFailure | null {
   requireRestorationOwnership(publication, markerPath);
-  requireRestorationDatabaseLink(publication);
+  requirePublishedRestorationDatabase(publication);
   requireNoRestorationJournals(join(publication.staging, "project.sqlite"));
   try {
-    const entries = readdirSync(publication.staging);
-    if (entries.some((name) => name !== "project.sqlite" && name !== RESTORATION_STAGING_MARKER)) {
+    const directoryExists = fileExists(publication.staging);
+    const entries = directoryExists ? readdirSync(publication.staging) : [];
+    const expected =
+      publication.transfer === "rename"
+        ? [RESTORATION_STAGING_MARKER]
+        : ["project.sqlite", RESTORATION_STAGING_MARKER];
+    if (entries.some((name) => !expected.includes(name))) {
       return {
         code: "RESTORE_CLEANUP_UNOWNED_FILES",
         message: restorationMessages.cleanupUnknownFiles,
       };
     }
-    unlinkSync(join(publication.staging, "project.sqlite"));
-    unlinkSync(join(publication.staging, RESTORATION_STAGING_MARKER));
-    rmdirSync(publication.staging);
+    if (
+      publication.transfer === "hardlink" &&
+      fileExists(join(publication.staging, "project.sqlite"))
+    ) {
+      unlinkSync(join(publication.staging, "project.sqlite"));
+    }
+    const privateMarker = join(publication.staging, RESTORATION_STAGING_MARKER);
+    if (fileExists(privateMarker)) {
+      unlinkSync(privateMarker);
+    }
+    if (directoryExists) {
+      rmdirSync(publication.staging);
+    }
     unlinkSync(markerPath);
     return null;
   } catch (error) {

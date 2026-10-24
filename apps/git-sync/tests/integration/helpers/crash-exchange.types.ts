@@ -52,7 +52,9 @@ export interface ExchangeDatabaseState {
 export interface ExchangeProcessObservation {
   /* Достигнутая точка; complete означает успешное завершение engine.run. */
   readonly point: ExchangeProcessAttempt["point"];
-  /* PID нового процесса, отличного от test runner и соседних попыток. */
+  /* UUID, созданный самим actor при старте; различает incarnation даже при повторном PID. */
+  readonly instance: string;
+  /* PID отдельного живого actor; после его exit ОС вправе повторно выдать это число. */
   readonly pid: number;
   /* Реальный кандидат push либо принимаемый HEAD при остановке входящего импорта. */
   readonly head: string;

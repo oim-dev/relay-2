@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { withLocalFileLock } from "@relay/storage";
@@ -19,11 +19,12 @@ import { readRestorationPublication, restorationPublicationPath } from "./restor
 import type { RestorationPublication } from "./restoration-publication.types";
 import type { RestorationResumeResult } from "./restoration-resume.types";
 import { restorationMessages } from "./restoration.messages";
+import { transferRestorationDatabase } from "./restoration-transfer";
 import {
   cleanupResumedRestoration,
   observeRestorationFile,
   requireNoRestorationJournals,
-  requireRestorationDatabaseLink,
+  requirePublishedRestorationDatabase,
   requireRestorationOwnership,
   restorationOwnershipError,
 } from "./restoration-ownership";
@@ -67,7 +68,7 @@ function validatePreservedDatabase(
   const publicTarget = fileExists(location.databasePath);
   if (publicTarget) {
     requireNoRestorationJournals(stagedPath);
-    requireRestorationDatabaseLink(publication);
+    requirePublishedRestorationDatabase(publication);
   } else {
     requirePrivateStaging(publication);
     // Закрытый persistent WAL допустим только под единственным private-именем.
@@ -88,7 +89,7 @@ function validatePreservedDatabase(
   requireRestorationOwnership(publication, markerPath);
   if (publicTarget) {
     requireNoRestorationJournals(stagedPath);
-    requireRestorationDatabaseLink(publication);
+    requirePublishedRestorationDatabase(publication);
     return;
   }
   requirePrivateStaging(publication);
@@ -96,14 +97,15 @@ function validatePreservedDatabase(
     requireRestorationOwnership(publication, markerPath);
     requirePrivateStaging(publication);
     requireNoRestorationJournals(stagedPath);
-    // Только новый hardlink под SQLite-lock; чужой файл не заменяется.
+    // Только сохранённый no-replace способ под SQLite-lock; чужой файл не заменяется.
     try {
-      linkSync(stagedPath, location.databasePath);
+      transferRestorationDatabase(publication);
+      requirePublishedRestorationDatabase(publication);
     } catch (cause) {
       throw restorationOwnershipError(location.databasePath, cause);
     }
   });
-  requireRestorationDatabaseLink(publication);
+  requirePublishedRestorationDatabase(publication);
 }
 
 /**

@@ -12,6 +12,8 @@ import type {
   ExchangeProcessObservation,
 } from "./crash-exchange.types";
 
+// Идентичность рождается внутри каждого нового процесса, а не передаётся родителем.
+const instance = crypto.randomUUID();
 // Закрытый протокол двух тестовых модулей: JSON создаёт типизированный runExchangeProcess.
 const input = JSON.parse(await Bun.stdin.text()) as ExchangeProcessInput;
 const database = ProjectDatabase.open(input.databasePath);
@@ -34,6 +36,7 @@ function crash(head: string): never {
 function emit(head: string): void {
   const observation: ExchangeProcessObservation = {
     point: input.point,
+    instance,
     pid: process.pid,
     head,
     beforePush,

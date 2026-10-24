@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -72,7 +73,12 @@ async function createInterruptedPublication(
     timeoutMs: 10_000,
   });
   expect(result).toEqual({ exitCode: 73, stdout: "", stderr: "" });
-  return pendingPaths(fixture);
+  const pending = pendingPaths(fixture);
+  expect(JSON.parse(readFileSync(pending.publicationPath, "utf8"))).toMatchObject({
+    version: 3,
+    transfer: process.platform === "win32" ? "hardlink" : "rename",
+  });
+  return pending;
 }
 
 /**
@@ -106,27 +112,138 @@ function validatePreservedData(path: string): void {
 }
 
 /**
- * При отказе живого соединения запускает изолированную vnode-диагностику и сохраняет исходную ошибку.
- * Probe сравнивает readonly-проверку с одиночным unlink staging; успешный тест его не запускает.
+ * Прерывает реальный resume после private marker либо directory; общий intent ещё не удалён.
  */
-async function reportLiveWalFailure(fixture: RuntimeFixture, cause: unknown): Promise<never> {
-  let diagnosis: string;
-  try {
-    const probe = await runNativeProcess({
-      executable: process.execPath,
-      args: [join(import.meta.dir, "helpers/restoration-vnode-probe.ts"), fixture.root],
-      cwd: fixture.cwd,
-      env: { ...process.env, HOME: fixture.root, USERPROFILE: fixture.root },
-      timeoutMs: 5000,
-    });
-    diagnosis = `exit=${probe.exitCode}\n${probe.stdout}\n${probe.stderr}`;
-  } catch (error) {
-    diagnosis = `Probe не завершён: ${error instanceof Error ? error.message : String(error)}`;
-  }
-  throw new Error(`Диагностика живого public WAL после resume:\n${diagnosis}`, { cause });
+async function interruptCleanup(
+  fixture: RuntimeFixture,
+  phase: "after-private-marker" | "after-directory",
+): Promise<PendingRestorationFixture> {
+  const pending = await createInterruptedPublication(fixture, "before-config");
+  const result = await runNativeProcess({
+    executable: process.execPath,
+    args: [join(import.meta.dir, "restoration-resume-worker.ts")],
+    cwd: fixture.cwd,
+    env: {
+      ...process.env,
+      HOME: fixture.root,
+      USERPROFILE: fixture.root,
+      RELAY_TEST_CWD: fixture.cwd,
+      RELAY_TEST_HOME: fixture.home,
+      RELAY_TEST_PROJECT: projectId,
+      RELAY_TEST_CLEANUP_CRASH: phase,
+    },
+    timeoutMs: 10_000,
+  });
+  expect(result).toEqual({ exitCode: 73, stdout: "", stderr: "" });
+  return pending;
 }
 
 describe("Явное продолжение публикации restore", () => {
+  test.each(["after-private-marker", "after-directory"] as const)(
+    "cleanup crash %s завершается повторным resume без вечного intent",
+    async (phase) => {
+      const fixture = new RuntimeFixture(group);
+      try {
+        const pending = await interruptCleanup(fixture, phase);
+        const before = readPreservedData(pending.location.databasePath);
+        const config = readFileSync(pending.location.configPath);
+
+        const result = resumeProjectRestoration(
+          { cwd: fixture.cwd, home: fixture.home },
+          projectId,
+          validatePreservedData,
+        );
+
+        expect(result.recovery).toBeNull();
+        expect(readPreservedData(pending.location.databasePath)).toEqual(before);
+        expect(readFileSync(pending.location.configPath)).toEqual(config);
+        expect(existsSync(pending.stagingPath)).toBe(false);
+        expect(existsSync(pending.publicationPath)).toBe(false);
+      } finally {
+        await fixture.dispose();
+      }
+    },
+  );
+
+  test("скопированный единственный intent после cleanup crash отклоняется без validator", async () => {
+    const fixture = new RuntimeFixture(group);
+    let called = false;
+    try {
+      const pending = await interruptCleanup(fixture, "after-directory");
+      const before = readPreservedData(pending.location.databasePath);
+      const marker = readFileSync(pending.publicationPath);
+      renameSync(pending.publicationPath, join(fixture.root, "original-intent"));
+      writeFileSync(pending.publicationPath, marker);
+
+      expect(
+        runtimeErrorCode(() =>
+          resumeProjectRestoration({ cwd: fixture.cwd, home: fixture.home }, projectId, () => {
+            called = true;
+          }),
+        ),
+      ).toBe("RESTORE_RECOVERY_REQUIRED");
+
+      expect(called).toBe(false);
+      expect(readPreservedData(pending.location.databasePath)).toEqual(before);
+      expect(readFileSync(pending.publicationPath)).toEqual(marker);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
+  test("legacy v2 с живым public WAL отклоняется до validator без unlink alias и потери outbox", async () => {
+    const fixture = new RuntimeFixture(group);
+    let opened: ProjectDatabase | undefined;
+    let called = false;
+    try {
+      const pending = await createInterruptedPublication(fixture, "before-config");
+      const staged = join(pending.stagingPath, "project.sqlite");
+      // Настоящая форма старого v2: два имени одного datafile и прежний manifest.
+      if (!existsSync(staged)) {
+        linkSync(pending.location.databasePath, staged);
+      }
+      const intent = JSON.parse(readFileSync(pending.publicationPath, "utf8"));
+      intent.version = 2;
+      delete intent.transfer;
+      writeFileSync(pending.publicationPath, JSON.stringify(intent));
+      opened = ProjectDatabase.open(pending.location.databasePath);
+      const initial = opened.get(projectId);
+      if (!initial) {
+        throw new Error("Не найден проект legacy fixture");
+      }
+      opened.update(
+        {
+          ...initial,
+          revision: initial.revision + 1,
+          data: { ...initial.data, name: "Legacy late write" },
+        },
+        initial.revision,
+      );
+      const outbox = opened.getReplicationOutbox();
+
+      expect(() =>
+        resumeProjectRestoration({ cwd: fixture.cwd, home: fixture.home }, projectId, () => {
+          called = true;
+        }),
+      ).toThrow(
+        expect.objectContaining({
+          code: "RESTORE_RECOVERY_REQUIRED",
+          details: expect.objectContaining({ reason: "legacy-publication", version: 2 }),
+        }),
+      );
+
+      expect(called).toBe(false);
+      expect(existsSync(staged)).toBe(true);
+      expect(existsSync(pending.publicationPath)).toBe(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(opened.getReplicationOutbox()).toEqual(outbox);
+      expect(opened.get(projectId)?.data.name).toBe("Legacy late write");
+    } finally {
+      opened?.close();
+      await fixture.dispose();
+    }
+  });
+
   test("закрытый persistent WAL private staging сохраняет позднюю запись, replicaId и outbox при resume", async () => {
     const fixture = new RuntimeFixture(group);
     try {
@@ -177,7 +294,9 @@ describe("Явное продолжение публикации restore", () =>
     const fixture = new RuntimeFixture(group);
     try {
       const pending = await createInterruptedPublication(fixture, "before-config");
-      const stagedBytes = readFileSync(join(pending.stagingPath, "project.sqlite"));
+      const intentBytes = readFileSync(pending.publicationPath);
+      const stagedPath = join(pending.stagingPath, "project.sqlite");
+      const stagedBytes = existsSync(stagedPath) ? readFileSync(stagedPath) : null;
 
       const result = await runNativeProcess({
         executable: process.execPath,
@@ -202,7 +321,8 @@ describe("Явное продолжение публикации restore", () =>
       expect(readPreservedData(pending.location.databasePath).project.data.name).toBe(
         "Подмена после привязки",
       );
-      expect(readFileSync(join(pending.stagingPath, "project.sqlite"))).toEqual(stagedBytes);
+      expect(readFileSync(pending.publicationPath)).toEqual(intentBytes);
+      expect(existsSync(stagedPath) ? readFileSync(stagedPath) : null).toEqual(stagedBytes);
       expect(existsSync(pending.publicationPath)).toBe(true);
     } finally {
       await fixture.dispose();
@@ -488,7 +608,9 @@ describe("Явное продолжение публикации restore", () =>
       expect(readFileSync(pending.location.databasePath)).toEqual(bytes);
       expect(existsSync(pending.location.configPath)).toBe(false);
       expect(existsSync(pending.publicationPath)).toBe(true);
-      expect(existsSync(join(pending.stagingPath, "project.sqlite"))).toBe(true);
+      expect(existsSync(join(pending.stagingPath, "project.sqlite"))).toBe(
+        process.platform === "win32",
+      );
     } finally {
       await fixture.dispose();
     }
@@ -613,6 +735,9 @@ describe("Явное продолжение публикации restore", () =>
     let opened: ProjectDatabase | undefined;
     try {
       const pending = await createInterruptedPublication(fixture, "before-config");
+      expect(existsSync(join(pending.stagingPath, "project.sqlite"))).toBe(
+        process.platform === "win32",
+      );
       opened = ProjectDatabase.open(pending.location.databasePath);
       const initial = opened.get(projectId);
       if (!initial) {
@@ -630,23 +755,54 @@ describe("Явное продолжение публикации restore", () =>
       const outbox = opened.getReplicationOutbox();
       expect(existsSync(`${pending.location.databasePath}-wal`)).toBe(true);
 
-      try {
-        const resumed = resumeProjectRestoration(
-          { cwd: fixture.cwd, home: fixture.home },
-          projectId,
-          (path) => {
-            expect(path).toBe(pending.location.databasePath);
-            expect(readPreservedData(path).project.data.name).toBe("Живой WAL");
-            expect(existsSync(join(pending.stagingPath, "project.sqlite-wal"))).toBe(false);
-          },
-        );
-
+      const resumed = resumeProjectRestoration(
+        { cwd: fixture.cwd, home: fixture.home },
+        projectId,
+        (path) => {
+          expect(path).toBe(pending.location.databasePath);
+          expect(readPreservedData(path).project.data.name).toBe("Живой WAL");
+          expect(existsSync(join(pending.stagingPath, "project.sqlite-wal"))).toBe(false);
+        },
+      );
+      if (process.platform !== "win32" || resumed.recovery === null) {
         expect(resumed.recovery).toBeNull();
-        expect(opened.getReplicationOutbox()).toEqual(outbox);
-        expect(opened.get(projectId)?.data.name).toBe("Живой WAL");
-      } catch (cause) {
-        await reportLiveWalFailure(fixture, cause);
+      } else {
+        expect(["EPERM", "EACCES", "EBUSY"]).toContain(resumed.recovery.failure.code);
+        expect(existsSync(pending.publicationPath)).toBe(true);
       }
+      expect(opened.getReplicationOutbox()).toEqual(outbox);
+      expect(opened.get(projectId)?.data.name).toBe("Живой WAL");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(opened.getReplicationOutbox()).toEqual(outbox);
+      const current = opened.get(projectId);
+      if (!current) {
+        throw new Error("Пропал проект после resume");
+      }
+      opened.update(
+        {
+          ...current,
+          revision: current.revision + 1,
+          data: { ...current.data, name: "После resume" },
+        },
+        current.revision,
+      );
+      expect(opened.get(projectId)?.data.name).toBe("После resume");
+      expect(opened.getReplicationOutbox()).toHaveLength(outbox.length + 1);
+      opened.close();
+      opened = undefined;
+      if (resumed.recovery) {
+        expect(
+          resumeProjectRestoration(
+            { cwd: fixture.cwd, home: fixture.home },
+            projectId,
+            validatePreservedData,
+          ).recovery,
+        ).toBeNull();
+      }
+      expect(readPreservedData(pending.location.databasePath).project.data.name).toBe(
+        "После resume",
+      );
+      expect(existsSync(pending.publicationPath)).toBe(false);
     } finally {
       opened?.close();
       await fixture.dispose();
@@ -802,7 +958,7 @@ describe("Явное продолжение публикации restore", () =>
         expect(readPreservedData(pending.location.databasePath)).toEqual(before);
         expect(existsSync(pending.location.configPath)).toBe(true);
         expect(existsSync(pending.publicationPath)).toBe(true);
-        expect(existsSync(join(stagingPath, "project.sqlite"))).toBe(true);
+        expect(existsSync(join(stagingPath, "publication.json"))).toBe(true);
       } finally {
         if (stagingPath && existsSync(stagingPath)) {
           chmodSync(stagingPath, 0o700);

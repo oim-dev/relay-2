@@ -95,7 +95,7 @@ import {
   discardProjectFile,
   initialProjectRecords,
   initializeProjectSchema,
-  readProjectId,
+  openExistingProjectFile,
   reserveProjectFile,
 } from "./project-file";
 import type { ProjectGenerationRow, ProjectMetadata } from "./project-database.types";
@@ -200,16 +200,9 @@ export class ProjectDatabase implements ReplicationStore {
     path = resolve(path);
     let connection: Database | undefined;
     try {
-      connection = connectProjectFile(path, mode);
-      const projectId = readProjectId(
-        connection,
-        path,
-        mode === "readonly" ? "readonly" : "migrate",
-      );
-      if (mode === "readwrite") {
-        configureProjectWal(connection);
-      }
-      return new ProjectDatabase(path, connection, projectId);
+      const opened = openExistingProjectFile(path, mode);
+      connection = opened.connection;
+      return new ProjectDatabase(path, connection, opened.projectId);
     } catch (error) {
       connection?.close();
       if (errorCode(error) === "ENOENT") {

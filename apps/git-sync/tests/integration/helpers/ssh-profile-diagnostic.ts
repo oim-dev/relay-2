@@ -5,7 +5,7 @@ import { probeSsh } from "../../../src/transport/ssh-profile";
 // Используется production probe с тем же Git PATH и общим Runtime guardian.
 // Полный -G stdout, окружение и пользовательские настройки в журнал не попадают.
 const probe = await probeSsh(
-  { executable: Bun.which("ssh"), cwd: process.cwd(), platform: process.platform },
+  { executable: Bun.which("ssh"), cwd: process.cwd() },
   async (input) => {
     const result = await runProcess(input);
     process.stdout.write(

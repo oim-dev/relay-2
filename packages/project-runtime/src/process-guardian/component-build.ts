@@ -2,12 +2,14 @@ import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { sourceGuardianComponent } from "./component";
 import { GuardedCommandError } from "./errors";
+import { combineProcessFailures } from "./component-failures";
 
 /**
  * Собирает новый bytecode executable только из собственного source entry Runtime текущим Bun.
  * Каталог создаётся эксклюзивно: существующие файлы не заменяются. Готовый каталог принадлежит
  * вызывающему, который обязан дождаться всех guarded commands до его удаления.
  * Старые dist, environment overrides и проверяемый target не используются как guardian.
+ * При отказе cleanup сохраняет ошибку сборки и удаления вместе, включая типизированную primary.
  */
 export async function buildSourceGuardianComponent(directory: string): Promise<readonly string[]> {
   const source = sourceGuardianComponent();
@@ -36,7 +38,11 @@ export async function buildSourceGuardianComponent(directory: string): Promise<r
     }
     return Object.freeze([outfile]);
   } catch (error) {
-    rmSync(directory, { recursive: true, force: true });
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw combineProcessFailures(error, cleanupError);
+    }
     throw error;
   }
 }
