@@ -10,7 +10,7 @@ import type { GitFixture, GitFixtureLimits, ReplicaFixture } from "./git-fixture
 import { withGitProcessRuntime } from "../../../src/transport/process-runtime";
 import { GitFixtureDiagnostics } from "./git-fixture-diagnostics";
 
-// Рабочий deadline не меняется: отдельный запас нужен guardian drain (5 с + 1 с) и закрытию файлов.
+// Отдельный от рабочего deadline запас нужен guardian drain (5 с + 1 с) и закрытию файлов.
 export const GIT_FIXTURE_DRAIN_MS = 10_000;
 
 /**
@@ -149,6 +149,9 @@ export async function withGitFixture(
   } catch (error) {
     failed = true;
     failure = deadlineError ?? error;
+    if (failure instanceof Error && failure !== error) {
+      failure = new AggregateError([failure, error], failure.message, { cause: failure });
+    }
   } finally {
     clearTimeout(deadline);
     cancellation.abort();

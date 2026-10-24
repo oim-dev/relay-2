@@ -23,9 +23,10 @@ describe("Нативное чтение формата Windows service", () => {
       const source = `
 $ErrorActionPreference='Stop'
 [Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: entered')
-[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 $xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(config.content, "utf8").toString("base64")}'))
-@{binary=$xml.Task.Actions.Exec.Command; arguments=$xml.Task.Actions.Exec.Arguments} | ConvertTo-Json -Compress
+[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: xml-parsed')
+[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$xml.Task.Actions.Exec.Command)))
+[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$xml.Task.Actions.Exec.Arguments)))
 [Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: completed')
 `;
       try {
@@ -44,17 +45,20 @@ $xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.
         });
 
         expect(result.exitCode).toBe(0);
-        const decoded: unknown = JSON.parse(result.stdout.replace(/^\uFEFF/u, ""));
-        expect(decoded).toMatchObject({ binary, arguments: expect.any(String) });
-        if (
-          !decoded ||
-          typeof decoded !== "object" ||
-          !("arguments" in decoded) ||
-          typeof decoded.arguments !== "string"
-        ) {
+        // ASCII-envelope не зависит от OEM-кодировки и не меняет Console.OutputEncoding.
+        const encoded = result.stdout
+          .replace(/^\uFEFF/u, "")
+          .trim()
+          .split(/\r?\n/u);
+        expect(encoded).toHaveLength(2);
+        const [decodedBinary, decodedArguments] = encoded.map((value) =>
+          Buffer.from(value, "base64").toString("utf8"),
+        );
+        expect(decodedBinary).toBe(binary);
+        if (decodedArguments === undefined) {
           throw new Error("XML-декодер не вернул строку аргументов Windows");
         }
-        expect(parseWindowsArguments(`unused.exe ${decoded.arguments}`)).toEqual([
+        expect(parseWindowsArguments(`unused.exe ${decodedArguments}`)).toEqual([
           "unused.exe",
           "supervise",
           "--home",

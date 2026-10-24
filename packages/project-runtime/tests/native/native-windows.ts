@@ -2,6 +2,9 @@ import { expect } from "bun:test";
 import { psString, type NativeCommands } from "./native-command";
 import type { NativeConfiguration } from "./native-service.types";
 
+// Отказ fixture в диапазоне прикладных exit codes, а не служебный -1 от Process.Kill/Stop-Process.
+const CRASH_EXIT_CODE = 86;
+
 // Читает именно зарегистрированную задачу; ENOENT определяется HRESULT, а не языком Windows.
 const scheduler = `
 $scheduler=New-Object -ComObject Schedule.Service
@@ -167,9 +170,9 @@ $observation | ConvertTo-Json -Compress -Depth 8
 }
 
 /**
- * Аварийно завершает подтверждённый supervisor; /End здесь нельзя использовать:
- * намеренная остановка задачи не проверяет RestartOnFailure. Удерживает отдельный process handle,
- * записывает настоящий ExitCode и отвергает успешный exit как некорректное внедрение аварии.
+ * Аварийно завершает подтверждённый supervisor с явно заданным ненулевым кодом отказа.
+ * TerminateProcess адресует удержанный handle после проверки executable/SID, не переоткрывает PID.
+ * Не вызывает Task Scheduler Stop/End/Run и не выводит готовность из успешной инъекции.
  */
 export async function crashWindowsSupervisor(
   commands: NativeCommands,
@@ -177,6 +180,15 @@ export async function crashWindowsSupervisor(
   pid: number,
 ): Promise<void> {
   const result = await commands.powershell(`
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class RelayNativeCrash {
+  [DllImport("kernel32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool TerminateProcess(IntPtr process, uint exitCode);
+}
+'@
 $process=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'
 if ($null -eq $process -or $process.ExecutablePath -ne ${psString(binary)}) { throw 'Чужой или исчезнувший PID' }
 $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
@@ -185,22 +197,21 @@ $watched=[Diagnostics.Process]::GetProcessById(${pid})
 try {
   $null=$watched.Handle
   if ($watched.MainModule.FileName -ne ${psString(binary)}) { throw 'Исполняемый файл PID изменился до crash' }
-  Stop-Process -Id ${pid} -Force -ErrorAction Stop
-  if (-not $watched.WaitForExit(5000)) { throw 'Supervisor не завершился после Stop-Process' }
-  @{ pid=${pid}; method='Stop-Process'; exitCode=$watched.ExitCode;
+  if (-not [RelayNativeCrash]::TerminateProcess($watched.Handle, ${CRASH_EXIT_CODE})) {
+    throw [ComponentModel.Win32Exception]::new([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+  }
+  if (-not $watched.WaitForExit(5000)) { throw 'Supervisor не завершился после TerminateProcess' }
+  @{ pid=${pid}; method='TerminateProcess'; requestedExitCode=${CRASH_EXIT_CODE}; exitCode=$watched.ExitCode;
      exitCodeHex=('0x{0:X8}' -f $watched.ExitCode); exitedAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
 } finally { $watched.Dispose() }
 `);
-  expect(result).toMatchObject({ pid, method: "Stop-Process" });
-  if (
-    !result ||
-    typeof result !== "object" ||
-    !("exitCode" in result) ||
-    typeof result.exitCode !== "number"
-  ) {
-    throw new Error("Нет фактического exit code после внедрённой аварии");
-  }
-  expect(result.exitCode).not.toBe(0);
+  expect(result).toMatchObject({
+    pid,
+    method: "TerminateProcess",
+    requestedExitCode: CRASH_EXIT_CODE,
+    exitCode: CRASH_EXIT_CODE,
+    exitCodeHex: "0x00000056",
+  });
 }
 
 /**

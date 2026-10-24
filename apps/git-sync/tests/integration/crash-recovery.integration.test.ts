@@ -12,11 +12,12 @@ import {
 } from "./team-helpers/team-state";
 import type { TeamReplica } from "./team-helpers/team-fixture.types";
 import { GIT_FIXTURE_DRAIN_MS } from "./helpers/git-fixture";
+import { gitFixtureDeadlines } from "./helpers/git-fixture-budgets";
 
 const BODY = "# Durable\r\n\tТочный текст ё и e\u0301  \nбез финального LF";
 const COMMENT = "Сохранить единственный комментарий\r\n**Авария не повторяет команду**";
 const LATE_SUMMARY = "Поздний pending после materialization, до push";
-const deadlineMs = 30_000;
+const deadlineMs = gitFixtureDeadlines.crashRecovery;
 
 /**
  * Читает фактические private refs новым Git-вызовом, минуя cache экземпляра repository.

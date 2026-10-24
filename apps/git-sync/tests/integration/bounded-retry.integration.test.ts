@@ -8,10 +8,11 @@ import type { ProcessResult } from "../../src/transport/process.types";
 import { decodeSnapshot } from "../../src/snapshot/codec";
 import { readProgress } from "../../src/local/state";
 import { GIT_FIXTURE_DRAIN_MS, withGitFixture } from "./helpers/git-fixture";
+import { gitFixtureDeadlines } from "./helpers/git-fixture-budgets";
 
 const artifacts = "git-sync-implementation/finalization/windows-git-fixtures/fixtures";
 const budget = { maxChangesets: 2, maxBytes: 1024 * 1024 };
-const deadlineMs = 15_000;
+const deadlineMs = gitFixtureDeadlines.boundedRecovery;
 
 describe("Cursor bounded окна при transport retry", () => {
   test(

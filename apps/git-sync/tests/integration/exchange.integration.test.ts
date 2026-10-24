@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { renameSync } from "node:fs";
 import { KnowledgeService, ProjectDatabase } from "@relay/core";
 import { GIT_FIXTURE_DRAIN_MS, withGitFixture } from "./helpers/git-fixture";
+import { gitFixtureDeadlines } from "./helpers/git-fixture-budgets";
 import { DataRepository } from "../../src/transport/repository";
 import { git, requireGit } from "../../src/transport/git";
 import { decodeSnapshot } from "../../src/snapshot/codec";
@@ -12,8 +13,7 @@ import { SyncEngine } from "../../src/sync/engine";
 import { syncStatus } from "../../src/worker/status";
 
 const artifacts = "git-sync-implementation/finalization/windows-git-fixtures/fixtures";
-const recoveryDeadlineMs = 15_000;
-const exchangeDeadlineMs = 5_000;
+const deadlineMs = gitFixtureDeadlines.exchange;
 
 /**
  * Доставляет настоящий push, затем теряет единственный ответ: Core не должен повторять mutation.
@@ -113,10 +113,10 @@ describe("Обмен одной общей Git-ветки", () => {
           }
         },
         artifacts,
-        { name: "exchange-unknown", deadlineMs: recoveryDeadlineMs },
+        { name: "exchange-unknown", deadlineMs },
       );
     },
-    recoveryDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -167,10 +167,10 @@ describe("Обмен одной общей Git-ветки", () => {
           expect(await replica.repository.counts()).toMatchObject({ ahead: 1, behind: 0 });
         },
         artifacts,
-        { name: "exchange-ahead", deadlineMs: recoveryDeadlineMs },
+        { name: "exchange-ahead", deadlineMs },
       );
     },
-    recoveryDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -261,10 +261,10 @@ describe("Обмен одной общей Git-ветки", () => {
           ).toBe("3");
         },
         artifacts,
-        { name: "exchange-late", deadlineMs: recoveryDeadlineMs },
+        { name: "exchange-late", deadlineMs },
       );
     },
-    recoveryDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -316,10 +316,10 @@ describe("Обмен одной общей Git-ветки", () => {
           expect(refs).toBe("refs/heads/relay-data-v2");
         },
         artifacts,
-        { name: "exchange-no-echo", deadlineMs: exchangeDeadlineMs },
+        { name: "exchange-no-echo", deadlineMs },
       );
     },
-    exchangeDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -360,10 +360,10 @@ describe("Обмен одной общей Git-ветки", () => {
           ).toBe("1");
         },
         artifacts,
-        { name: "exchange-lost-reply", deadlineMs: exchangeDeadlineMs },
+        { name: "exchange-lost-reply", deadlineMs },
       );
     },
-    exchangeDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -396,10 +396,10 @@ describe("Обмен одной общей Git-ветки", () => {
           }
         },
         artifacts,
-        { name: "exchange-offline", deadlineMs: exchangeDeadlineMs },
+        { name: "exchange-offline", deadlineMs },
       );
     },
-    exchangeDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 
   test(
@@ -455,9 +455,9 @@ describe("Обмен одной общей Git-ветки", () => {
           ).toBe(false);
         },
         artifacts,
-        { name: "exchange-refresh", deadlineMs: exchangeDeadlineMs },
+        { name: "exchange-refresh", deadlineMs },
       );
     },
-    exchangeDeadlineMs + GIT_FIXTURE_DRAIN_MS,
+    deadlineMs + GIT_FIXTURE_DRAIN_MS,
   );
 });

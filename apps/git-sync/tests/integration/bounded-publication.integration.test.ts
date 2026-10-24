@@ -8,6 +8,7 @@ import { syncStatus } from "../../src/worker/status";
 import { getConflict, listConflicts, resolveConflictRequest } from "../../src/app/conflicts";
 import { decodeSnapshot } from "../../src/snapshot/codec";
 import { GIT_FIXTURE_DRAIN_MS, withGitFixture } from "./helpers/git-fixture";
+import { gitFixtureDeadlines } from "./helpers/git-fixture-budgets";
 import type { ReplicaFixture } from "./helpers/git-fixture.types";
 import { ownControl } from "../../src/local/control";
 import { ControlOperations } from "../../src/local/operations";
@@ -17,8 +18,8 @@ import { writeLocalJson } from "../../src/local/files";
 
 const artifacts = "git-sync-implementation/finalization/windows-git-fixtures/fixtures";
 const budget = { maxChangesets: 2, maxBytes: 1024 * 1024 };
-const restartDeadlineMs = 15_000;
-const windowDeadlineMs = 5_000;
+const restartDeadlineMs = gitFixtureDeadlines.boundedRecovery;
+const windowDeadlineMs = gitFixtureDeadlines.exchange;
 
 /**
  * Подключает production engine с малым Core budget; состояние и соединение принадлежат fixture.

@@ -14,30 +14,38 @@ if ((await Bun.stdin.text()) !== "open\n") {
 let database: ProjectDatabase | undefined;
 try {
   database = ProjectDatabase.open(path);
-  const metadata = new Database(path, { readonly: true });
-  let mode: unknown;
-  try {
-    mode = metadata.query("PRAGMA journal_mode").get();
-  } finally {
-    metadata.close();
-  }
-  const stat = lstatSync(path, { bigint: true });
+  const opened = database;
   console.log(
-    JSON.stringify({
-      path: database.path,
-      projectId: database.projectId,
-      project: database.get(database.projectId),
-      document: database.get("DOC-OPEN"),
-      generation: database.getGeneration(),
-      replicaId: database.getReplicationState().replicaId,
-      outbox: database.getReplicationOutbox(),
-      mode,
-      physical: {
-        device: String(stat.dev),
-        inode: String(stat.ino),
-        birthtimeNs: String(stat.birthtimeNs),
-      },
-    }),
+    JSON.stringify(
+      opened.snapshot(() => {
+        // BEGIN DEFERRED сам по себе не удерживает read snapshot. Это чтение открывает WAL/SHM
+        // возвращённого соединения, чтобы close других opener не убрал их во время metadata probe.
+        const project = opened.get(opened.projectId);
+        const metadata = new Database(path, { readonly: true });
+        let mode: unknown;
+        try {
+          mode = metadata.query("PRAGMA journal_mode").get();
+        } finally {
+          metadata.close();
+        }
+        const stat = lstatSync(path, { bigint: true });
+        return {
+          path: opened.path,
+          projectId: opened.projectId,
+          project,
+          document: opened.get("DOC-OPEN"),
+          generation: opened.getGeneration(),
+          replicaId: opened.getReplicationState().replicaId,
+          outbox: opened.getReplicationOutbox(),
+          mode,
+          physical: {
+            device: String(stat.dev),
+            inode: String(stat.ino),
+            birthtimeNs: String(stat.birthtimeNs),
+          },
+        };
+      }),
+    ),
   );
 } catch (error) {
   if (!(error instanceof RelayError)) {

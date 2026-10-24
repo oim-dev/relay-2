@@ -4,11 +4,12 @@ import { decodeSnapshot, encodeSnapshot } from "../../src/snapshot/codec";
 import { SyncEngine } from "../../src/sync/engine";
 import { git, requireGit } from "../../src/transport/git";
 import { GIT_FIXTURE_DRAIN_MS, withGitFixture } from "./helpers/git-fixture";
+import { gitFixtureDeadlines } from "./helpers/git-fixture-budgets";
 import { encodeLayoutOneFixture } from "./helpers/layout-1-fixture";
 
 const artifactGroup = "git-sync-implementation/finalization/windows-git-fixtures/fixtures";
 const body = "\ufeff# Точный текст\r\n\tБез конечного LF  ";
-const deadlineMs = 5_000;
+const deadlineMs = gitFixtureDeadlines.exchange;
 
 describe("Граница миграции физического Git layout", () => {
   test(

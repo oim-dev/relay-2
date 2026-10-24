@@ -4,8 +4,14 @@ import { Database } from "bun:sqlite";
 import { lstatSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ProjectDatabase } from "../../src/database/project-database";
-import { ProjectDatabaseFixture, createDocument } from "./helpers/project-database-fixture";
+import {
+  ProjectDatabaseFixture,
+  createDocument,
+  expectRelayError,
+} from "./helpers/project-database-fixture";
 import type { ConcurrentOpenProcess, OpenProcessResult } from "./helpers/concurrent-open.types";
+import { BatchReceiptUpgradeFixture } from "./helpers/batch-receipt-upgrade-fixture";
+import { withWalBusyReplacement } from "./helpers/wal-retry-replacement";
 
 /**
  * Запускает настоящий opener с stdin-barrier после imports; дедлайн ограничивает зависший child.
@@ -157,6 +163,133 @@ describe("Конкурентное первое открытие DELETE-базы
         await Promise.allSettled([process.result]);
       }
       reader?.close();
+      fixture.close();
+    }
+  });
+});
+
+describe("Повторная валидация после WAL BUSY", () => {
+  test("после реального close повтор возвращает ID и данные новой совместимой БД", () => {
+    const fixture = new ProjectDatabaseFixture("reopen-current");
+    const replacement = new ProjectDatabaseFixture("replacement-current");
+    let prepared: ProjectDatabase | undefined;
+    try {
+      fixture.create().close();
+      fixture.withRaw((raw) => raw.exec("PRAGMA journal_mode=DELETE"));
+      prepared = ProjectDatabase.create(replacement.path, {
+        id: "replacement-project",
+        name: "Новая выбранная база",
+        slug: "replacement",
+      });
+      const document = {
+        ...createDocument("DOC-REPLACEMENT"),
+        data: { title: "Данные новой базы", content: "После закрытия первой попытки" },
+      };
+      prepared.insert(document);
+      const expected = {
+        projectId: "replacement-project",
+        project: prepared.get("PROJECT"),
+        document: prepared.get(document.id),
+        replicaId: prepared.getReplicationState().replicaId,
+        outbox: prepared.getReplicationOutbox(),
+        generation: prepared.getGeneration(),
+      };
+      prepared.close();
+      prepared = undefined;
+      replacement.withRaw((raw) => raw.exec("PRAGMA journal_mode=DELETE"));
+
+      const observed = withWalBusyReplacement(fixture.path, replacement.path, () => {
+        const opened = ProjectDatabase.open(fixture.path);
+        try {
+          return {
+            projectId: opened.projectId,
+            project: opened.get("PROJECT"),
+            document: opened.get(document.id),
+            replicaId: opened.getReplicationState().replicaId,
+            outbox: opened.getReplicationOutbox(),
+            generation: opened.getGeneration(),
+          };
+        } finally {
+          opened.close();
+        }
+      });
+
+      expect(observed.trace).toEqual({
+        walAttempts: 2,
+        busyFailures: 1,
+        firstCloses: 1,
+        closedHandleRejectsQuery: true,
+        reopens: 1,
+        retryCloses: 1,
+        events: [
+          "wal-busy",
+          "first-closed",
+          "fixture-replaced",
+          "reopened",
+          "wal-retry",
+          "retry-closed",
+        ],
+      });
+      expect(observed.value).toEqual(expected);
+      fixture.withRaw((raw) =>
+        expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" }),
+      );
+    } finally {
+      prepared?.close();
+      replacement.close();
+      fixture.close();
+    }
+  });
+
+  test("старая схема на retry отклоняется без второй миграции и без изменения bytes или DDL", () => {
+    const fixture = new ProjectDatabaseFixture("reopen-legacy");
+    const replacement = new BatchReceiptUpgradeFixture();
+    try {
+      fixture.create().close();
+      fixture.withRaw((raw) => raw.exec("PRAGMA journal_mode=DELETE"));
+      replacement.createV1();
+      replacement.withRaw((raw) => raw.exec("PRAGMA journal_mode=DELETE"));
+      const beforeSchema = replacement.withRaw((raw) => ({
+        version: raw.query("PRAGMA user_version").get(),
+        definitions: raw
+          .query("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+          .all(),
+      }));
+      const beforeBytes = readFileSync(replacement.path);
+
+      const observed = withWalBusyReplacement(fixture.path, replacement.path, () =>
+        expectRelayError(() => {
+          // При ошибочной реализации успешное соединение всё равно освобождается перед fail assertion.
+          ProjectDatabase.open(fixture.path).close();
+        }, "SCHEMA_VERSION_UNSUPPORTED"),
+      );
+
+      expect(observed.trace).toEqual({
+        walAttempts: 1,
+        busyFailures: 1,
+        firstCloses: 1,
+        closedHandleRejectsQuery: true,
+        reopens: 1,
+        retryCloses: 1,
+        events: ["wal-busy", "first-closed", "fixture-replaced", "reopened", "retry-closed"],
+      });
+      expect(observed.value.details).toMatchObject({
+        path: fixture.path,
+        expectedVersion: 4,
+        actualVersion: 1,
+      });
+      expect(readFileSync(fixture.path)).toEqual(beforeBytes);
+      fixture.withRaw((raw) => {
+        expect({
+          version: raw.query("PRAGMA user_version").get(),
+          definitions: raw
+            .query("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+            .all(),
+        }).toEqual(beforeSchema);
+        expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
+      });
+    } finally {
+      replacement.close();
       fixture.close();
     }
   });
