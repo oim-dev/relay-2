@@ -71,14 +71,22 @@ export function discardProjectFile(path: string): void {
 }
 
 /**
- * Открывает существующий файл с FK и ограниченным ожиданием писателя.
+ * Открывает существующий файл с FK и ограниченным ожиданием писателя; readonly запрещает SQL-запись.
  * При успехе владение соединением переходит вызывающему; при отказе настройки оно закрывается.
  */
-export function connectProjectFile(path: string): Database {
+export function connectProjectFile(
+  path: string,
+  mode: "readwrite" | "readonly" = "readwrite",
+): Database {
   if (!statSync(path).isFile()) {
     throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.notAFile, 1, { path });
   }
-  const connection = new Database(path, { create: false, readwrite: true, strict: true });
+  const connection = new Database(path, {
+    create: false,
+    readonly: mode === "readonly",
+    readwrite: mode === "readwrite",
+    strict: true,
+  });
   try {
     connection.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}; PRAGMA foreign_keys = ON;`);
     return connection;
@@ -102,15 +110,20 @@ export function configureProjectWal(connection: Database): void {
 /**
  * Проверяет заголовок и корневую сущность существующей базы без её переинициализации.
  * Возвращает постоянный ID проекта; чужая или несовместимая база отклоняется до включения WAL.
- * Совместимые v1/v2/v3 получают нормализованную v4 в собственной атомарной технической миграции.
+ * В режиме migrate совместимые v1/v2/v3 получают v4 в атомарной технической миграции.
+ * Режим readonly принимает только текущую схему, без миграций и изменения журнала.
  */
-export function readProjectId(connection: Database, path: string): string {
+export function readProjectId(
+  connection: Database,
+  path: string,
+  mode: "migrate" | "readonly" = "migrate",
+): string {
   const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
   const application = connection.query<ApplicationIdRow, []>("PRAGMA application_id").get();
   if (application?.application_id !== APPLICATION_ID) {
     throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.foreignDatabase, 1, { path });
   }
-  requireSupportedSchema(version?.user_version, path);
+  requireSupportedSchema(version?.user_version, path, mode);
   const state = connection
     .query<ProjectStateRow, []>(
       `SELECT project_id FROM project_state s JOIN entities e ON e.id = s.project_id
@@ -128,9 +141,17 @@ export function readProjectId(connection: Database, path: string): string {
 
 /**
  * Отклоняет неизвестную техническую версию до записи и после ожидания замка миграции.
+ * Readonly допускает только текущую схему, поскольку миграция потребовала бы записи.
  */
-function requireSupportedSchema(version: number | undefined, path: string): void {
-  if (version !== 1 && version !== 2 && version !== 3 && version !== SCHEMA_VERSION) {
+function requireSupportedSchema(
+  version: number | undefined,
+  path: string,
+  mode: "migrate" | "readonly" = "migrate",
+): void {
+  if (
+    version !== SCHEMA_VERSION &&
+    (mode === "readonly" || (version !== 1 && version !== 2 && version !== 3))
+  ) {
     throw new RelayError(
       "SCHEMA_VERSION_UNSUPPORTED",
       projectDatabaseMessages.unsupportedSchema,

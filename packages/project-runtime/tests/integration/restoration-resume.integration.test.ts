@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
+import { Database, constants } from "bun:sqlite";
 import {
   chmodSync,
   existsSync,
@@ -79,7 +79,7 @@ async function createInterruptedPublication(
  * Проверяет сохранённый проект одним read snapshot и закрывает соединение; никаких предметных мутаций.
  */
 function readPreservedData(path: string): PreservedRestorationData {
-  const database = ProjectDatabase.open(path);
+  const database = ProjectDatabase.openReadonly(path);
   try {
     return database.snapshot(() => {
       const project = database.get(projectId);
@@ -106,6 +106,52 @@ function validatePreservedData(path: string): void {
 }
 
 describe("Явное продолжение публикации restore", () => {
+  test("закрытый persistent WAL private staging сохраняет позднюю запись, replicaId и outbox при resume", async () => {
+    const fixture = new RuntimeFixture(group);
+    try {
+      const pending = await createInterruptedPublication(fixture, "before-link");
+      const path = join(pending.stagingPath, "project.sqlite");
+      const writer = ProjectDatabase.open(path);
+      const raw = new Database(path, { create: false, readwrite: true });
+      try {
+        const initial = writer.get(projectId);
+        if (!initial) {
+          throw new Error("В fixture отсутствует проект");
+        }
+        writer.update(
+          {
+            ...initial,
+            revision: initial.revision + 1,
+            data: { ...initial.data, name: "Сохранённый WAL" },
+          },
+          initial.revision,
+        );
+        expect(raw.fileControl(constants.SQLITE_FCNTL_PERSIST_WAL, new Int32Array([1, 0]))).toBe(0);
+        raw.query("SELECT * FROM project_state").get();
+      } finally {
+        writer.close();
+        raw.close(true);
+      }
+      expect(existsSync(`${path}-wal`)).toBe(true);
+      const before = readPreservedData(path);
+      expect(existsSync(`${path}-wal`)).toBe(true);
+
+      const result = resumeProjectRestoration(
+        { cwd: fixture.cwd, home: fixture.home },
+        projectId,
+        validatePreservedData,
+      );
+
+      expect(result.recovery).toBeNull();
+      expect(before.project).toMatchObject({ revision: 2, data: { name: "Сохранённый WAL" } });
+      expect(before.outbox).toHaveLength(2);
+      expect(readPreservedData(pending.location.databasePath)).toEqual(before);
+      expect(existsSync(pending.stagingPath)).toBe(false);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+
   test("подмена target после публикации config не выдаётся за успешный resume с cleanup warning", async () => {
     const fixture = new RuntimeFixture(group);
     try {
@@ -210,7 +256,7 @@ describe("Явное продолжение публикации restore", () =>
     }
   });
 
-  test("не закрытое validator соединение не допускает публикацию staging под вторым именем", async () => {
+  test("не закрытое WAL-соединение validator не допускает публикацию staging под вторым именем", async () => {
     const fixture = new RuntimeFixture(group);
     let leaked: ProjectDatabase | undefined;
     try {
@@ -221,6 +267,7 @@ describe("Явное продолжение публикации restore", () =>
           resumeProjectRestoration({ cwd: fixture.cwd, home: fixture.home }, projectId, (path) => {
             // Намеренно нарушен контракт callback: соединение закрывается только в finally теста.
             leaked = ProjectDatabase.open(path);
+            leaked.get(projectId);
           }),
         ),
       ).toBe("RESTORE_DATABASE_OPEN");
@@ -511,6 +558,7 @@ describe("Явное продолжение публикации restore", () =>
     try {
       const pending = await createInterruptedPublication(fixture, "before-link");
       opened = ProjectDatabase.open(join(pending.stagingPath, "project.sqlite"));
+      opened.get(projectId);
       expect(existsSync(join(pending.stagingPath, "project.sqlite-wal"))).toBe(true);
 
       expect(

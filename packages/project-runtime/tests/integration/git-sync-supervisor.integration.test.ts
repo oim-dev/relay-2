@@ -19,17 +19,28 @@ function publishEndpoint(home: string, endpoint: GitSyncControlEndpoint): void {
 }
 
 describe("Подтверждение готовности supervisor", () => {
-  test("старый отзывчивый instance не подтверждает новый native start", async () => {
+  test("ответ прежнего instance не завершает ожидание нового native owner", async () => {
     const fixture = new RuntimeFixture("git-sync-implementation/review-runtime");
     mkdirSync(fixture.home);
     const home = realpathSync(fixture.home);
+    let probes = 0;
+    let nextEndpoint: GitSyncControlEndpoint | undefined;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       /**
-       * Независимый foreground supervisor продолжает отвечать, пока native запуск не готов.
+       * Первый health отвечает от прежнего owner и публикует следующий lifetime для нового probe.
+       * Порядок задаётся запросами, а не предположением, что FS и loopback успеют за 10 мс.
        */
       fetch(): Response {
+        probes++;
+        const instance = probes === 1 ? "foreground-instance" : "native-instance";
+        if (probes === 1) {
+          if (nextEndpoint === undefined) {
+            throw new Error("Не подготовлен endpoint нового supervisor");
+          }
+          publishEndpoint(home, nextEndpoint);
+        }
         return Response.json({
           version: 1,
           ok: true,
@@ -38,14 +49,14 @@ describe("Подтверждение готовности supervisor", () => {
             release: "0.0.0/git-sync-v1",
             kind: "supervisor",
             identity: home,
-            instance: "foreground-instance",
+            instance,
             heartbeat: "2026-10-24T00:00:00Z",
           },
         });
       },
     });
     try {
-      publishEndpoint(home, {
+      const previousEndpoint: GitSyncControlEndpoint = {
         version: 1,
         release: "0.0.0/git-sync-v1",
         kind: "supervisor",
@@ -55,18 +66,26 @@ describe("Подтверждение готовности supervisor", () => {
         port: server.port ?? 0,
         capability: "secret",
         startedAt: "2026-10-24T00:00:00Z",
+      };
+      nextEndpoint = {
+        ...previousEndpoint,
+        instance: "native-instance",
+        startedAt: "2026-10-24T00:00:01Z",
+      };
+      publishEndpoint(home, previousEndpoint);
+
+      const status = await waitForGitSyncSupervisor(home, {
+        version: "0.0.0",
+        timeoutMs: 1000,
+        previousInstance: "foreground-instance",
       });
 
-      await expect(
-        waitForGitSyncSupervisor(home, {
-          version: "0.0.0",
-          timeoutMs: 10,
-          previousInstance: "foreground-instance",
-        }),
-      ).rejects.toMatchObject({
-        code: "GIT_SYNC_NOT_READY",
-        details: { supervisor: { responsive: true, instance: "foreground-instance" } },
+      expect(status).toMatchObject({
+        actual: "running",
+        responsive: true,
+        instance: "native-instance",
       });
+      expect(probes).toBe(2);
     } finally {
       await server.stop(true);
       await fixture.dispose();

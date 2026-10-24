@@ -4,7 +4,7 @@ import type { GitSyncEnvironment } from "./client.types";
 import type { ProcessCommand, ProcessResult } from "./process.types";
 import type { GitSyncSupervisorStatus } from "./supervisor.types";
 import { createServiceConfiguration, quoteWindowsArgument } from "./service-configuration";
-import { controlGitSyncService } from "./service";
+import { controlGitSyncService, gitSyncHome } from "./service";
 import type { ServicePlatform } from "./service.types";
 import type { ServiceTestFixture } from "./service.test.types";
 
@@ -142,6 +142,34 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
 }
 
 describe("Конфигурации пользовательского supervisor", () => {
+  test.each([
+    {
+      platform: "linux",
+      cwd: "/fixture/project",
+      home: "../дом Relay",
+      expected: "/fixture/дом Relay",
+    },
+    {
+      platform: "darwin",
+      cwd: "/fixture/project",
+      home: "../дом Relay",
+      expected: "/fixture/дом Relay",
+    },
+    {
+      platform: "win32",
+      cwd: "C:\\fixture\\project",
+      home: "..\\дом Relay",
+      expected: "C:\\fixture\\дом Relay",
+    },
+  ])(
+    "$platform: home сохраняет синтаксис целевой ОС на любом хосте",
+    ({ platform, cwd, home, expected }) => {
+      const resolved = gitSyncHome({ cwd, home }, platform);
+
+      expect(resolved).toBe(expected);
+    },
+  );
+
   test("systemd сохраняет argv с пробелами, кавычками, Unicode и буквальными $/%", () => {
     const config = createServiceConfiguration({
       platform: "linux",
@@ -151,7 +179,7 @@ describe("Конфигурации пользовательского supervisor
     });
 
     expect(config.content).toContain(
-      'Type=exec\nExecStart="/opt/Мой \\"Relay\\"/sync%%$$bin" "supervise" "--home" "/home/Ира/data %%$$"',
+      'Type=exec\nExecStart="/bin/sh" "-c" "exec \\"$$@\\"" "relay-git-sync" "/opt/Мой \\"Relay\\"/sync%%$$bin" "supervise" "--home" "/home/Ира/data %%$$"',
     );
     expect(config.content).toContain("KillMode=control-group");
     expect(config.content).toContain("WantedBy=default.target");
@@ -337,7 +365,7 @@ describe("Конфигурации пользовательского supervisor
     "%s: чужой файл не заменяется и native manager не вызывается",
     async (platform) => {
       const fixture = serviceFixture(platform);
-      // Путь рассчитывается Runtime из home; POSIX-host разрешает Windows-home от cwd в тестовой среде.
+      // Путь рассчитывается из home в синтаксисе выбранной платформы, независимо от ОС набора.
       await controlGitSyncService(
         "enable",
         { cwd: "/fixture", home: fixture.home },

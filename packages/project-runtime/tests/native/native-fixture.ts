@@ -34,6 +34,7 @@ import {
   requireNativeServiceOptIn,
 } from "./native-environment";
 import { NativeManager } from "./native-manager";
+import { captureNativeFailure } from "./native-failure-snapshot";
 import { crashWindowsSupervisor } from "./native-windows";
 import type {
   NativeConfiguration,
@@ -164,7 +165,32 @@ export class NativeServiceFixture {
     if (action === "enable") {
       this.armed = true;
     }
-    const result = await this.client.service(action, this.options);
+    this.save(`${stage}-attempt`, {
+      action,
+      startedAt: new Date().toISOString(),
+      id: this.config.id,
+    });
+    let result: GitSyncServiceStatus;
+    try {
+      result = await this.client.service(action, this.options);
+    } catch (error) {
+      try {
+        await captureNativeFailure(
+          this.commands,
+          this.config,
+          this.binary,
+          this.version,
+          stage,
+          error,
+        );
+      } catch (snapshotError) {
+        throw new AggregateError(
+          [error, snapshotError],
+          "Не удалось сохранить диагностику native отказа",
+        );
+      }
+      throw error;
+    }
     if (result.supervisor.pid !== null) {
       this.pids.add(result.supervisor.pid);
     }

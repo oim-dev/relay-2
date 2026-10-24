@@ -51,13 +51,16 @@ export function createServiceConfiguration(input: ServiceConfigurationInput): Se
   const args = [input.binary, "supervise", "--home", input.home];
   if (input.platform === "linux") {
     const id = `relay-git-sync-${hash}.service`;
+    // systemd запрещает кавычки и backslash в executable первого токена, даже после unescape.
+    // Фиксированный exec не интерпретирует пути как shell-код и сохраняет PID через замену sh.
+    const command = ["/bin/sh", "-c", 'exec "$@"', "relay-git-sync", ...args];
     return {
       platform: input.platform,
       id,
       marker,
       home: input.home,
       path: posix.join(input.userHome, ".config/systemd/user", id),
-      content: `# ${marker}\n[Unit]\nDescription=Relay Git Sync\nAfter=network.target\n\n[Service]\nType=exec\nExecStart=${args.map(quoteSystemdArgument).join(" ")}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=20\n\n[Install]\nWantedBy=default.target\n`,
+      content: `# ${marker}\n[Unit]\nDescription=Relay Git Sync\nAfter=network.target\n\n[Service]\nType=exec\nExecStart=${command.map(quoteSystemdArgument).join(" ")}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=20\n\n[Install]\nWantedBy=default.target\n`,
     };
   }
   if (input.platform === "darwin") {

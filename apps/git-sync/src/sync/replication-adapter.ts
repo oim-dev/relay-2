@@ -163,10 +163,10 @@ export function validateSnapshotHistory(
 
 /**
  * Проверяет согласованное фактическое локальное состояние resume без bootstrap, ack или изменения строк.
- * Соединение открывается только на время Core capture/validation и закрывается до Runtime publication.
+ * Readonly-соединение не включает WAL и не мигрирует схему; закрывается до Runtime publication.
  */
 export function validatePreservedDatabase(databasePath: string): void {
-  const database = ProjectDatabase.open(databasePath);
+  const database = ProjectDatabase.openReadonly(databasePath);
   try {
     database.snapshot(() => {
       decodeReplicationSnapshot(new ReplicationService(database).capture());

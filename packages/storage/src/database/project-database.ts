@@ -181,12 +181,34 @@ export class ProjectDatabase implements ReplicationStore {
    * Не создаёт отсутствующий файл; при отказе освобождает временно открытое соединение.
    */
   static open(path: string): ProjectDatabase {
+    return ProjectDatabase.openExisting(path, "readwrite");
+  }
+
+  /**
+   * Открывает текущую схему только для чтения, включая актуальный WAL по переданному имени.
+   * Не создаёт БД, не мигрирует схему и не переключает journal_mode. Соединение нужно закрыть.
+   * SQLite запрещает запись даже через изменяющие методы; согласованное чтение требует snapshot.
+   */
+  static openReadonly(path: string): ProjectDatabase {
+    return ProjectDatabase.openExisting(path, "readonly");
+  }
+
+  /**
+   * Проверяет существующую БД в выбранном режиме; при отказе закрывает соединение и сохраняет причину.
+   */
+  private static openExisting(path: string, mode: "readwrite" | "readonly"): ProjectDatabase {
     path = resolve(path);
     let connection: Database | undefined;
     try {
-      connection = connectProjectFile(path);
-      const projectId = readProjectId(connection, path);
-      configureProjectWal(connection);
+      connection = connectProjectFile(path, mode);
+      const projectId = readProjectId(
+        connection,
+        path,
+        mode === "readonly" ? "readonly" : "migrate",
+      );
+      if (mode === "readwrite") {
+        configureProjectWal(connection);
+      }
       return new ProjectDatabase(path, connection, projectId);
     } catch (error) {
       connection?.close();

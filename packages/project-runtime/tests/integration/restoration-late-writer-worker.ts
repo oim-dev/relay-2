@@ -1,4 +1,5 @@
 import { spyOn } from "bun:test";
+import { Database } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
 import * as files from "node:fs";
 import { join } from "node:path";
@@ -17,7 +18,7 @@ if (!cwd || !existingCwd || !home || !projectId || (mode !== "conflict" && mode 
 
 /**
  * Принимает реальную CAS-запись через уже существующий config другого worktree.
- * Повторное открытие подтверждает commit, а закрытие последнего соединения убирает WAL/SHM.
+ * Повторное открытие подтверждает commit; fixture явно завершает WAL через SQLite.
  */
 function writeLateChange(existingCwd: string, home: string): void {
   const { location, database } = openProject({ cwd: existingCwd, home });
@@ -48,6 +49,14 @@ function writeLateChange(existingCwd: string, home: string): void {
   } finally {
     reopened.database.close();
   }
+  // Условие регрессии — поздний commit без journals, независимо от native persistent-WAL defaults.
+  // Других соединений в fixture уже нет; данные не удаляются файловыми операциями.
+  const raw = new Database(location.databasePath, { create: false, readwrite: true });
+  try {
+    raw.exec("PRAGMA journal_mode=DELETE");
+  } finally {
+    raw.close(true);
+  }
   if (
     files.existsSync(`${location.databasePath}-wal`) ||
     files.existsSync(`${location.databasePath}-shm`)
@@ -65,11 +74,12 @@ const databasePath = join(home, "projects", projectId, "project.sqlite");
 const configPath = join(cwd, "relay.config.json");
 const nativeLink = files.linkSync;
 spyOn(files, "linkSync").mockImplementation((source, target) => {
-  nativeLink(source, target);
-  if (target !== databasePath) {
+  if (target !== configPath) {
+    nativeLink(source, target);
     return;
   }
-  // Синхронный barrier удерживает restore после публикации БД до commit другого настоящего процесса.
+  // БД уже опубликована, SQLite-barrier закрыт; config ещё не опубликован.
+  // Настоящий другой процесс принимает поздний commit до отказа/аварии привязки.
   const writer = spawnSync(process.execPath, [import.meta.filename, "--writer"], {
     cwd: existingCwd,
     env: process.env,
@@ -86,6 +96,7 @@ spyOn(files, "linkSync").mockImplementation((source, target) => {
   files.writeFileSync(configPath, JSON.stringify({ version: 1, projectId, databasePath }), {
     flag: "wx",
   });
+  nativeLink(source, target);
 });
 
 try {

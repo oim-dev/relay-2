@@ -30,7 +30,7 @@ spyOn(files, "linkSync").mockImplementation((source, target) => {
 });
 try {
   const result = resumeProjectRestoration({ cwd, home }, projectId, (path) => {
-    const database = ProjectDatabase.open(path);
+    const database = ProjectDatabase.openReadonly(path);
     try {
       if (database.projectId !== projectId) {
         throw new Error("Неверный ID fixture");

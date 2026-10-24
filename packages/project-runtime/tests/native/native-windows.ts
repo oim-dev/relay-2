@@ -64,6 +64,10 @@ $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 @{
   description=$definition.RegistrationInfo.Description
   state=$task.State; enabled=$task.Enabled
+  lastRunTime=$task.LastRunTime.ToUniversalTime().ToString('o')
+  runningInstances=@($task.GetInstances(0) | ForEach-Object {
+    @{ instanceGuid=$_.InstanceGuid; state=$_.State; currentAction=$_.CurrentAction; enginePid=$_.EnginePID }
+  })
   principalSid=(Sid $principal.UserId); currentSid=$currentSid
   processOwner=$owner.Sid; logonType=$principal.LogonType; runLevel=$principal.RunLevel
   actionCount=$definition.Actions.Count; binary=$action.Path
@@ -115,6 +119,51 @@ export async function assertWindowsAbsent(
     `$name=${psString(config.id)}\n${scheduler}\n($null -ne $task) | ConvertTo-Json`,
   );
   expect(exists).toBe(false);
+}
+
+/**
+ * Снимает readonly-состояние задачи до cleanup: последний результат, живые task instances,
+ * точные action/argv и уже доступные события. Operational log не включается настройкой ОС.
+ */
+export async function readWindowsFailureSnapshot(
+  commands: NativeCommands,
+  config: NativeConfiguration,
+  binary: string,
+): Promise<unknown> {
+  return commands.powershell(`
+$name=${psString(config.id)}
+${scheduler}
+$observation=@{ exists=($null -ne $task); capturedAt=[DateTime]::UtcNow.ToString('o') }
+if ($null -ne $task) {
+  $observation.state=$task.State
+  $observation.enabled=$task.Enabled
+  $observation.lastTaskResult=$task.LastTaskResult
+  $observation.lastTaskResultHex=('0x{0:X8}' -f $task.LastTaskResult)
+  $observation.lastRunTime=$task.LastRunTime.ToUniversalTime().ToString('o')
+  $observation.nextRunTime=$task.NextRunTime.ToUniversalTime().ToString('o')
+  $observation.xml=$task.Xml
+  $observation.runningInstances=@($task.GetInstances(0) | ForEach-Object {
+    @{ instanceGuid=$_.InstanceGuid; state=$_.State; currentAction=$_.CurrentAction; enginePid=$_.EnginePID }
+  })
+}
+try {
+  $observation.processes=@(Get-CimInstance Win32_Process -Filter "Name='relay-git-sync.exe'" |
+    Where-Object { $_.ExecutablePath -eq ${psString(binary)} } | ForEach-Object {
+      @{ pid=$_.ProcessId; parentPid=$_.ParentProcessId; sessionId=$_.SessionId;
+         executable=$_.ExecutablePath; commandLine=$_.CommandLine; created=$_.CreationDate.ToUniversalTime().ToString('o') }
+    })
+} catch { $observation.processReadError=$_.Exception.Message }
+try {
+  $log=Get-WinEvent -ListLog 'Microsoft-Windows-TaskScheduler/Operational' -ErrorAction Stop
+  $observation.eventLogEnabled=$log.IsEnabled
+  if ($log.IsEnabled) {
+    $xpath="*[EventData[Data[@Name='TaskName']='\\$name']]"
+    $observation.events=@(Get-WinEvent -LogName $log.LogName -FilterXPath $xpath -MaxEvents 50 -ErrorAction Stop |
+      ForEach-Object { $_.ToXml() })
+  }
+} catch { $observation.eventReadError=$_.Exception.Message }
+$observation | ConvertTo-Json -Compress -Depth 8
+`);
 }
 
 /**

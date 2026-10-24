@@ -1,12 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import {
-  openProject,
-  restoreProject,
-  runNativeProcess,
-  type ProcessResult,
-} from "@relay/project-runtime";
+import { restoreProject, runNativeProcess, type ProcessResult } from "@relay/project-runtime";
 import { RuntimeFixture, runtimeErrorCode } from "./helpers/runtime-fixture";
 import { ProjectDatabase } from "@relay/storage";
 
@@ -43,13 +38,12 @@ async function interruptAfterLateWrite(
 }
 
 /**
- * Проверяет принятую ревизию и recovery-материал через публичное открытие исходного worktree.
+ * Проверяет принятую ревизию и recovery-материал через readonly-открытие публичного пути.
  */
 function expectPreservedLateWrite(fixture: RuntimeFixture): void {
-  const { location, database } = openProject({
-    cwd: join(fixture.root, "existing-worktree"),
-    home: fixture.home,
-  });
+  const databasePath = join(fixture.home, "projects", projectId, "project.sqlite");
+  // Readonly не включает WAL заново после явного закрытия журналов поздним writer.
+  const database = ProjectDatabase.openReadonly(databasePath);
   try {
     expect(database.get(projectId)).toMatchObject({
       revision: 2,
@@ -59,11 +53,11 @@ function expectPreservedLateWrite(fixture: RuntimeFixture): void {
   } finally {
     database.close();
   }
-  expect(existsSync(`${location.databasePath}-wal`)).toBe(false);
-  expect(existsSync(`${location.databasePath}-shm`)).toBe(false);
-  expect(existsSync(join(dirname(location.databasePath), ".restore-publication.json"))).toBe(true);
+  expect(existsSync(`${databasePath}-wal`)).toBe(false);
+  expect(existsSync(`${databasePath}-shm`)).toBe(false);
+  expect(existsSync(join(dirname(databasePath), ".restore-publication.json"))).toBe(true);
   expect(
-    readdirSync(dirname(location.databasePath), { withFileTypes: true }).filter(
+    readdirSync(dirname(databasePath), { withFileTypes: true }).filter(
       (entry) => entry.isDirectory() && entry.name.startsWith(".restore-"),
     ),
   ).toHaveLength(1);

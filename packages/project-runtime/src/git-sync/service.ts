@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { resolve, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { validateOptions } from "../configuration/paths";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
@@ -19,11 +19,12 @@ import type {
 } from "./service.types";
 
 /**
- * Разрешает home до обращения к native manager; не читает переменные Relay.
+ * Разрешает home в синтаксисе выбранной платформы до обращения к native manager.
+ * Не читает переменные Relay; explicit platform не наследует правила путей хоста теста.
  */
 export function gitSyncHome(options: RuntimeOptions, platform: string = process.platform): string {
   validateOptions(options);
-  const resolvePath = platform === "win32" ? win32.resolve : resolve;
+  const resolvePath = platform === "win32" ? win32.resolve : posix.resolve;
   return resolvePath(options.cwd, options.home ?? resolvePath(homedir(), ".relay"));
 }
 

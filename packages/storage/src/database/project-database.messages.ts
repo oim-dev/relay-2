@@ -11,6 +11,9 @@ export const projectDatabaseMessages = {
   databaseMissing: "База проекта не найдена.",
   transactionActive: "Нельзя закрыть базу внутри транзакции.",
   databaseClosed: "Соединение с базой уже закрыто.",
+  publicationBusy:
+    "Нельзя эксклюзивно подготовить SQLite к публикации; закройте соединения staging.",
+  publicationSynchronous: "Публикация базы принимает только синхронный callback без результата.",
   asyncCallback: "Транзакция принимает только синхронную функцию.",
   asyncResult: "Транзакция не может возвращать Promise.",
   transactionAborted: "Внешняя транзакция уже отменена SQLite.",

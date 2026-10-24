@@ -4,8 +4,16 @@ import { RelayError } from "@relay/contracts";
 import { withLocalFileLock } from "@relay/storage";
 import { fileExists, withFileErrors, writeJsonAtomic } from "../configuration/files";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
-import { readProjectLocation } from "./selection";
 import type { ProjectLocation } from "./location.types";
+import {
+  validateRestorationDatabase,
+  withRestorationDatabasePublication,
+} from "./restoration-database";
+import {
+  observeRestorationFile,
+  requireNoRestorationJournals,
+  restorationOwnershipError,
+} from "./restoration-ownership";
 import { projectMessages as messages } from "./project.messages";
 import {
   selectRestorationTarget,
@@ -27,7 +35,7 @@ import {
  * Запрещает публикацию поверх БД и её отдельных журналов, в том числе появившихся во время materializer.
  */
 function requireVacantDatabase(databasePath: string): void {
-  for (const suffix of ["", "-wal", "-shm"]) {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     if (fileExists(`${databasePath}${suffix}`)) {
       throw new RelayError("DATABASE_EXISTS", messages.restoreDatabaseExists, 4, {
         databasePath,
@@ -65,22 +73,25 @@ export function restoreProject(
       let committed = false;
       try {
         invokeRestorationCallback(writeDatabase, stagedDatabase, messages.restoreSynchronous);
-        readProjectLocation(
-          location.configPath,
-          { version: 1, projectId, databasePath: stagedDatabase },
-          options,
-        );
-        if (fileExists(`${stagedDatabase}-wal`) || fileExists(`${stagedDatabase}-shm`)) {
-          throw new RelayError("RESTORE_DATABASE_OPEN", messages.restoreDatabaseOpen, 4);
+        if (observeRestorationFile(stagedDatabase).links !== 1n) {
+          throw restorationOwnershipError(stagedDatabase);
         }
+        validateRestorationDatabase(stagedDatabase, location);
         if (existingConfig) {
           requireMatchingRestorationConfig(location, options);
         }
         requireVacantDatabase(location.databasePath);
-        beginRestorationPublication(location, staging);
-        publicationStarted = true;
-        // link не заменяет конкурентно опубликованную базу, в отличие от rename.
-        linkSync(stagedDatabase, location.databasePath);
+        withRestorationDatabasePublication(stagedDatabase, () => {
+          if (observeRestorationFile(stagedDatabase).links !== 1n) {
+            throw restorationOwnershipError(stagedDatabase);
+          }
+          requireNoRestorationJournals(stagedDatabase);
+          requireVacantDatabase(location.databasePath);
+          beginRestorationPublication(location, staging);
+          publicationStarted = true;
+          // Пустая DELETE-транзакция удерживает SQLite-lock до создания нового имени.
+          linkSync(stagedDatabase, location.databasePath);
+        });
         if (!existingConfig) {
           mkdirSync(dirname(resolve(location.configPath)), { recursive: true });
           writeJsonAtomic(location.configPath, { version: 1, projectId }, "create");

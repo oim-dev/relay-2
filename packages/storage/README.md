@@ -79,6 +79,13 @@ CAS в `PortableEntityRecord` и без effective-проекций UI. Исто�
 оба callback строго синхронны. WAL допускает чтение при активном писателе, но запись
 в один файл выполняется последовательно.
 
+`ProjectDatabase.openReadonly` проверяет только текущую схему без миграций и переключения
+журнала; читает также живой WAL по переданному имени. SQLite запрещает запись через это
+соединение. Для публикации принадлежащей вызывающему **private** staging-БД предназначен
+`withProjectDatabasePublication(path, publish)`: он завершает WAL и удерживает эксклюзивную
+SQLite-блокировку до синхронного создания hardlink. К уже публичной БД этот API неприменим;
+точные ограничения владения и callback описаны в его TSDoc.
+
 `ProjectDatabase` предоставляет локальные синхронные `ProjectStore`/`ReplicationStore`
 и реальный асинхронный `CommandStore` как `db.commands`. Общий исполнитель Core
 использует `load` и `commit`: ожидания находятся вне SQLite callbacks, а внутри commit

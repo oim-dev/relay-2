@@ -1,4 +1,5 @@
 export { ProjectDatabase } from "./database/project-database";
+export { withProjectDatabasePublication } from "./database/project-publication";
 export type { ProjectMetadata } from "./database/project-database.types";
 export { withLocalFileLock, acquireLocalLock } from "./local-lock/local-lock";
 export type { LocalLock, LocalLockOptions } from "./local-lock/local-lock.types";

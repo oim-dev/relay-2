@@ -5,7 +5,10 @@ import { withLocalFileLock } from "@relay/storage";
 import { fileExists, withFileErrors, writeJsonAtomic } from "../configuration/files";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import type { ProjectLocation } from "./location.types";
-import { readProjectLocation } from "./selection";
+import {
+  validateRestorationDatabase,
+  withRestorationDatabasePublication,
+} from "./restoration-database";
 import { defaultProjectDatabasePath } from "./database-path";
 import { requireMatchingRestorationConfig, selectRestorationTarget } from "./restoration-target";
 import {
@@ -37,13 +40,12 @@ function requirePendingPublication(location: ProjectLocation): RestorationPublic
 }
 
 /**
- * Для отсутствующего target требует закрытую staging-БД без журналов и неизвестных hardlink-алиасов.
+ * Для отсутствующего target требует единственный staging-hardlink и отсутствие публичных журналов.
  * Нельзя читать staging, пока живой writer мог оставлять WAL по прежнему публичному имени.
  */
-function requireQuiescentStaging(publication: RestorationPublication): void {
+function requirePrivateStaging(publication: RestorationPublication): void {
   const stagedPath = join(publication.staging, "project.sqlite");
   requireNoRestorationJournals(publication.databasePath);
-  requireNoRestorationJournals(stagedPath);
   if (fileExists(publication.databasePath) || observeRestorationFile(stagedPath).links !== 1n) {
     throw restorationOwnershipError(stagedPath);
   }
@@ -51,49 +53,56 @@ function requireQuiescentStaging(publication: RestorationPublication): void {
 
 /**
  * Проверяет схему/ID и предметное состояние через строго синхронный read-only callback.
- * Живой target проверяется только под публичным именем; staging открывается лишь без target/journals.
+ * Живой target проверяется только под публичным именем; private staging проходит SQLite-barrier.
  * Callback обязан закрыть свои соединения и не запускать отложенные writers.
  */
 function validatePreservedDatabase(
   publication: RestorationPublication,
   location: ProjectLocation,
-  options: RuntimeOptions,
   validateDatabase: (path: string) => void,
 ): void {
   const markerPath = restorationPublicationPath(location);
   requireRestorationOwnership(publication, markerPath);
   const stagedPath = join(publication.staging, "project.sqlite");
-  requireNoRestorationJournals(stagedPath);
   const publicTarget = fileExists(location.databasePath);
   if (publicTarget) {
+    requireNoRestorationJournals(stagedPath);
     requireRestorationDatabaseLink(publication);
   } else {
-    requireQuiescentStaging(publication);
+    requirePrivateStaging(publication);
+    // Закрытый persistent WAL допустим только под единственным private-именем.
+    // SQLite доказывает эксклюзивный доступ до запуска validator и сам завершает WAL.
+    withRestorationDatabasePublication(stagedPath, () => {
+      requireRestorationOwnership(publication, markerPath);
+      requirePrivateStaging(publication);
+      requireNoRestorationJournals(stagedPath);
+    });
   }
   const validationPath = publicTarget ? location.databasePath : stagedPath;
-  readProjectLocation(
-    location.configPath,
-    { version: 1, projectId: location.projectId, databasePath: validationPath },
-    options,
-  );
+  validateRestorationDatabase(validationPath, location);
   invokeRestorationCallback(
     validateDatabase,
     validationPath,
     restorationMessages.synchronousValidator,
   );
   requireRestorationOwnership(publication, markerPath);
-  requireNoRestorationJournals(stagedPath);
   if (publicTarget) {
+    requireNoRestorationJournals(stagedPath);
     requireRestorationDatabaseLink(publication);
     return;
   }
-  requireQuiescentStaging(publication);
-  // Только новый hardlink: даже занявший путь в этой точке чужой файл не заменяется.
-  try {
-    linkSync(stagedPath, location.databasePath);
-  } catch (cause) {
-    throw restorationOwnershipError(location.databasePath, cause);
-  }
+  requirePrivateStaging(publication);
+  withRestorationDatabasePublication(stagedPath, () => {
+    requireRestorationOwnership(publication, markerPath);
+    requirePrivateStaging(publication);
+    requireNoRestorationJournals(stagedPath);
+    // Только новый hardlink под SQLite-lock; чужой файл не заменяется.
+    try {
+      linkSync(stagedPath, location.databasePath);
+    } catch (cause) {
+      throw restorationOwnershipError(location.databasePath, cause);
+    }
+  });
   requireRestorationDatabaseLink(publication);
 }
 
@@ -152,7 +161,7 @@ export function resumeProjectRestoration(
       join(dirname(location.databasePath), ".restore"),
       (): RestorationResumeResult => {
         const publication = requirePendingPublication(location);
-        validatePreservedDatabase(publication, location, options, validateDatabase);
+        validatePreservedDatabase(publication, location, validateDatabase);
         publishResumedConfiguration(location, options);
         requireMatchingRestorationConfig(location, options);
         const markerPath = restorationPublicationPath(location);

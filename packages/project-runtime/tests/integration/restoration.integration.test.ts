@@ -284,7 +284,8 @@ describe("Восстановление независимой реплики", (
     try {
       const original = initializeProject({ cwd: fixture.cwd, home: fixture.home });
       const config = readFileSync(original.configPath, "utf8");
-      rmSync(original.databasePath);
+      // Утрачена вся SQLite-семья; сохранность оставшегося WAL проверяется отдельным сценарием.
+      rmSync(dirname(original.databasePath), { recursive: true });
 
       const restored = restoreProject(
         { cwd: fixture.cwd, home: fixture.home },
