@@ -8,12 +8,9 @@ import type { ProjectLocation } from "./location.types";
 import {
   validateRestorationDatabase,
   withRestorationDatabasePublication,
+  requirePrivateRestorationFile,
 } from "./restoration-database";
-import {
-  observeRestorationFile,
-  requireNoRestorationJournals,
-  restorationOwnershipError,
-} from "./restoration-ownership";
+import { requireNoRestorationJournals } from "./restoration-ownership";
 import { projectMessages as messages } from "./project.messages";
 import {
   selectRestorationTarget,
@@ -48,7 +45,8 @@ function requireVacantDatabase(databasePath: string): void {
  * Материализует проверенный приложением portable snapshot в новую независимую локальную реплику.
  * Callback строго синхронен, создаёт SQLite в переданном staging-пути и закрывает все соединения.
  * Runtime проверяет совместимость/ID, эксклюзивно публикует БД и затем конфиг; готовая БД/WAL/SHM не заменяются.
- * До intent ошибка убирает приватный staging. После начала публикации БД никогда не удаляется:
+ * До intent обычная ошибка убирает приватный staging; сомнительное владение/занятость сохраняют его.
+ * После начала публикации БД никогда не удаляется:
  * отказ сохраняет staging/intent и даёт RESTORE_RECOVERY_REQUIRED с расположением recovery-материалов.
  * Прежний intent также даёт эту ошибку до callback, без автоматического resume/adoption: успешный
  * ProjectLocation относится только к материализации текущего вызова, а не к старому fetched snapshot.
@@ -71,10 +69,13 @@ export function restoreProject(
       const stagedDatabase = join(staging, "project.sqlite");
       let publicationStarted = false;
       let committed = false;
+      let preserveStaging = false;
       try {
         invokeRestorationCallback(writeDatabase, stagedDatabase, messages.restoreSynchronous);
-        if (observeRestorationFile(stagedDatabase).links !== 1n) {
-          throw restorationOwnershipError(stagedDatabase);
+        requirePrivateRestorationFile(stagedDatabase);
+        if (fileExists(`${stagedDatabase}-shm`)) {
+          // Даже readonly WAL-открытие может менять индекс: чужой SHM нельзя передавать SQLite.
+          requirePrivateRestorationFile(`${stagedDatabase}-shm`);
         }
         validateRestorationDatabase(stagedDatabase, location);
         if (existingConfig) {
@@ -82,9 +83,7 @@ export function restoreProject(
         }
         requireVacantDatabase(location.databasePath);
         withRestorationDatabasePublication(stagedDatabase, () => {
-          if (observeRestorationFile(stagedDatabase).links !== 1n) {
-            throw restorationOwnershipError(stagedDatabase);
-          }
+          requirePrivateRestorationFile(stagedDatabase);
           requireNoRestorationJournals(stagedDatabase);
           requireVacantDatabase(location.databasePath);
           beginRestorationPublication(location, staging);
@@ -102,11 +101,14 @@ export function restoreProject(
         if (publicationStarted) {
           throw restorationPublicationError(location, staging, "publication-failed", error);
         }
+        preserveStaging =
+          error instanceof RelayError &&
+          (error.code === "RESTORE_RECOVERY_REQUIRED" || error.code === "RESTORE_DATABASE_OPEN");
         throw error;
       } finally {
         if (committed) {
           finishRestorationPublication(location, staging);
-        } else if (!publicationStarted) {
+        } else if (!publicationStarted && !preserveStaging) {
           rmSync(staging, { recursive: true, force: true });
         }
       }

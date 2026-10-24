@@ -6,6 +6,11 @@ export const workspaceMessages = {
   emptyProjectPath: "Путь проекта не должен быть пустым",
 
   /**
+   * Объясняет отказ принять существующий файл вместо каталога регистрируемого проекта.
+   */
+  projectDirectoryRequired: (path: string): string => `Ожидался каталог проекта: ${path}`,
+
+  /**
    * Описывает отсутствие workspace в рабочем каталоге.
    */
   workspaceNotFound: (cwd: string): string => `Workspace не найден: ${cwd}`,

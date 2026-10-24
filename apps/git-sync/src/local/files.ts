@@ -4,12 +4,12 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
+import { replaceLocalFile } from "@relay/project-runtime";
 import { appMessages } from "../app/app.messages";
 
 /**
@@ -30,10 +30,13 @@ export function readLocalJson(path: string): unknown | undefined {
 
 /**
  * Атомарно публикует приватный JSON; mutex read-modify-write удерживает вызывающий.
+ * Относительный path разрешается от cwd процесса; temp синхронизируется и закрывается до замены.
+ * Файловые ошибки передаются с исходной причиной, принадлежащий этой попытке temp убирается.
  */
 export function writeLocalJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = `${path}.${crypto.randomUUID()}.tmp`;
+  const target = resolve(path);
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+  const temporary = `${target}.${crypto.randomUUID()}.tmp`;
   const file = openSync(temporary, "wx", 0o600);
   let closed = false;
   try {
@@ -41,7 +44,7 @@ export function writeLocalJson(path: string, value: unknown): void {
     fsyncSync(file);
     closeSync(file);
     closed = true;
-    renameSync(temporary, path);
+    replaceLocalFile(temporary, target);
   } finally {
     if (!closed) {
       closeSync(file);

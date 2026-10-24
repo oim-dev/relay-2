@@ -7,7 +7,8 @@ const root = process.argv[2];
 if (!root) {
   throw new Error("Не передан каталог владельца lease");
 }
-const block = process.argv[3] === "block";
+const mode = process.argv[3] ?? "normal";
+const block = mode !== "normal";
 const marker = join(root, "owner-blocked");
 await runNativeProcess({
   executable: process.execPath,
@@ -20,6 +21,15 @@ await runNativeProcess({
   env: { ...process.env, HOME: root, USERPROFILE: root },
   timeoutMs: null,
   stdinLease: true,
+  ...(mode === "hold-output-callback"
+    ? {
+        guardianComponent: [
+          process.execPath,
+          fileURLToPath(new URL("./process-guardian-output-stall.ts", import.meta.url)),
+          root,
+        ],
+      }
+    : {}),
   /**
    * Проксирует готовность, не закрывая stdin target до смерти владельца.
    */

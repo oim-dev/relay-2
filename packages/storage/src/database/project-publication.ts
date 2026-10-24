@@ -23,7 +23,8 @@ function publicationBusy(path: string, cause?: unknown): RelayError {
 /**
  * Завершает WAL средствами SQLite и закрывает соединение до создания второго имени.
  * journal_mode=DELETE требует эксклюзивного доступа, переносит принятые WAL-frames в datafile
- * и убирает journals даже при persistent WAL. Живой WAL-reader/writer запрещает переход.
+ * и завершает WAL. Живой WAL-reader/writer запрещает переход. Физический SHM-индекс может
+ * остаться на диске после close; в DELETE он не используется и не является журналом данных.
  */
 function sealPrivateDatabase(path: string): void {
   const connection = connectProjectFile(path);
@@ -43,7 +44,9 @@ function sealPrivateDatabase(path: string): void {
  * все materializer/validator соединения закрыты, отложенные открытия staging запрещены.
  * Переход WAL → DELETE и закрытие выполняются до callback. Затем новая неизменяющая EXCLUSIVE
  * транзакция повторно проверяет DELETE: открытие writer в промежутке не создаёт TOCTOU-разрешения.
- * Callback строго синхронен и только создаёт hardlink; SQLite-lock удерживается до его завершения.
+ * Наличие остаточного SHM не отменяет барьер; владение и очистка файлов принадлежат вызывающему.
+ * Callback синхронно завершает private-file подготовку и создаёт hardlink, не меняя datafile;
+ * SQLite-lock удерживается до его завершения.
  * После link выполняются лишь откат пустой транзакции и close, без записи по прежнему имени.
  * Ошибка callback не откатывает его файловые эффекты. К уже опубликованной БД API неприменим.
  */

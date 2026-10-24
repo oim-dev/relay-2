@@ -54,7 +54,8 @@ function expectPreservedLateWrite(fixture: RuntimeFixture): void {
     database.close();
   }
   expect(existsSync(`${databasePath}-wal`)).toBe(false);
-  expect(existsSync(`${databasePath}-shm`)).toBe(false);
+  expect(existsSync(`${databasePath}-journal`)).toBe(false);
+  expect(Array.from(readFileSync(databasePath).subarray(18, 20))).toEqual([1, 1]);
   expect(existsSync(join(dirname(databasePath), ".restore-publication.json"))).toBe(true);
   expect(
     readdirSync(dirname(databasePath), { withFileTypes: true }).filter(
@@ -64,7 +65,7 @@ function expectPreservedLateWrite(fixture: RuntimeFixture): void {
 }
 
 describe("Restore после принятой записи другого процесса", () => {
-  test("проигрыш config сохраняет позднюю ревизию того же inode без WAL/SHM", async () => {
+  test("проигрыш config сохраняет позднюю ревизию того же inode после завершения WAL", async () => {
     const fixture = new RuntimeFixture(group);
     try {
       const result = await interruptAfterLateWrite(fixture, "conflict");

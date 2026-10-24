@@ -26,6 +26,8 @@ export class CommandOutput {
   private readonly request: GuardianRequest;
   /* Первая ошибка передаётся владельцу дерева, который ограниченно завершает процессы. */
   private readonly fail: (reason: GuardedCommandFailureReason) => void;
+  /* Остановка освобождает pending IPC write независимо от callback умершего получателя. */
+  private readonly cancellation: AbortSignal;
   /* Сохранённые байты stdout. */
   private readonly stdout: Buffer[] = [];
   /* Сохранённые байты stderr. */
@@ -36,14 +38,19 @@ export class CommandOutput {
   /**
    * Создаёт отдельный буфер вывода одной команды без изменения переданных потоков.
    */
-  constructor(request: GuardianRequest, fail: (reason: GuardedCommandFailureReason) => void) {
+  constructor(
+    request: GuardianRequest,
+    cancellation: AbortSignal,
+    fail: (reason: GuardedCommandFailureReason) => void,
+  ) {
     this.request = request;
+    this.cancellation = cancellation;
     this.fail = fail;
   }
 
   /**
    * Читает один pipe; строгий UTF-8 проверяет байты, не заменяя бинарный результат текстом.
-   * После потери получателя дренирует без накопления до cleanup, чтобы SIGPIPE не опередил EOF lease.
+   * После отмены дренирует без накопления до cleanup, чтобы backpressure/SIGPIPE не блокировали EOF lease.
    */
   async read(stream: Readable, name: "stdout" | "stderr"): Promise<void> {
     const streaming = name === "stdout" ? this.request.streamStdout : this.request.streamStderr;
@@ -73,17 +80,20 @@ export class CommandOutput {
   }
 
   /**
-   * Передаёт chunk ограниченными сообщениями; ошибка прекращает forwarding, но не чтение target pipe.
+   * Передаёт chunk ограниченными сообщениями; отмена или ошибка прекращают forwarding, но не drain.
    */
   private async forward(name: "stdout" | "stderr", chunk: Buffer): Promise<boolean> {
     try {
       for (let offset = 0; offset < chunk.length; offset += maxOutputChunkBytes) {
-        await this.send({
+        const sent = await this.send({
           version: 1,
           kind: "output",
           stream: name,
           data: chunk.subarray(offset, offset + maxOutputChunkBytes).toString("base64"),
         });
+        if (!sent) {
+          return false;
+        }
       }
       return true;
     } catch (error) {
@@ -123,19 +133,32 @@ export class CommandOutput {
   }
 
   /**
-   * Ждёт передачи одного ограниченного IPC-message, создавая backpressure на pipe команды.
+   * Ждёт один ограниченный IPC-message либо отмену. false освобождает drain при pending callback:
+   * синхронный stdout команды на Windows иначе не даст её event loop обработать stdin EOF.
    */
-  private send(message: GuardianOutput): Promise<void> {
+  private async send(message: GuardianOutput): Promise<boolean> {
+    if (this.cancellation.aborted) {
+      return false;
+    }
     const send = process.send;
     if (!send) {
-      return Promise.reject(new GuardedCommandError("protocol"));
+      throw new GuardedCommandError("protocol");
     }
-    return new Promise((resolve, reject) => {
-      try {
-        send(message, (error: Error | null) => (error ? reject(sendingFailure(error)) : resolve()));
-      } catch (cause) {
-        reject(sendingFailure(cause));
-      }
-    });
+    const pending = Promise.withResolvers<boolean>();
+    /**
+     * Поздний callback уже отменённой отправки не запускает новую очередь и не удерживает чтение pipe.
+     */
+    const cancel = (): void => pending.resolve(false);
+    this.cancellation.addEventListener("abort", cancel, { once: true });
+    try {
+      send(message, (error: Error | null) =>
+        error ? pending.reject(sendingFailure(error)) : pending.resolve(true),
+      );
+      return await pending.promise;
+    } catch (cause) {
+      throw cause instanceof GuardedCommandError ? cause : sendingFailure(cause);
+    } finally {
+      this.cancellation.removeEventListener("abort", cancel);
+    }
   }
 }

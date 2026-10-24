@@ -146,14 +146,20 @@ export function requireRestorationDatabaseLink(publication: RestorationPublicati
 }
 
 /**
- * Запрещает открытие staging под другим именем или публикацию второго имени при живых SQLite journals.
- * Публичный WAL разрешён только ветке уже опубликованного target, которая читает исключительно его путь.
+ * Требует отсутствие SQLite companions. sealed-private допускает только SHM-индекс под удерживаемым
+ * DELETE/EXCLUSIVE-барьером Storage; его принадлежность и очистку отдельно проверяет вызывающий.
+ * Для отсутствующего публичного target применяется только строгий режим all.
  */
-export function requireNoRestorationJournals(databasePath: string): void {
-  for (const suffix of ["-wal", "-shm", "-journal"]) {
+export function requireNoRestorationJournals(
+  databasePath: string,
+  mode: "all" | "sealed-private" = "all",
+): void {
+  const suffixes = mode === "sealed-private" ? ["-wal", "-journal"] : ["-wal", "-shm", "-journal"];
+  for (const suffix of suffixes) {
     if (fileExists(`${databasePath}${suffix}`)) {
       throw new RelayError("RESTORE_DATABASE_OPEN", projectMessages.restoreDatabaseOpen, 4, {
         path: databasePath,
+        journalPath: `${databasePath}${suffix}`,
       });
     }
   }

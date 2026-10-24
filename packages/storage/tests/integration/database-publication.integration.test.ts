@@ -42,8 +42,9 @@ describe("SQLite-барьер публикации private БД", () => {
 
     withProjectDatabasePublication(fixture.path, () => {
       expect(existsSync(`${fixture.path}-wal`)).toBe(false);
-      expect(existsSync(`${fixture.path}-shm`)).toBe(false);
       expect(existsSync(`${fixture.path}-journal`)).toBe(false);
+      // SQLite read/write format=1 подтверждает rollback mode; оставшийся SHM в нём не участвует.
+      expect(Array.from(readFileSync(fixture.path).subarray(18, 20))).toEqual([1, 1]);
       linkSync(fixture.path, target);
       const contender = new Database(target, { create: false, readwrite: true });
       try {
@@ -172,6 +173,10 @@ describe("Readonly-проверка сохранённой БД", () => {
     fixture.create().close();
     withProjectDatabasePublication(fixture.path, () => {});
     const before = readFileSync(fixture.path);
+    // На macOS SQLite может сохранить инертный индекс после WAL→DELETE. Readonly не меняет его.
+    const shmBefore = existsSync(`${fixture.path}-shm`)
+      ? readFileSync(`${fixture.path}-shm`)
+      : null;
     const reader = ProjectDatabase.openReadonly(fixture.path);
     try {
       expect(reader.snapshot(() => reader.list())).toHaveLength(3);
@@ -181,7 +186,10 @@ describe("Readonly-проверка сохранённой БД", () => {
 
     expect(readFileSync(fixture.path)).toEqual(before);
     expect(existsSync(`${fixture.path}-wal`)).toBe(false);
-    expect(existsSync(`${fixture.path}-shm`)).toBe(false);
+    expect(existsSync(`${fixture.path}-journal`)).toBe(false);
+    expect(existsSync(`${fixture.path}-shm`) ? readFileSync(`${fixture.path}-shm`) : null).toEqual(
+      shmBefore,
+    );
   });
 
   test("предыдущая схема отвергается без автоматической миграции", () => {

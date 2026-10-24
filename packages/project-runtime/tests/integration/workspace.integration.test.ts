@@ -11,6 +11,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { RelayError } from "@relay/contracts";
 import {
   initializeProject,
   initializeWorkspace,
@@ -25,6 +26,7 @@ import {
   withProjectDatabase,
   writeConfig,
 } from "./helpers/runtime-fixture";
+import { withWindowsDeleteDeniedReader } from "./helpers/windows-file-reader";
 
 describe("Локальные регистрации workspace", () => {
   let fixture: RuntimeFixture;
@@ -94,26 +96,77 @@ describe("Локальные регистрации workspace", () => {
     ]);
   });
 
-  test("публикация регистрации сохраняет целый прежний JSON для уже открытого читателя", () => {
-    const { cwd, home, root } = fixture;
-    const workspace = initializeWorkspace({ cwd, home });
-    const project = initializeProject({ cwd: join(root, "alpha"), home });
-    const original = readFileSync(workspace.configPath, "utf8");
-    // Читатель уже открыл файл, но ещё не прочитал его: запись поверх этого inode
-    // нарушит снимок независимо от скорости записи и планирования другого процесса.
-    const reader = openSync(workspace.configPath, "r");
-    try {
-      registerProject({ cwd, home }, "alpha", dirname(project.configPath));
+  test.each(["relay.workspace.json", "реестр проектов.json"])(
+    "публикация регистрации сохраняет целый прежний JSON для уже открытого читателя: %s",
+    (config) => {
+      const { cwd, home, root } = fixture;
+      const options = { cwd, home, config };
+      const workspace = initializeWorkspace(options);
+      const project = initializeProject({ cwd: join(root, "alpha"), home });
+      const original = readFileSync(workspace.configPath, "utf8");
+      // Читатель уже открыл файл, но ещё не прочитал его: запись поверх этого inode
+      // нарушит снимок независимо от скорости записи и планирования другого процесса.
+      const reader = openSync(workspace.configPath, "r");
+      try {
+        registerProject(options, "alpha", dirname(project.configPath));
 
-      expect(readFileSync(reader, "utf8")).toBe(original);
-      expect(JSON.parse(readFileSync(workspace.configPath, "utf8"))).toEqual({
-        version: 1,
-        projects: [{ name: "alpha", path: join(root, "alpha") }],
+        expect(readFileSync(reader, "utf8")).toBe(original);
+        expect(JSON.parse(readFileSync(workspace.configPath, "utf8"))).toEqual({
+          version: 1,
+          projects: [{ name: "alpha", path: join(root, "alpha") }],
+        });
+      } finally {
+        closeSync(reader);
+      }
+    },
+  );
+
+  if (process.platform === "win32") {
+    test("Windows reader без share-delete отклоняет замену без потери JSON и не блокирует другой workspace", () => {
+      const { cwd, home, root } = fixture;
+      const workspace = initializeWorkspace({ cwd, home });
+      const independent = { cwd: join(root, "independent"), home };
+      initializeWorkspace(independent);
+      const project = initializeProject({ cwd: join(root, "alpha"), home });
+      const target = dirname(project.configPath);
+      const original = readFileSync(workspace.configPath, "utf8");
+
+      withWindowsDeleteDeniedReader(workspace.configPath, () => {
+        let failure: unknown;
+        try {
+          registerProject({ cwd, home }, "alpha", target);
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure).toBeInstanceOf(RelayError);
+        expect(failure).toMatchObject({ code: "IO_ERROR", exitCode: 1 });
+        if (!(failure instanceof Error) || !(failure.cause instanceof Error)) {
+          throw new Error("Отказ внешнего handle должен сохранять системную причину", {
+            cause: failure,
+          });
+        }
+        if ("win32Code" in failure.cause && typeof failure.cause.win32Code === "number") {
+          expect(failure.cause).toMatchObject({ syscall: "SetFileInformationByHandle" });
+          expect([5, 32]).toContain(failure.cause.win32Code);
+        } else {
+          expect(failure.cause).toMatchObject({ syscall: "rename" });
+          expect("code" in failure.cause && failure.cause.code).toBe("EBUSY");
+        }
+        expect(readFileSync(workspace.configPath, "utf8")).toBe(original);
+        expect(readdirSync(cwd).sort()).toEqual([
+          "relay.workspace.json",
+          "relay.workspace.json.lock.sqlite",
+        ]);
+
+        registerProject(independent, "other", target);
+        expect(listProjects(independent)).toEqual([{ name: "other", path: target }]);
       });
-    } finally {
-      closeSync(reader);
-    }
-  });
+
+      registerProject({ cwd, home }, "alpha", target);
+      expect(listProjects({ cwd, home })).toEqual([{ name: "alpha", path: target }]);
+      expect(resolveProject({ cwd: target, home })).toEqual(project);
+    });
+  }
 
   test("отказ публикации регистрации сохраняет JSON, убирает временный файл и освобождает mutex", () => {
     const { cwd, home, root } = fixture;

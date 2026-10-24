@@ -21,6 +21,7 @@ describe("Нативное чтение формата Windows service", () => {
       });
       const source = `
 $ErrorActionPreference='Stop'
+[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: entered')
 [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
 Add-Type @'
 using System;
@@ -36,8 +37,10 @@ public static class RelayArgumentFixture {
   }
 }
 '@
+[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: native-parser-compiled')
 $xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(config.content, "utf8").toString("base64")}'))
 @{binary=$xml.Task.Actions.Exec.Command; args=[RelayArgumentFixture]::Parse('unused.exe '+$xml.Task.Actions.Exec.Arguments)} | ConvertTo-Json -Compress
+[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: completed')
 `;
       try {
         const result = await runNativeProcess({

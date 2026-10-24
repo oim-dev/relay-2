@@ -20,8 +20,9 @@ const forceOwner = fileURLToPath(
   new URL("./helpers/process-guardian-force-owner.ts", import.meta.url),
 );
 const leaseOwnerCases = [
-  { name: "обычный вывод", blocked: false },
-  { name: "большой вывод и заблокированный IPC-читатель", blocked: true },
+  { name: "обычный вывод", mode: "normal" },
+  { name: "большой вывод и заблокированный IPC-читатель", mode: "block" },
+  { name: "большой вывод и незавершённый IPC callback", mode: "hold-output-callback" },
 ] as const;
 const leaseCancellationCases = [
   { name: "SIGTERM", reason: "SIGTERM", marker: "SIGTERM", exitCode: 143 },
@@ -395,35 +396,78 @@ process.stdout.write(Buffer.concat([header,body]),()=>process.exit(0));});`,
   for (const scenario of leaseOwnerCases) {
     test(`SIGKILL только владельца даёт stdin-eof target: ${scenario.name}`, async () => {
       const fixture = new RuntimeFixture(group);
-      const child = spawn(
-        process.execPath,
-        [owner, fixture.root, ...(scenario.blocked ? ["block"] : [])],
-        {
-          stdio: ["ignore", "pipe", "pipe"],
-          detached: true,
-        },
-      );
+      const child = spawn(process.execPath, [owner, fixture.root, scenario.mode], {
+        stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
+      });
       child.stdout.resume();
-      child.stderr.resume();
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString("utf8")).slice(0, 4096);
+      });
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
       let pid: number | undefined;
-      try {
-        await observe(() => existsSync(join(fixture.root, "lease.ready")));
-        if (scenario.blocked) {
-          await observe(() => existsSync(join(fixture.root, "owner-blocked")));
+      // Барьеры отказывают раньше внешнего watchdog теста, оставляя время для finally.
+      const deadline = performance.now() + 4000;
+      /**
+       * При зависании сохраняет фазу, наблюдаемые маркеры и ограниченную диагностику fixture.
+       */
+      async function leaseBarrier(phase: string, condition: () => boolean): Promise<void> {
+        try {
+          await observe(condition, Math.max(0, deadline - performance.now()));
+        } catch (cause) {
+          const markers = [
+            "lease.ready",
+            "owner-blocked",
+            "flood-started",
+            "flood-flushed",
+            "output-callback-pending",
+            "lease-stop-requested",
+            "stopped.json",
+          ];
+          throw new Error(
+            `Барьер lease ${phase}: ${JSON.stringify({
+              markers: markers.filter((marker) => existsSync(join(fixture.root, marker))),
+              ownerExit: child.exitCode,
+              ownerSignal: child.signalCode,
+              targetRunning: pid === undefined ? null : running(pid),
+              stderr,
+            })}`,
+            { cause },
+          );
         }
+      }
+      try {
+        await leaseBarrier("target-ready", () => existsSync(join(fixture.root, "lease.ready")));
         pid = Number(readFileSync(join(fixture.root, "lease.ready"), "utf8"));
+        if (scenario.mode !== "normal") {
+          await leaseBarrier("owner-blocked", () =>
+            existsSync(join(fixture.root, "owner-blocked")),
+          );
+          await leaseBarrier("flood-started", () =>
+            existsSync(join(fixture.root, "flood-started")),
+          );
+        }
+        if (scenario.mode === "hold-output-callback") {
+          await leaseBarrier("output-callback-pending", () =>
+            existsSync(join(fixture.root, "output-callback-pending")),
+          );
+          expect(existsSync(join(fixture.root, "flood-flushed"))).toBe(false);
+        }
         expect(running(pid)).toBe(true);
 
         child.kill("SIGKILL");
         await exited;
-        await observe(() => existsSync(join(fixture.root, "stopped.json")));
-        await observe(() => pid !== undefined && !running(pid));
+        await leaseBarrier("target-stopped", () => existsSync(join(fixture.root, "stopped.json")));
+        await leaseBarrier("target-exited", () => pid !== undefined && !running(pid));
 
         expect(JSON.parse(readFileSync(join(fixture.root, "stopped.json"), "utf8"))).toEqual({
           reason: "stdin-eof",
           pid,
         });
+        if (scenario.mode !== "normal") {
+          expect(existsSync(join(fixture.root, "flood-flushed"))).toBe(true);
+        }
       } finally {
         child.kill("SIGKILL");
         await exited;

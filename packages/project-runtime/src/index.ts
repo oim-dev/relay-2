@@ -1,4 +1,5 @@
 export { initializeProject } from "./project/initialization";
+export { replaceLocalFile } from "./local-files/replace";
 export { restoreProject } from "./project/restoration";
 export { openProject, resolveProject } from "./project/selection";
 export {

@@ -49,17 +49,23 @@ function writeLateChange(existingCwd: string, home: string): void {
   } finally {
     reopened.database.close();
   }
-  // Условие регрессии — поздний commit без journals, независимо от native persistent-WAL defaults.
+  // Условие регрессии — поздний commit после завершения WAL; остаточный SHM не содержит данных commit.
   // Других соединений в fixture уже нет; данные не удаляются файловыми операциями.
   const raw = new Database(location.databasePath, { create: false, readwrite: true });
   try {
     raw.exec("PRAGMA journal_mode=DELETE");
+    if (
+      raw.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()?.journal_mode !==
+      "delete"
+    ) {
+      throw new Error("Поздний writer не завершил WAL");
+    }
   } finally {
     raw.close(true);
   }
   if (
     files.existsSync(`${location.databasePath}-wal`) ||
-    files.existsSync(`${location.databasePath}-shm`)
+    files.existsSync(`${location.databasePath}-journal`)
   ) {
     throw new Error("Поздний writer не закрыл SQLite journals");
   }

@@ -84,7 +84,8 @@ CAS в `PortableEntityRecord` и без effective-проекций UI. Исто�
 соединение. Для публикации принадлежащей вызывающему **private** staging-БД предназначен
 `withProjectDatabasePublication(path, publish)`: он завершает WAL и удерживает эксклюзивную
 SQLite-блокировку до синхронного создания hardlink. К уже публичной БД этот API неприменим;
-точные ограничения владения и callback описаны в его TSDoc.
+физический SHM-индекс может остаться после перехода в DELETE и не участвует в этом режиме.
+Владение и очистка companions принадлежат вызывающему; точные ограничения описаны в TSDoc.
 
 `ProjectDatabase` предоставляет локальные синхронные `ProjectStore`/`ReplicationStore`
 и реальный асинхронный `CommandStore` как `db.commands`. Общий исполнитель Core

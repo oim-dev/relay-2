@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { hasCode } from "../configuration/files";
+import { replaceLocalFile } from "../local-files/replace";
 import type { ServiceFileStore } from "./service.types";
 
 /**
@@ -33,7 +34,7 @@ export const serviceFiles: ServiceFileStore = {
         mode: 0o600,
         flag: "wx",
       });
-      renameSync(temporary, path);
+      replaceLocalFile(temporary, path);
     } finally {
       rmSync(temporary, { force: true });
     }

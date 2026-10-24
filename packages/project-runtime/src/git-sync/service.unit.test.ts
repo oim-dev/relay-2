@@ -88,6 +88,7 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
                   state: running ? 4 : 3,
                   enabled: true,
                   description: configuration.marker,
+                  runningInstances: running ? 1 : 0,
                 }
               : { exists: false },
           ),
@@ -391,6 +392,116 @@ describe("Конфигурации пользовательского supervisor
       expect(fixture.commands).toEqual([]);
     },
   );
+
+  test.each([
+    { name: "после освобождения старого instance запускается новый", outcome: "ready" },
+    { name: "после остановки прежний health не подтверждает новый Run", outcome: "old-health" },
+    { name: "deadline остановки запрещает замену definition и Run", outcome: "stop-timeout" },
+  ])("Windows restart: $name", async ({ outcome }) => {
+    const fixture = serviceFixture("win32");
+    const options = { cwd: "/fixture", home: fixture.home };
+    await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+    fixture.commands.length = 0;
+    const runner = fixture.environment.runner;
+    if (!runner) {
+      throw new Error("Не настроен native fixture");
+    }
+    const statesAfterEnd = [
+      { state: 4, runningInstances: 1 },
+      { state: 3, runningInstances: 1 },
+      { state: 3, runningInstances: 0 },
+    ];
+    let endRequested = false;
+    let stoppedObserved = false;
+    let stopReads = 0;
+    const previous: GitSyncSupervisorStatus = {
+      actual: "running",
+      responsive: true,
+      instance: "old-instance",
+      pid: 1234,
+      release: "0.0.0/git-sync-v1",
+      heartbeat: "2026-10-24T00:00:00Z",
+    };
+    const environment: GitSyncEnvironment = {
+      ...fixture.environment,
+      timeoutMs: outcome === "stop-timeout" ? 5 : 5000,
+      /**
+       * End принят, но manager ещё показывает старый instance; Ready само по себе недостаточно.
+       * Любая замена/запуск до нулевого GetInstances является проверяемым нарушением.
+       */
+      runner: async (command): Promise<ProcessResult> => {
+        if (command.args.includes("/Create") || command.args.includes("/Run")) {
+          expect(endRequested).toBe(true);
+          expect(stoppedObserved).toBe(true);
+        }
+        if (command.args.includes("/End")) {
+          endRequested = true;
+        }
+        const result = await runner(command);
+        if (command.executable === "powershell.exe" && endRequested && !stoppedObserved) {
+          expect(
+            fixture.commands.some(
+              (entry) => entry.args.includes("/Create") || entry.args.includes("/Run"),
+            ),
+          ).toBe(false);
+          const observed =
+            outcome === "stop-timeout"
+              ? { state: 3, runningInstances: 1 }
+              : statesAfterEnd[stopReads++];
+          if (!observed) {
+            throw new Error("Лишний COM-запрос после освобождения instance");
+          }
+          stoppedObserved = observed.state === 3 && observed.runningInstances === 0;
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              exists: true,
+              enabled: true,
+              description: fixture.configuration.marker,
+              ...observed,
+            }),
+          };
+        }
+        return result;
+      },
+      /**
+       * Проверяет сохранённый production guard предыдущего instance после native stop/run.
+       */
+      supervisorProbe: async (_home, wait): Promise<GitSyncSupervisorStatus> =>
+        wait && outcome !== "old-health"
+          ? { ...previous, instance: "new-instance", pid: 5678 }
+          : previous,
+    };
+
+    const enable = controlGitSyncService("enable", options, environment, fixture.binary);
+
+    if (outcome === "ready") {
+      expect(await enable).toMatchObject({
+        registered: true,
+        supervisor: { responsive: true, instance: "new-instance" },
+      });
+    } else if (outcome === "old-health") {
+      await expect(enable).rejects.toMatchObject({
+        code: "GIT_SYNC_NOT_READY",
+        details: { supervisor: { instance: "old-instance" } },
+      });
+    } else {
+      await expect(enable).rejects.toMatchObject({
+        code: "GIT_SYNC_SERVICE_FAILED",
+        exitCode: 4,
+        details: { phase: "wait-stopped", runningInstances: 1 },
+      });
+    }
+    const mutations = fixture.commands
+      .filter((command) => command.executable === "schtasks.exe")
+      .map((command) => command.args[0]);
+    expect(mutations).toEqual(outcome === "stop-timeout" ? ["/End"] : ["/End", "/Create", "/Run"]);
+    expect(fixture.files.has(fixture.configuration.path)).toBe(true);
+    if (outcome !== "stop-timeout") {
+      expect(stopReads).toBe(3);
+    }
+  });
 
   test("native отказ сохраняет реальный код и диагностику вместо успешной установки", async () => {
     const fixture = serviceFixture("linux");

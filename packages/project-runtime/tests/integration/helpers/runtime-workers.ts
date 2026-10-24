@@ -12,6 +12,31 @@ import type {
 const WORKER_TIMEOUT_MS = 10_000;
 
 /**
+ * Читает синхронный ready из stdout init до его блокирующего stdin-барьера, затем собирает ответ.
+ * Поток непрерывно дренируется; служебная строка не попадает в JSON результата init.
+ */
+async function readPublicationOutput(
+  stdout: ReadableStream<Uint8Array>,
+  onReady: () => void,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let output = "";
+  let ready = false;
+  for await (const chunk of stdout) {
+    output += decoder.decode(chunk, { stream: true });
+    if (!ready && output.includes("\n")) {
+      if (!output.startsWith("ready\n")) {
+        throw new Error(`Некорректный барьер публикации init: ${output}`);
+      }
+      output = output.slice("ready\n".length);
+      ready = true;
+      onReady();
+    }
+  }
+  return output + decoder.decode();
+}
+
+/**
  * Запускает worker с deadline и IPC, сразу читает потоки и передаёт очистку fixture.
  * onReady вызывается на каждом барьере; к этому моменту объект worker уже создан.
  */
@@ -43,11 +68,13 @@ function launchWorker(
   if (!("synchronizePublication" in input) || input.synchronizePublication !== true) {
     void child.stdin.end();
   }
-  const result = Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]).then(([exit, stdout, stderr]): WorkerResult => ({ exit, stdout, stderr }));
+  const stdout =
+    "synchronizePublication" in input && input.synchronizePublication === true
+      ? readPublicationOutput(child.stdout, () => onReady(worker))
+      : new Response(child.stdout).text();
+  const result = Promise.all([child.exited, stdout, new Response(child.stderr).text()]).then(
+    ([exit, stdout, stderr]): WorkerResult => ({ exit, stdout, stderr }),
+  );
   const worker: RunningWorker = { child, result };
   return worker;
 }

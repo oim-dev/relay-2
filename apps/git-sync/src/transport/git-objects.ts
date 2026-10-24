@@ -9,6 +9,13 @@ const MAX_TREE_DEPTH = 8;
 const OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
 /**
+ * Проверяет полный OID поддерживаемых Git object formats, исключая ref/expressions и input injection.
+ */
+export function isGitObjectId(value: string): boolean {
+  return OBJECT_ID.test(value);
+}
+
+/**
  * Отвергает повреждённый batch/tree до передачи байтов snapshot decoder.
  */
 function invalidObject(): never {

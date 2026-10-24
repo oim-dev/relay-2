@@ -61,7 +61,7 @@ class GuardianExecution {
       windowsHide: true,
       serialization: "json",
     });
-    this.output = new CommandOutput(request, (reason) => this.fail(reason));
+    this.output = new CommandOutput(request, cancellation, (reason) => this.fail(reason));
     this.drained = Promise.all([
       this.child.stdout ? this.output.read(this.child.stdout, "stdout") : Promise.resolve(),
       this.child.stderr ? this.output.read(this.child.stderr, "stderr") : Promise.resolve(),

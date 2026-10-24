@@ -5,7 +5,6 @@ import {
   linkSync,
   lstatSync,
   openSync,
-  renameSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -14,6 +13,7 @@ import { RelayError } from "@relay/contracts";
 import { configMessages } from "./config.messages";
 import type { ProjectConfig, WorkspaceConfig } from "./config.types";
 import { fileMessages } from "./files.messages";
+import { replaceLocalFile } from "../local-files/replace";
 
 // SQLite удерживает межпроцессный замок за соединением: авария владельца
 // освобождает его без эвристик времени жизни и удаления чужой блокировки.
@@ -106,7 +106,7 @@ export function writeJsonAtomic(
         throw error;
       }
     } else {
-      renameSync(temporary, path);
+      replaceLocalFile(temporary, path);
     }
   } finally {
     try {

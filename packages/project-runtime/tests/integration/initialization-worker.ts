@@ -1,5 +1,5 @@
 import { spyOn } from "bun:test";
-import { readSync } from "node:fs";
+import { readSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { RelayError } from "@relay/contracts";
 import { ProjectDatabase, type ProjectMetadata } from "@relay/storage";
@@ -37,7 +37,7 @@ function initializeOnce(): void {
 
 /**
  * Выполняет реальный init с барьером после создания SQLite, когда проверка свободного пути пройдена.
- * Синхронное чтение stdin согласует процессы без sleep; родитель отпускает обе публикации вместе.
+ * Синхронные stdout/stdin согласуют процессы без event loop; родитель отпускает обе публикации вместе.
  */
 function initializeWithPublicationBarrier(): void {
   const createDatabase = ProjectDatabase.create;
@@ -48,7 +48,9 @@ function initializeWithPublicationBarrier(): void {
   function createBeforeBarrier(path: string, project: ProjectMetadata): ProjectDatabase {
     const database = createDatabase.call(ProjectDatabase, path, project);
     try {
-      process.send?.("ready");
+      // Windows IPC сначала завершает асинхронную отправку version packet.
+      // readSync блокирует её callback и следующий ready в очереди; stdout пишем синхронно.
+      writeSync(1, "ready\n");
       const permission = Buffer.alloc(1);
       const size = readSync(0, permission, 0, permission.length, null);
       if (size !== permission.length || permission.toString() !== "g") {

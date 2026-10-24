@@ -7,11 +7,13 @@ import { transportMessages } from "./transport.messages";
 import { selectSshProfile } from "./ssh-profile";
 import type { SshProfile } from "./ssh-profile.types";
 import { saveSshCapability } from "./ssh-state";
-import { readGitObjects, readGitTrees } from "./git-objects";
+import { isGitObjectId, readGitObjects, readGitTrees } from "./git-objects";
+import { importGitSnapshot } from "./git-import";
 
 const REMOTE_REF = "refs/relay/remote";
 const LOCAL_REF = "refs/heads/data";
 const ACCEPTED_REF = "refs/relay/accepted";
+const STATE_REFS = [LOCAL_REF, REMOTE_REF, ACCEPTED_REF];
 const MAX_TREE_BYTES = 128 * 1024 * 1024;
 
 /**
@@ -27,6 +29,8 @@ export class DataRepository {
   private remoteHead: string | null | undefined;
   /* Точный Git commit после Core acceptance; отличается от fetched и неподтверждённого candidate. */
   private acceptedHead: string | null | undefined;
+  /* Общий cold read для параллельных local/remote/accepted запросов одного сериализованного owner. */
+  private readingRefs: Promise<void> | null = null;
   /* Профиль текущей попытки; null command сохраняет все пользовательские SSH overrides. */
   private sshProfile: SshProfile | undefined;
   /* Ограниченный cache default probe, полученного в точном Git окружении. */
@@ -109,9 +113,23 @@ export class DataRepository {
   }
 
   /**
-   * Читает локальный ref; отсутствие ref имеет отдельный ожидаемый exit code.
+   * Читает служебные refs общей холодной пачкой; произвольный ref — отдельным rev-parse.
+   * Отсутствие возвращается как null, инфраструктурная ошибка не превращается в пустой ref.
    */
   async ref(name: string): Promise<string | null> {
+    if (
+      STATE_REFS.includes(name) &&
+      (this.localHead === undefined ||
+        this.remoteHead === undefined ||
+        this.acceptedHead === undefined)
+    ) {
+      this.readingRefs ??= this.readRefs();
+      try {
+        await this.readingRefs;
+      } finally {
+        this.readingRefs = null;
+      }
+    }
     let cached: string | null | undefined;
     if (name === LOCAL_REF) {
       cached = this.localHead;
@@ -135,6 +153,37 @@ export class DataRepository {
       this.acceptedHead = head;
     }
     return head;
+  }
+
+  /**
+   * Читает три служебных refs одним Git запросом; отсутствие каждого сохраняется как null.
+   * Cache публикуется целиком после разбора. Предупреждение о повреждённом ref не считается отсутствием.
+   */
+  private async readRefs(): Promise<void> {
+    const result = await this.run([
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      ...STATE_REFS,
+    ]);
+    const output = requireGit(result, "read-state-refs");
+    if (result.stderr.length !== 0) {
+      throw new RelayError("GIT_INVALID_REPOSITORY", transportMessages.invalidRepository, 4);
+    }
+    const refs = new Map<string, string>();
+    for (const line of output.split("\n").filter(Boolean)) {
+      const [name, head, ...extra] = line.split(" ");
+      // for-each-ref также возвращает descendants заданных prefixes, но они не заменяют exact refs.
+      if (name === undefined || !STATE_REFS.includes(name)) {
+        continue;
+      }
+      if (head === undefined || !isGitObjectId(head) || extra.length !== 0 || refs.has(name)) {
+        throw new RelayError("GIT_INVALID_REPOSITORY", transportMessages.invalidRepository, 4);
+      }
+      refs.set(name, head);
+    }
+    this.localHead = refs.get(LOCAL_REF) ?? null;
+    this.remoteHead = refs.get(REMOTE_REF) ?? null;
+    this.acceptedHead = refs.get(ACCEPTED_REF) ?? null;
   }
 
   /**
@@ -273,54 +322,11 @@ export class DataRepository {
    * Совпадающее дерево возвращает parent без лишнего коммита. ID операций принадлежат Core.
    */
   async commit(files: GitFiles, parent: string | null): Promise<string> {
-    // Предыдущий кандидат может быть отвергнут FF push; это только локальный временный ref.
-    requireGit(await this.run(["update-ref", "-d", "refs/relay/prepared"]), "discard-prepared-ref");
-    const chunks: (string | Uint8Array)[] = ["feature done\n"];
-    const ordered = [...files].sort(([left], [right]) => left.localeCompare(right, "en"));
-    for (const [index, [, bytes]] of ordered.entries()) {
-      chunks.push(`blob\nmark :${index + 1}\ndata ${bytes.length}\n`, bytes, "\n");
-    }
-    const seconds = Math.floor(Date.now() / 1000);
-    chunks.push(
-      "reset refs/relay/prepared\n\ncommit refs/relay/prepared\n",
-      `committer Relay Git Sync <relay@localhost> ${seconds} +0000\n`,
-      "data 23\nRelay data snapshot v1\n\n",
+    const commit = await importGitSnapshot(
+      (args, options) => this.run(args, options),
+      files,
+      parent,
     );
-    if (parent) {
-      chunks.push(`from ${parent}\n`);
-    }
-    chunks.push("deleteall\n");
-    for (const [index, [path]] of ordered.entries()) {
-      if (
-        !/^[a-zA-Z0-9_./-]+$/.test(path) ||
-        path.startsWith("/") ||
-        path.split("/").some((part) => part === ".." || part === "." || !part)
-      ) {
-        throw new RelayError("GIT_INVALID_SNAPSHOT", transportMessages.invalidRepository, 4);
-      }
-      chunks.push(`M 100644 :${index + 1} ${path}\n`);
-    }
-    chunks.push("\ndone\n");
-    requireGit(
-      await this.run(["fast-import", "--quiet", "--done"], {
-        input: Buffer.concat(
-          chunks.map((chunk) =>
-            typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk),
-          ),
-        ),
-      }),
-      "commit-snapshot",
-    );
-    let commit = requireGit(await this.run(["rev-parse", "refs/relay/prepared"]), "prepared-head");
-    if (parent) {
-      const trees = requireGit(
-        await this.run(["rev-parse", `${parent}^{tree}`, `${commit}^{tree}`]),
-        "compare-trees",
-      ).split("\n");
-      if (trees[0] === trees[1]) {
-        commit = parent;
-      }
-    }
     requireGit(await this.run(["update-ref", LOCAL_REF, commit]), "local-head");
     this.localHead = commit;
     this.directCounts =

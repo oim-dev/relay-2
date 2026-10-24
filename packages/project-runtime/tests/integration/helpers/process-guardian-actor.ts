@@ -44,10 +44,18 @@ async function runActor(): Promise<void> {
   }
   const root = rootArgument;
   if (role === "lease" || role === "lease-flood") {
+    let flushed = Promise.resolve();
+    let stopping = false;
     /**
-     * Фиксирует первичную причину остановки до реального завершения fixture.
+     * Сохраняет первую причину остановки; graceful exit ждёт уже начатую запись stdout.
      */
-    function finish(reason: string): void {
+    async function finish(reason: string): Promise<void> {
+      if (stopping) {
+        return;
+      }
+      stopping = true;
+      publish(join(root, "lease-stop-requested"), reason);
+      await flushed;
       publish(join(root, "stopped.json"), { reason, pid: process.pid });
       process.exit(0);
     }
@@ -58,7 +66,17 @@ async function runActor(): Promise<void> {
     publish(join(root, "lease.ready"), process.pid);
     process.stdout.write("lease-ready\n");
     if (role === "lease-flood") {
-      process.stdout.write(Buffer.alloc(2 * 1024 * 1024, 65));
+      publish(join(root, "flood-started"), true);
+      flushed = new Promise<void>((resolve, reject) => {
+        process.stdout.write(Buffer.alloc(2 * 1024 * 1024, 65), (error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          publish(join(root, "flood-flushed"), true);
+          resolve();
+        });
+      });
     }
     setTimeout(() => process.exit(99), 30_000);
     return;

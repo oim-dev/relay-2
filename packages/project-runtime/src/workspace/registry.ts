@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import {
@@ -52,6 +52,7 @@ function readSelectedWorkspace(options: RuntimeOptions): WorkspaceSnapshot {
 /**
  * Читает обязательный relay.config.json в регистрируемом каталоге и проверяет его базу.
  * Без явного пути базы использует home регистрирующего вызова, разрешённый от его cwd.
+ * Существующий объект другого типа даёт INVALID_CONFIG до чтения вложенного пути.
  * Возвращает физический путь каталога. Workspace вместо проекта отклоняется без записи.
  */
 function registrationDirectory(options: RuntimeOptions, path: string): string {
@@ -59,6 +60,16 @@ function registrationDirectory(options: RuntimeOptions, path: string): string {
     throw new RelayError("INVALID_ARGUMENT", workspaceMessages.emptyProjectPath, 2);
   }
   const directory = resolve(options.cwd, path);
+  // Windows может вернуть ENOENT вместо ENOTDIR для file/relay.config.json.
+  // Проверяем сам переданный путь, чтобы тип существующего объекта не зависел от ОС.
+  if (statSync(directory, { throwIfNoEntry: false })?.isDirectory() === false) {
+    throw new RelayError(
+      "INVALID_CONFIG",
+      workspaceMessages.projectDirectoryRequired(directory),
+      2,
+      { path: directory },
+    );
+  }
   const configPath = join(directory, projectConfigName);
   const config = readConfig(configPath);
   if ("projects" in config) {

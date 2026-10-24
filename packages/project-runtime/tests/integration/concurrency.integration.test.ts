@@ -85,6 +85,8 @@ describe("Инициализация в отдельных процессах", 
       ]);
 
       // Обе базы уже созданы: проигрыш обязан произойти при публикации, а не ранней проверке пути.
+      expect(readdirSync(join(home, "projects"))).toHaveLength(2);
+      expect(existsSync(join(cwd, "relay.config.json"))).toBe(false);
       for (const worker of workers) {
         worker.child.stdin.write("g");
         await worker.child.stdin.end();
