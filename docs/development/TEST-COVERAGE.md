@@ -278,13 +278,17 @@ Unicode. [Health supervisor](../../packages/project-runtime/tests/integration/gi
 
 [Службы: unit](../../packages/project-runtime/src/git-sync/service.unit.test.ts)
 проверяют unit/plist/XML, точные argv, текущего Windows-пользователя, явные операции
-native manager и отдельную health-границу через fixtures. Это не установка службы
+native manager и отдельную health-границу через fixtures. Windows-проверки защищают
+quiesce/readback Disabled до End, единый монотонный stop budget и честное состояние
+после частичного отказа без unsafe rollback. Это не установка службы
 на пользовательском хосте. [Windows XML](../../packages/project-runtime/tests/integration/git-sync-service-format.integration.test.ts)
 дополняет генерацию нативным разбором формата на Windows.
 
 [Native lifecycle](../../packages/project-runtime/tests/native/service.native.test.ts)
 защищает enable/re-enable, новый instance после самостоятельного restart native manager,
-disable и сохранность проекта до cleanup fixture. Это отдельный opt-in набор;
+disable и сохранность проекта до cleanup fixture. Windows-сценарий дополнительно проверяет
+восстановление после подтверждённого exit 0 и фактическую repetition-конфигурацию одной task.
+Это отдельный opt-in набор;
 условия запуска и границы проверки login/reboot — в
 [организации нативной приёмки](../../tests/README.md#отдельная-нативная-приёмка-служб).
 

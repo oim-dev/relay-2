@@ -42,7 +42,7 @@ function Sid([string] $name) {
 
 /**
  * Читает COM-регистрацию и argv живого процесса независимо от service status Runtime.
- * Проверяет текущего principal, login action и отсутствие повышения прав/хранимого пароля.
+ * Проверяет principal, обе native repetition и отсутствие повышения прав/хранимого пароля.
  */
 export async function assertWindowsRegistration(
   commands: NativeCommands,
@@ -59,7 +59,14 @@ $definition=$task.Definition
 $principal=$definition.Principal
 $settings=$definition.Settings
 $action=$definition.Actions.Item(1)
-$trigger=$definition.Triggers.Item(1)
+$triggers=@($definition.Triggers | ForEach-Object {
+  $sid=$null
+  if ($_.Type -eq 9) { $sid=Sid $_.UserId }
+  @{ type=$_.Type; enabled=$_.Enabled; userSid=$sid;
+     interval=[string]$_.Repetition.Interval; duration=[string]$_.Repetition.Duration;
+     stopAtDurationEnd=$_.Repetition.StopAtDurationEnd; timeLimit=[string]$_.ExecutionTimeLimit;
+     startBoundary=[string]$_.StartBoundary; endBoundary=[string]$_.EndBoundary }
+} | Sort-Object { $_.type })
 $process=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'
 if ($null -eq $process) { throw 'Supervisor отсутствует' }
 $owner=Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
@@ -76,10 +83,9 @@ $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   actionCount=$definition.Actions.Count; binary=$action.Path
   arguments=[NativeServiceArgv]::Parse('unused.exe '+$action.Arguments)
   processArgv=[NativeServiceArgv]::Parse($process.CommandLine)
-  triggerCount=$definition.Triggers.Count; triggerType=$trigger.Type
-  triggerEnabled=$trigger.Enabled; triggerSid=(Sid $trigger.UserId)
+  triggerCount=$definition.Triggers.Count; triggers=$triggers
   instances=$settings.MultipleInstances; timeLimit=$settings.ExecutionTimeLimit
-  restartInterval=$settings.RestartInterval; restartCount=$settings.RestartCount
+  restartInterval=[string]$settings.RestartInterval; restartCount=$settings.RestartCount
 } | ConvertTo-Json -Compress -Depth 5
 `);
   expect(actual).toMatchObject({
@@ -92,13 +98,11 @@ $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     binary,
     arguments: ["unused.exe", "supervise", "--home", config.home],
     processArgv: [binary, "supervise", "--home", config.home],
-    triggerCount: 1,
-    triggerType: 9,
-    triggerEnabled: true,
+    triggerCount: 2,
     instances: 2,
     timeLimit: "PT0S",
-    restartInterval: "PT1M",
-    restartCount: 999,
+    restartInterval: "",
+    restartCount: 0,
   });
   if (!actual || typeof actual !== "object" || !("currentSid" in actual)) {
     throw new Error("Нет SID текущего пользователя в native-наблюдении");
@@ -106,8 +110,29 @@ $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
   expect(typeof actual.currentSid).toBe("string");
   expect(actual).toMatchObject({
     principalSid: actual.currentSid,
-    triggerSid: actual.currentSid,
     processOwner: actual.currentSid,
+    triggers: [
+      {
+        type: 7,
+        enabled: true,
+        userSid: null,
+        interval: "PT1M",
+        duration: "",
+        stopAtDurationEnd: false,
+        timeLimit: "PT0S",
+        endBoundary: "",
+      },
+      {
+        type: 9,
+        enabled: true,
+        userSid: actual.currentSid,
+        interval: "PT1M",
+        duration: "",
+        stopAtDurationEnd: false,
+        timeLimit: "PT0S",
+        endBoundary: "",
+      },
+    ],
   });
 }
 
@@ -227,6 +252,7 @@ $name=${psString(config.id)}
 ${scheduler}
 if ($null -ne $task) {
   if ($task.Definition.RegistrationInfo.Description -ne ${psString(config.marker)}) { throw 'Чужая native task' }
+  $task.Enabled=$false
   $task.Stop(0)
   $folder.DeleteTask($name, 0)
 }

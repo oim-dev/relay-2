@@ -5,7 +5,11 @@ import { gitSyncMessages as messages } from "./git-sync.messages";
 import { runServiceCommand as native } from "./service-command";
 import { serviceFiles } from "./service-files";
 import { probeGitSyncSupervisorLock } from "./supervisor";
-import type { WindowsServiceSnapshot } from "./service-windows.types";
+import type {
+  WindowsServiceSnapshot,
+  WindowsStopContext,
+  WindowsStopPhase,
+} from "./service-windows.types";
 import type {
   GitSyncServiceAction,
   NativeServiceStatus,
@@ -123,9 +127,75 @@ function taskStopped(snapshot: WindowsServiceSnapshot): boolean {
 }
 
 /**
- * Останавливает старую регистрацию до замены definition и ждёт manager и реальный SQLite mutex S.
- * End выполняется один раз; затем повторяются только COM-наблюдения и технический захват/release.
- * Ready/Disabled, отсутствие instances и endpoint сами по себе не разрешают Run или успешный disable.
+ * Проверяет отмену и общий монотонный deadline до native-действия; остаток — положительное целое ms.
+ */
+function stopEnvironment(
+  context: WindowsStopContext,
+  current: WindowsServiceSnapshot,
+  phase: WindowsStopPhase,
+): GitSyncEnvironment {
+  const { environment, deadline, timeoutMs, config } = context;
+  if (environment.signal?.aborted) {
+    throw new RelayError(
+      "GIT_SYNC_CANCELLED",
+      messages.processCancelled,
+      environment.signal.reason === "SIGTERM" ? 143 : 130,
+    );
+  }
+  const remaining = deadline - performance.now();
+  if (remaining <= 0) {
+    throw new RelayError(
+      "GIT_SYNC_SERVICE_FAILED",
+      phase === "wait-supervisor-lock" ? messages.supervisorLockBusy : messages.nativeFailed,
+      4,
+      {
+        id: config.id,
+        phase,
+        timeoutMs,
+        native: current.native,
+        runningInstances: current.runningInstances,
+      },
+    );
+  }
+  return { ...environment, timeoutMs: Math.ceil(remaining) };
+}
+
+/**
+ * Гасит автоматические активации собственной task до End и mutex-барьера.
+ * Change обновляет definition, но Disabled запрещает запуск RegistrationTrigger.
+ * Успешный exit утилиты подтверждается readonly Enabled; отказ не откатывается повторной активацией.
+ */
+async function quiesceWindowsTask(
+  context: WindowsStopContext,
+  initial: WindowsServiceSnapshot,
+): Promise<WindowsServiceSnapshot> {
+  if (!initial.native.registered || initial.native.enabled === false) {
+    return initial;
+  }
+  await native(stopEnvironment(context, initial, "quiesce"), "schtasks.exe", [
+    "/Change",
+    "/TN",
+    context.config.id,
+    "/Disable",
+  ]);
+  const current = await readWindowsSnapshot(
+    context.config,
+    stopEnvironment(context, initial, "quiesce"),
+  );
+  if (current.native.registered && current.native.enabled !== false) {
+    throw new RelayError("GIT_SYNC_SERVICE_FAILED", messages.nativeFailed, 4, {
+      id: context.config.id,
+      phase: "quiesce",
+      native: current.native,
+    });
+  }
+  return current;
+}
+
+/**
+ * Гасит триггеры и останавливает старую регистрацию до замены definition, ждёт manager и SQLite mutex S.
+ * Change/End выполняются не более одного раза; затем только COM и технический захват/release.
+ * Ready/Disabled, отсутствие instances и endpoint сами по себе не разрешают Create или успешный disable.
  * Чужой живой владелец не останавливается и сохраняет busy до deadline без замены definition.
  * Монотонный бюджет не зависит от коррекции часов ОС; native timeout округляется вверх до ms.
  */
@@ -136,38 +206,23 @@ async function stopWindowsTask(
 ): Promise<WindowsServiceSnapshot> {
   const timeoutMs = environment.timeoutMs ?? SERVICE_STOP_TIMEOUT_MS;
   const deadline = performance.now() + timeoutMs;
-  if (!taskStopped(initial)) {
-    await native(environment, "schtasks.exe", ["/End", "/TN", config.id]);
+  const context: WindowsStopContext = { config, environment, deadline, timeoutMs };
+  let current = await quiesceWindowsTask(context, initial);
+  if (!taskStopped(current)) {
+    await native(stopEnvironment(context, current, "wait-stopped"), "schtasks.exe", [
+      "/End",
+      "/TN",
+      config.id,
+    ]);
   }
-  let current = initial;
   for (;;) {
-    if (environment.signal?.aborted) {
-      throw new RelayError(
-        "GIT_SYNC_CANCELLED",
-        messages.processCancelled,
-        environment.signal.reason === "SIGTERM" ? 143 : 130,
-      );
-    }
-    const remaining = deadline - performance.now();
-    if (remaining <= 0) {
-      throw new RelayError(
-        "GIT_SYNC_SERVICE_FAILED",
-        taskStopped(current) ? messages.supervisorLockBusy : messages.nativeFailed,
-        4,
-        {
-          id: config.id,
-          phase: taskStopped(current) ? "wait-supervisor-lock" : "wait-stopped",
-          timeoutMs,
-          native: current.native,
-          runningInstances: current.runningInstances,
-        },
-      );
-    }
+    const remainingEnvironment = stopEnvironment(
+      context,
+      current,
+      taskStopped(current) ? "wait-supervisor-lock" : "wait-stopped",
+    );
     if (!taskStopped(current)) {
-      current = await readWindowsSnapshot(config, {
-        ...environment,
-        timeoutMs: Math.ceil(remaining),
-      });
+      current = await readWindowsSnapshot(config, remainingEnvironment);
     }
     if (taskStopped(current)) {
       if (environment.signal?.aborted || performance.now() >= deadline) {
@@ -208,7 +263,8 @@ async function stopWindowsTask(
 }
 
 /**
- * Регистрирует и запускает настоящую logon-задачу Windows с InteractiveToken текущего пользователя.
+ * Регистрирует одну task текущего пользователя; RegistrationTrigger запускает прямой Exec после Create.
+ * При disable триггеры уже погашены, а manager и SQLite owner подтверждены stop-барьером.
  */
 export async function windowsService(
   action: GitSyncServiceAction,
@@ -235,6 +291,5 @@ export async function windowsService(
     config.path,
     "/F",
   ]);
-  await native(environment, "schtasks.exe", ["/Run", "/TN", config.id]);
   return windowsState(config, environment);
 }

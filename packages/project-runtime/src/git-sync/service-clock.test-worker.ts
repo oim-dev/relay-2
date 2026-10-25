@@ -19,6 +19,10 @@ assert.ok(
     "lock-timeout",
     "lock-expired-after-probe",
     "lock-cancelled",
+    "quiesce-remaining",
+    "quiesce-expired",
+    "quiesce-cancelled",
+    "quiesce-readback-expired",
   ].includes(scenario ?? ""),
 );
 const configuration = createServiceConfiguration({
@@ -32,12 +36,16 @@ const configuredBudget = 100;
 const cancellation = new AbortController();
 const mutations: string[] = [];
 const pollBudgets: number[] = [];
+const quiesceBudgets: number[] = [];
+const endBudgets: number[] = [];
 let monotonic = 10.25;
 let wallClock = 1_000_000;
 let ended = false;
 let stopped = false;
 let created = false;
 let running = true;
+let enabled = true;
+let quiesced = false;
 let signalsPreserved = true;
 
 /**
@@ -96,7 +104,20 @@ const environment: GitSyncEnvironment = {
       const action = command.args[0];
       assert.ok(action);
       mutations.push(action);
-      if (action === "/End") {
+      if (action === "/Change") {
+        assert.deepEqual(command.args, ["/Change", "/TN", configuration.id, "/Disable"]);
+        enabled = false;
+        quiesced = true;
+        if (scenario === "quiesce-remaining") {
+          monotonic = 20.75;
+        } else if (scenario === "quiesce-expired") {
+          monotonic = 110.5;
+        } else if (scenario === "quiesce-cancelled") {
+          cancellation.abort("SIGTERM");
+        }
+      } else if (action === "/End") {
+        assert.ok(quiesced);
+        endBudgets.push(command.timeoutMs);
         ended = true;
         wallClock -= 60_000;
         monotonic = 35.75;
@@ -108,8 +129,8 @@ const environment: GitSyncEnvironment = {
       } else if (action === "/Create") {
         assert.ok(stopped);
         created = true;
-      } else if (action === "/Run") {
-        assert.ok(created);
+        enabled = true;
+        // Новый owner запускается RegistrationTrigger, а не fixture-вызовом Run.
         running = true;
       } else {
         throw new Error(`Непредусмотренная мутация ${action}`);
@@ -117,6 +138,12 @@ const environment: GitSyncEnvironment = {
       return { exitCode: 0, stdout: "", stderr: "" };
     }
     assert.equal(command.executable, "powershell.exe");
+    if (quiesced && !ended && !created) {
+      quiesceBudgets.push(command.timeoutMs);
+      if (scenario === "quiesce-readback-expired") {
+        monotonic = 110.5;
+      }
+    }
     if (ended && !created) {
       assert.notEqual(scenario, "expired-before-probe", "Native poll после исчерпания stop budget");
       assert.equal(pollBudgets.length, 0, "Повторный native poll после исчерпания stop budget");
@@ -139,7 +166,7 @@ const environment: GitSyncEnvironment = {
       stdout: JSON.stringify({
         exists: true,
         description: configuration.marker,
-        enabled: true,
+        enabled,
         state: running ? 4 : 3,
         runningInstances: running ? 1 : 0,
       }),
@@ -179,6 +206,8 @@ process.stdout.write(
     configuredBudget,
     wallClock,
     pollBudgets,
+    quiesceBudgets,
+    endBudgets,
     mutations,
     signalsPreserved,
     registered: status?.registered ?? null,

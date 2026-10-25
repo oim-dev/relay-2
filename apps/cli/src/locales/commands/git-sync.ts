@@ -187,7 +187,7 @@ export const gitSyncCommandMessages = {
   serviceEnable: {
     description: "Установить и запустить пользовательскую службу",
     details:
-      "Linux: запуск при login; работа до login и после logout требует отдельно настроенного linger. macOS: LaunchAgent графической сессии после login. Windows: logon task текущего пользователя с перезапуском после отказа. Relay не включает linger и не вызывает sudo/admin. Бинарник должен оставаться по сохранённому абсолютному пути.",
+      "Linux: запуск при login; работа до login и после logout требует отдельно настроенного linger. macOS: LaunchAgent графической сессии после login. Windows: одна task текущего пользователя поддерживает supervisor до service disable, включая выход с кодом 0; каждый из триггеров регистрации и login повторяется с интервалом в одну минуту. Это не глобальный лимит одного старта в минуту и не конечный счётчик рестартов. Relay не включает linger и не вызывает sudo/admin. Бинарник должен оставаться по сохранённому абсолютному пути.",
     examples: [{ description: "Включить автозапуск", command: "relay git-sync service enable" }],
   },
   serviceDisable: {

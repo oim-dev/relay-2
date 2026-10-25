@@ -250,7 +250,7 @@ export async function controlGitSyncService(
   } else {
     state = await windowsService(action, config, environment);
   }
-  // Task Scheduler может ещё показывать Ready сразу после /Run; готовность ждёт health ниже.
+  // Task Scheduler может ещё показывать Ready после регистрации; готовность подтверждает health ниже.
   if (action === "enable" && (!state.registered || state.enabled === false)) {
     throw new RelayError("GIT_SYNC_NOT_READY", messages.supervisorNotReady, 4, {
       home: config.home,

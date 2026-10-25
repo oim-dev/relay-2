@@ -130,6 +130,7 @@ describe("Windows service: передача настоящего lifetime mutex"
       const blocked = Promise.withResolvers<void>();
       const cancellation = new AbortController();
       let stopped = false;
+      let enabled = true;
       let next: SupervisorLockOwner | undefined;
       let completed = false;
       let outcome: Promise<GitSyncServiceStatus> | undefined;
@@ -142,7 +143,7 @@ describe("Windows service: передача настоящего lifetime mutex"
           signal: cancellation.signal,
           /**
            * Native End уже подтвердил остановку, но отдельный процесс всё ещё держит kernel lock.
-           * Новый Run запускает следующего настоящего owner только после production-барьера.
+           * RegistrationTrigger после Create запускает следующего owner только за production-барьером.
            */
           async runner(command): Promise<ProcessResult> {
             if (command.args[0] === "--version") {
@@ -151,13 +152,21 @@ describe("Windows service: передача настоящего lifetime mutex"
             if (command.executable === "schtasks.exe") {
               const operation = command.args[0] ?? "";
               mutations.push(operation);
-              if (operation === "/End") {
+              if (operation === "/Change") {
+                expect(command.args).toEqual(["/Change", "/TN", configuration.id, "/Disable"]);
+                enabled = false;
+              } else if (operation === "/End") {
+                expect(enabled).toBe(false);
                 stopped = true;
                 // ownControl также снимает endpoint раньше освобождения SQLite.
                 unlinkSync(join(fixture.home, "git-sync/supervisor.json"));
-              } else if (operation === "/Run") {
+              } else if (operation === "/Create") {
+                expect(probeGitSyncSupervisorLock(fixture.home)).toBe("free");
                 next = await startOwner(fixture, "next-instance");
+                enabled = true;
                 stopped = false;
+              } else if (operation === "/Run") {
+                throw new Error("Регистрация не должна дополняться ручным Run");
               }
               return { exitCode: 0, stdout: "", stderr: "" };
             }
@@ -167,7 +176,7 @@ describe("Windows service: передача настоящего lifetime mutex"
               stderr: "",
               stdout: JSON.stringify({
                 exists: true,
-                enabled: true,
+                enabled,
                 description: configuration.marker,
                 state: stopped ? 3 : 4,
                 runningInstances: stopped ? 0 : 1,
@@ -198,7 +207,7 @@ describe("Windows service: передача настоящего lifetime mutex"
 
         expect(completed).toBe(false);
         expect(stopped).toBe(true);
-        expect(mutations).toEqual(["/End"]);
+        expect(mutations).toEqual(["/Change", "/End"]);
         expect(probeGitSyncSupervisorLock(fixture.home)).toBe("busy");
         expect(() => acquireLocalLock(lockPath)).toThrow(
           expect.objectContaining({ code: "LOCAL_LOCK_BUSY" }),
@@ -215,12 +224,12 @@ describe("Windows service: передача настоящего lifetime mutex"
 
         expect(statSync(lockPath, { bigint: true }).ino).toBe(inode);
         if (action === "enable") {
-          expect(mutations).toEqual(["/End", "/Create", "/Run"]);
+          expect(mutations).toEqual(["/Change", "/End", "/Create"]);
           expect(result.supervisor).toMatchObject({ responsive: true, instance: "next-instance" });
           expect(result.supervisor.pid).not.toBe(previous.child.pid);
           expect(probeGitSyncSupervisorLock(fixture.home)).toBe("busy");
         } else {
-          expect(mutations).toEqual(["/End", "/Delete"]);
+          expect(mutations).toEqual(["/Change", "/End", "/Delete"]);
           expect(result).toMatchObject({ registered: false, supervisor: { responsive: false } });
           expect(files.size).toBe(0);
           expect(probeGitSyncSupervisorLock(fixture.home)).toBe("free");

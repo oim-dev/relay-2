@@ -98,6 +98,12 @@ Scheduler. Установка явно сохраняет exact executable/home 
 в [паспорте CLI](../../apps/cli/README.md#кто-запускает-supervisor).
 На Windows повторный запуск и отключение службы ожидают также освобождения SQLite mutex
 supervisor в пределах бюджета остановки: одного состояния Task Scheduler недостаточно.
+Тому же бюджету принадлежит предварительное погашение и подтверждение Disabled у task,
+чтобы её native repetition не создавала новый owner во время остановки.
+Одна Windows task поддерживает S после любого выхода до `service disable`: RegistrationTrigger
+и LogonTrigger имеют каждый минутный repetition без срока окончания. После Create/Update
+S запускает RegistrationTrigger, без ручного Run. Это ограничение интервалов триггеров,
+а не глобальный лимит одного старта в минуту или конечное число crash-restarts.
 Foreground запускается с приватным `--parent-lease`: Runtime удерживает stdin pipe
 до конца прокси, а аварийная смерть CLI даёт kernel EOF и shutdown ребёнка. Обычный
 `--request` закрывает stdin сразу после передачи JSON. Native service запускает

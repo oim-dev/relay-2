@@ -1052,15 +1052,33 @@ LaunchAgent MUST описываться как механизм пользова
 
 ### Windows: Task Scheduler текущего пользователя
 
-**SVC-WINDOWS.** Адаптер MUST регистрировать задачу Task Scheduler с logon trigger
+**SVC-WINDOWS.** Адаптер MUST регистрировать одну задачу Task Scheduler с logon trigger
 и principal текущего пользователя, минимальными правами и без скрытого сохранения
 пароля. XML MUST задавать отдельные `Command` и `Arguments`, отсутствие случайного
-стандартного лимита длительности, политику единственного экземпляра и ограниченные
-перезапуски после отказа. Регистрация/удаление и запрос состояния выполняются через
-штатный API/утилиту с контролем ошибок.
+стандартного лимита длительности и политику единственного экземпляра. Единственный
+Exec напрямую запускает `relay-git-sync supervise --home`. Регистрация/удаление и запрос
+состояния выполняются через штатный API/утилиту с контролем ошибок.
 Для обычного logon-режима используются `InteractiveToken`, `LeastPrivilege`,
-`ExecutionTimeLimit=PT0S` и `MultipleInstancesPolicy=IgnoreNew`. Исчерпание лимита
-перезапусков показывается как фактическая остановка/ошибка, а не работающий supervisor.
+`ExecutionTimeLimit=PT0S` и `MultipleInstancesPolicy=IgnoreNew`.
+
+Включённая служба MUST поддерживать supervisor после **любого** выхода, включая exit 0,
+до явного `service disable`. Для этого одна task содержит `RegistrationTrigger` и
+`LogonTrigger` своего пользователя. У **каждого** trigger задаётся `Repetition.Interval=PT1M`,
+без `Duration` и `EndBoundary`, с `StopAtDurationEnd=false` и `ExecutionTimeLimit=PT0S`.
+Это ограничение интервала каждого trigger, **не** строгий глобальный лимит одного старта
+в минуту и не конечный счётчик crash-restarts. `IgnoreNew` исключает дополнительный live task;
+реальный lifetime mutex supervisor сохраняет исключительное владение home.
+`RestartOnFailure` MUST NOT подменять эту политику: его наличие не доказывает
+восстановление уже запущенного action после ненулевого exit.
+
+Явный enable/update активирует `RegistrationTrigger`; отдельный ручной `/Run` не нужен.
+Перед остановкой или заменой собственной native task Runtime MUST проверить ownership,
+установить и подтвердить Disabled, затем выполнить End при необходимости и дождаться
+COM-покоя **и** освобождения настоящего SQLite mutex S. Quiesce, End, COM и mutex делят
+один bounded monotonic stop budget и AbortSignal. Только затем разрешены Create/Update
+для enable или Delete для disable; lock-файл не удаляется. Отказ любой стадии сохраняет
+честное фактическое состояние без автоматического rollback/reactivation. Status остаётся
+readonly; registered/enabled не означает responsive supervisor.
 
 Logon task MUST NOT изображаться службой, работающей до входа пользователя.
 Вариант запуска без login требует отдельной явной настройки учётных данных/политики

@@ -36,6 +36,7 @@ import {
 import { NativeManager } from "./native-manager";
 import { captureNativeFailure } from "./native-failure-snapshot";
 import { crashWindowsSupervisor } from "./native-windows";
+import { withWindowsGracefulExit } from "./native-windows-exit";
 import type {
   NativeConfiguration,
   NativePlatform,
@@ -129,6 +130,7 @@ export class NativeServiceFixture {
       version: this.version,
       userHome: session.userHome,
       readinessTimeoutMs: 30_000,
+      timeoutMs: 30_000,
       ...identity,
     });
   }
@@ -213,6 +215,26 @@ export class NativeServiceFixture {
     });
     await this.manager.assertRegistered(status.pid);
     return { ...status, pid: status.pid, instance: status.instance };
+  }
+
+  /**
+   * Штатно завершает именно наблюдаемый Windows S через публичный request API, оставляя task enabled.
+   * Нативный process handle подтверждает exit 0; последующее восстановление принадлежит Scheduler.
+   */
+  async stopSupervisorGracefully(supervisor: RunningSupervisor): Promise<void> {
+    if (this.platform !== "win32") {
+      throw new Error("Проверка восстановления exit 0 относится к Windows activation policy");
+    }
+    this.beginStage("graceful-exit");
+    await withWindowsGracefulExit(this.commands, this.binary, supervisor.pid, async () => {
+      const result = await this.client.request({
+        version: 1,
+        action: "supervisor.stop",
+        options: this.options,
+      });
+      this.save("graceful-stop-response", result);
+      expect(result).toMatchObject({ stopped: true, instance: supervisor.instance });
+    });
   }
 
   /**

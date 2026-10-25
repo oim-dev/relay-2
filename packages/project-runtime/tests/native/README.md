@@ -62,12 +62,19 @@ native runner или health. Он проверяет:
    с пробелами и Unicode (также кавычками на POSIX).
 3. Повторный `enable` с новым ready-instance и завершением прежнего PID.
 4. Аварийный exit supervisor и **самостоятельный** restart manager с новым instance.
-   На Windows ожидается production-интервал `RestartOnFailure=PT1M`.
+   На Windows каждый native registration/logon trigger имеет repetition `PT1M`.
 5. `disable`, отсутствие регистрации, config, живых supervisor и отзывчивого health
    **до cleanup fixture**, побайтовую сохранность БД/привязки и чтение проекта.
 6. Повторный `disable` и finally-уборку даже после незавершённого setup.
 
-На Windows отдельно читаются зарегистрированная COM-конфигурация, SID владельца
+На Windows отдельно проверяется штатный выход supervisor с фактическим kernel exit 0
+и новый ready-instance от native repetition, пока task остаётся enabled. Остановку
+запрашивает публичный Runtime API; fixture не вызывает Run/enable для восстановления.
+Этот сценарий проверяет Windows-политику поддержания службы до `service disable`,
+а не ограниченный счётчик рестартов или глобальный предел одного старта в минуту.
+
+На Windows читаются зарегистрированные RegistrationTrigger и LogonTrigger, их enabled,
+минутные repetition, отсутствие срока окончания, PT0S, один прямой Exec, SID владельца
 процесса и настоящие argv через `CommandLineToArgvW`. На Linux PID сверяется
 с `MainPID`, argv — с `/proc`; на macOS — с загруженным label и native-разбором plist.
 Уборка имеет право затронуть только заранее свободный уникальный ID этого fixture.

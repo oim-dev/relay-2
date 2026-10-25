@@ -41,7 +41,7 @@ describe("Настоящий пользовательский manager Git Sync",
       const recovered = await waitForGitSyncSupervisor(fixture.options.home, {
         version: fixture.version,
         previousInstance: restarted.instance,
-        // Windows RestartOnFailure имеет настоящий интервал PT1M, заданный production XML.
+        // В Windows каждый native repetition trigger имеет интервал PT1M.
         timeoutMs: 120_000,
       });
       fixture.save("crash-recovered", recovered);
@@ -70,4 +70,33 @@ describe("Настоящий пользовательский manager Git Sync",
       await fixture.assertDisabled();
     });
   }, 300_000);
+
+  // Поддержание enabled после exit 0 — отдельная Windows-политика; у systemd/launchd здесь on-failure.
+  if (process.platform === "win32") {
+    test("Windows: graceful exit 0 восстанавливается native repetition до service disable", async () => {
+      await withNativeServiceFixture(async (fixture) => {
+        const enabled = await fixture.service("enable", "enabled");
+        const first = await fixture.verifyRunning(enabled.supervisor);
+
+        await fixture.stopSupervisorGracefully(first);
+        fixture.beginStage("graceful-recovery");
+        const recovered = await waitForGitSyncSupervisor(fixture.options.home, {
+          version: fixture.version,
+          previousInstance: first.instance,
+          timeoutMs: 120_000,
+        });
+
+        fixture.save("graceful-recovered", recovered);
+        const current = await fixture.verifyRunning(recovered);
+        expect(current.instance).not.toBe(first.instance);
+        await fixture.assertExited([first.pid]);
+        const status = await fixture.service("status", "after-graceful-recovery");
+        expect(status).toMatchObject({ registered: true, enabled: true });
+        expect(status.supervisor.instance).toBe(current.instance);
+        await fixture.service("disable", "disabled");
+        await fixture.assertDisabled();
+        fixture.assertProjectPreserved();
+      });
+    }, 300_000);
+  }
 });

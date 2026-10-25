@@ -79,12 +79,15 @@ export function createServiceConfiguration(input: ServiceConfigurationInput): Se
   }
   const id = `Relay Git Sync ${hash}`;
   const user = escapeServiceXml(input.userName);
+  // Repetition — native-поддержание enabled task после любого выхода, не retry по exit code action.
+  const triggerPolicy =
+    "<Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>";
   return {
     platform: input.platform,
     id,
     marker,
     home: input.home,
     path: win32.join(input.userHome, "AppData/Local/Relay/services", `${hash}.xml`),
-    content: `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n<RegistrationInfo><Description>${marker}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${user}</UserId></LogonTrigger></Triggers>\n<Principals><Principal id="RelayUser"><UserId>${user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure></Settings>\n<Actions Context="RelayUser"><Exec><Command>${escapeServiceXml(input.binary)}</Command><Arguments>${escapeServiceXml(args.slice(1).map(quoteWindowsArgument).join(" "))}</Arguments></Exec></Actions>\n</Task>\n`,
+    content: `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n<RegistrationInfo><Description>${marker}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled>${triggerPolicy}<UserId>${user}</UserId></LogonTrigger><RegistrationTrigger><Enabled>true</Enabled>${triggerPolicy}</RegistrationTrigger></Triggers>\n<Principals><Principal id="RelayUser"><UserId>${user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>\n<Actions Context="RelayUser"><Exec><Command>${escapeServiceXml(input.binary)}</Command><Arguments>${escapeServiceXml(args.slice(1).map(quoteWindowsArgument).join(" "))}</Arguments></Exec></Actions>\n</Task>\n`,
   };
 }

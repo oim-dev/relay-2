@@ -25,6 +25,7 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
       ? "C:\\Program Files\\Relay\\relay-git-sync.exe"
       : "/opt/Relay версия/relay-git-sync";
   let task = false;
+  let taskEnabled = false;
   let running = false;
   let systemRegistered = false;
   let launchLoaded = false;
@@ -91,7 +92,7 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
               ? {
                   exists: true,
                   state: running ? 4 : 3,
-                  enabled: true,
+                  enabled: taskEnabled,
                   description: configuration.marker,
                   runningInstances: running ? 1 : 0,
                 }
@@ -101,15 +102,25 @@ function serviceFixture(platform: ServicePlatform): ServiceTestFixture {
       }
       if (command.args.includes("/Create")) {
         task = true;
+        taskEnabled = true;
+        // RegistrationTrigger запускает action после Create/Update без отдельного Run.
+        running = true;
       }
       if (command.args.includes("/Run")) {
-        running = true;
+        throw new Error("Windows service не должен обходить RegistrationTrigger ручным Run");
+      }
+      if (command.args.includes("/Change")) {
+        expect(task).toBe(true);
+        expect(command.args).toEqual(["/Change", "/TN", configuration.id, "/Disable"]);
+        // Обновление definition при Disabled не запускает RegistrationTrigger и не останавливает S.
+        taskEnabled = false;
       }
       if (command.args.includes("/End")) {
         running = false;
       }
       if (command.args.includes("/Delete")) {
         task = false;
+        taskEnabled = false;
       }
       if (command.executable === "systemctl") {
         if (command.args.includes("daemon-reload")) {
@@ -208,7 +219,7 @@ describe("Конфигурации пользовательского supervisor
     expect(config.content).toContain("<key>SuccessfulExit</key><false/>");
   });
 
-  test("Windows task использует InteractiveToken, текущего пользователя и бессрочный запуск", () => {
+  test("Windows task поддерживает enabled S двумя минутными triggers и одним прямым Exec", () => {
     const { configuration } = serviceFixture("win32");
 
     expect(configuration.content).toContain("<UserId>TEAM\\Мария</UserId>");
@@ -216,8 +227,23 @@ describe("Конфигурации пользовательского supervisor
     expect(configuration.content).toContain("<RunLevel>LeastPrivilege</RunLevel>");
     expect(configuration.content).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
     expect(configuration.content).toContain(
-      "<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count>",
+      "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
     );
+    expect(
+      configuration.content.match(/<ExecutionTimeLimit>PT0S<\/ExecutionTimeLimit>/gu),
+    ).toHaveLength(3);
+    const repetition =
+      "<Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>";
+    expect(configuration.content).toContain(
+      `<LogonTrigger><Enabled>true</Enabled>${repetition}<UserId>TEAM\\Мария</UserId></LogonTrigger>`,
+    );
+    expect(configuration.content).toContain(
+      `<RegistrationTrigger><Enabled>true</Enabled>${repetition}</RegistrationTrigger>`,
+    );
+    expect(configuration.content.match(/<Exec>/gu)).toHaveLength(1);
+    expect(configuration.content).not.toContain("<Duration");
+    expect(configuration.content).not.toContain("<EndBoundary");
+    expect(configuration.content).not.toContain("<RestartOnFailure");
     expect(configuration.content).toContain(
       "<Command>C:\\Program Files\\Relay\\relay-git-sync.exe</Command>",
     );
@@ -315,7 +341,8 @@ describe("Конфигурации пользовательского supervisor
           enabled.configPath,
           "/F",
         ]);
-        expect(nativeArgs).toContainEqual(["/Run", "/TN", enabled.id]);
+        expect(nativeArgs).toContainEqual(["/Change", "/TN", enabled.id, "/Disable"]);
+        expect(nativeArgs.some((args) => args.includes("/Run"))).toBe(false);
         expect(nativeArgs).toContainEqual(["/End", "/TN", enabled.id]);
         expect(nativeArgs).toContainEqual(["/Delete", "/TN", enabled.id, "/F"]);
       }
@@ -400,8 +427,11 @@ describe("Конфигурации пользовательского supervisor
 
   test.each([
     { name: "после освобождения старого instance запускается новый", outcome: "ready" },
-    { name: "после остановки прежний health не подтверждает новый Run", outcome: "old-health" },
-    { name: "deadline остановки запрещает замену definition и Run", outcome: "stop-timeout" },
+    {
+      name: "после остановки прежний health не подтверждает новый registration start",
+      outcome: "old-health",
+    },
+    { name: "deadline остановки запрещает замену definition", outcome: "stop-timeout" },
   ])("Windows restart: $name", async ({ outcome }) => {
     const fixture = serviceFixture("win32");
     const options = { cwd: "/fixture", home: fixture.home };
@@ -462,7 +492,7 @@ describe("Конфигурации пользовательского supervisor
             stderr: "",
             stdout: JSON.stringify({
               exists: true,
-              enabled: true,
+              enabled: false,
               description: fixture.configuration.marker,
               ...observed,
             }),
@@ -501,11 +531,357 @@ describe("Конфигурации пользовательского supervisor
     const mutations = fixture.commands
       .filter((command) => command.executable === "schtasks.exe")
       .map((command) => command.args[0]);
-    expect(mutations).toEqual(outcome === "stop-timeout" ? ["/End"] : ["/End", "/Create", "/Run"]);
+    expect(mutations).toEqual(
+      outcome === "stop-timeout" ? ["/Change", "/End"] : ["/Change", "/End", "/Create"],
+    );
     expect(fixture.files.has(fixture.configuration.path)).toBe(true);
     if (outcome !== "stop-timeout") {
       expect(stopReads).toBe(3);
     }
+  });
+
+  test.each(["enable", "disable"] as const)(
+    "Windows Ready/0: %s гасит Enabled и подтверждает Disabled до mutex и регистрации",
+    async (action) => {
+      const fixture = serviceFixture("win32");
+      fixture.files.set(fixture.configuration.path, fixture.configuration.content);
+      const events: string[] = [];
+      let enabled = true;
+      let registered = true;
+      let state = 3;
+      const change = ["/Change", "/TN", fixture.configuration.id, "/Disable"];
+      const commit =
+        action === "enable"
+          ? ["/Create", "/TN", fixture.configuration.id, "/XML", fixture.configuration.path, "/F"]
+          : ["/Delete", "/TN", fixture.configuration.id, "/F"];
+      const environment: GitSyncEnvironment = {
+        ...fixture.environment,
+        /**
+         * Между periodic ticks task остаётся Enabled, хотя state=Ready и instances=0.
+         * Create моделирует следующий registration start; никакого End для подготовки не требуется.
+         */
+        runner: async (command): Promise<ProcessResult> => {
+          fixture.commands.push(command);
+          if (command.executable === "powershell.exe") {
+            if (registered && !enabled && !events.includes("disabled-readback")) {
+              expect(events).toEqual(["quiesce"]);
+              events.push("disabled-readback");
+            }
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify(
+                registered
+                  ? {
+                      exists: true,
+                      enabled,
+                      state,
+                      runningInstances: state === 4 ? 1 : 0,
+                      description: fixture.configuration.marker,
+                    }
+                  : { exists: false },
+              ),
+            };
+          }
+          expect(command.executable).toBe("schtasks.exe");
+          if (command.args[0] === "/Change") {
+            expect(command.args).toEqual(change);
+            expect(enabled).toBe(true);
+            enabled = false;
+            state = 1;
+            events.push("quiesce");
+          } else {
+            expect(command.args).toEqual(commit);
+            expect(events).toEqual(["quiesce", "disabled-readback", "mutex"]);
+            events.push(action);
+            registered = action === "enable";
+            enabled = registered;
+            state = registered ? 4 : 1;
+          }
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+        /**
+         * Даже свободный mutex разрешено проверять только после подтверждённого Disabled.
+         */
+        supervisorLockProbe: (home): "free" => {
+          expect(home).toBe(fixture.home);
+          expect(enabled).toBe(false);
+          expect(events).toEqual(["quiesce", "disabled-readback"]);
+          events.push("mutex");
+          return "free";
+        },
+      };
+
+      const result = await controlGitSyncService(
+        action,
+        { cwd: "/fixture", home: fixture.home },
+        environment,
+        fixture.binary,
+      );
+
+      expect(events).toEqual(["quiesce", "disabled-readback", "mutex", action]);
+      expect(
+        fixture.commands
+          .filter((command) => command.executable === "schtasks.exe")
+          .map((command) => command.args),
+      ).toEqual([change, commit]);
+      expect(result.registered).toBe(action === "enable");
+      expect(fixture.files.has(fixture.configuration.path)).toBe(action === "enable");
+    },
+  );
+
+  test.each(["enable", "disable"] as const)(
+    "Windows %s: отказ quiesce не допускает End или смену регистрации",
+    async (action) => {
+      const fixture = serviceFixture("win32");
+      const options = { cwd: "/fixture", home: fixture.home };
+      await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+      fixture.commands.length = 0;
+      const runner = fixture.environment.runner;
+      if (!runner) {
+        throw new Error("Не настроен native fixture");
+      }
+      const environment: GitSyncEnvironment = {
+        ...fixture.environment,
+        /**
+         * Setter отказывает до изменения task; остальные чтения отражают исходное enabled/running.
+         */
+        runner: async (command): Promise<ProcessResult> => {
+          if (command.args.includes("/Change")) {
+            fixture.commands.push(command);
+            return { exitCode: 5, stdout: "", stderr: "disable denied" };
+          }
+          return runner(command);
+        },
+      };
+
+      await expect(
+        controlGitSyncService(action, options, environment, fixture.binary),
+      ).rejects.toMatchObject({
+        code: "GIT_SYNC_SERVICE_FAILED",
+        exitCode: 5,
+        details: { nativeExitCode: 5, stderr: "disable denied" },
+      });
+
+      const status = await controlGitSyncService("status", options, fixture.environment);
+      expect(status).toMatchObject({
+        installed: true,
+        desiredRegistration: "enabled",
+        registered: true,
+        enabled: true,
+        state: "running",
+      });
+      expect(
+        fixture.commands
+          .filter((command) => command.executable === "schtasks.exe")
+          .map((command) => command.args[0]),
+      ).toEqual(["/Change"]);
+      expect(fixture.files.has(fixture.configuration.path)).toBe(true);
+    },
+  );
+
+  test.each(["enable", "disable"] as const)(
+    "Windows %s: успешный setter без Disabled readback не считается quiesce",
+    async (action) => {
+      const fixture = serviceFixture("win32");
+      const options = { cwd: "/fixture", home: fixture.home };
+      await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+      fixture.commands.length = 0;
+      const runner = fixture.environment.runner;
+      if (!runner) {
+        throw new Error("Не настроен native fixture");
+      }
+      const environment: GitSyncEnvironment = {
+        ...fixture.environment,
+        /**
+         * Менеджер подтверждает команду, но task остаётся enabled; повтор setter запрещён.
+         */
+        runner: async (command): Promise<ProcessResult> => {
+          if (command.args.includes("/Change")) {
+            fixture.commands.push(command);
+            return { exitCode: 0, stdout: "", stderr: "" };
+          }
+          return runner(command);
+        },
+      };
+
+      await expect(
+        controlGitSyncService(action, options, environment, fixture.binary),
+      ).rejects.toMatchObject({
+        code: "GIT_SYNC_SERVICE_FAILED",
+        exitCode: 4,
+        details: { phase: "quiesce", native: { enabled: true } },
+      });
+
+      expect(
+        fixture.commands
+          .filter((command) => command.executable === "schtasks.exe")
+          .map((command) => command.args[0]),
+      ).toEqual(["/Change"]);
+      expect(fixture.files.has(fixture.configuration.path)).toBe(true);
+    },
+  );
+
+  test.each(["enable", "disable"] as const)(
+    "Windows %s: отказ End сохраняет честный Disabled и не делает rollback",
+    async (action) => {
+      const fixture = serviceFixture("win32");
+      const options = { cwd: "/fixture", home: fixture.home };
+      await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+      fixture.commands.length = 0;
+      const runner = fixture.environment.runner;
+      if (!runner) {
+        throw new Error("Не настроен native fixture");
+      }
+      const environment: GitSyncEnvironment = {
+        ...fixture.environment,
+        /**
+         * Триггеры уже погашены, но остановка процесса отказала; включать их обратно нельзя.
+         */
+        runner: async (command): Promise<ProcessResult> => {
+          if (command.args.includes("/End")) {
+            fixture.commands.push(command);
+            return { exitCode: 7, stdout: "", stderr: "end denied" };
+          }
+          return runner(command);
+        },
+      };
+
+      await expect(
+        controlGitSyncService(action, options, environment, fixture.binary),
+      ).rejects.toMatchObject({ code: "GIT_SYNC_SERVICE_FAILED", exitCode: 7 });
+
+      const status = await controlGitSyncService("status", options, fixture.environment);
+      expect(status).toMatchObject({
+        installed: true,
+        desiredRegistration: "enabled",
+        registered: true,
+        enabled: false,
+        state: "running",
+      });
+      expect(
+        fixture.commands
+          .filter((command) => command.executable === "schtasks.exe")
+          .map((command) => command.args[0]),
+      ).toEqual(["/Change", "/End"]);
+      expect(fixture.files.has(fixture.configuration.path)).toBe(true);
+    },
+  );
+
+  test("Windows: отказ Create после quiesce оставляет disabled task и допускает явный повтор", async () => {
+    const fixture = serviceFixture("win32");
+    const options = { cwd: "/fixture", home: fixture.home };
+    await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+    fixture.commands.length = 0;
+    const runner = fixture.environment.runner;
+    if (!runner) {
+      throw new Error("Не настроен native fixture");
+    }
+    const environment: GitSyncEnvironment = {
+      ...fixture.environment,
+      /**
+       * Новая definition отвергнута после завершения старого owner; скрытого восстановления нет.
+       */
+      runner: async (command): Promise<ProcessResult> => {
+        if (command.args.includes("/Create")) {
+          fixture.commands.push(command);
+          return { exitCode: 5, stdout: "", stderr: "create denied" };
+        }
+        return runner(command);
+      },
+    };
+
+    await expect(
+      controlGitSyncService("enable", options, environment, fixture.binary),
+    ).rejects.toMatchObject({ code: "GIT_SYNC_SERVICE_FAILED", exitCode: 5 });
+
+    expect(await controlGitSyncService("status", options, fixture.environment)).toMatchObject({
+      installed: true,
+      registered: true,
+      enabled: false,
+      state: "stopped",
+      supervisor: { responsive: false },
+    });
+    expect(
+      fixture.commands
+        .filter((command) => command.executable === "schtasks.exe")
+        .map((command) => command.args[0]),
+    ).toEqual(["/Change", "/End", "/Create"]);
+    fixture.commands.length = 0;
+    expect(
+      await controlGitSyncService("enable", options, fixture.environment, fixture.binary),
+    ).toMatchObject({ registered: true, enabled: true, supervisor: { responsive: true } });
+    expect(
+      fixture.commands
+        .filter((command) => command.executable === "schtasks.exe")
+        .map((command) => command.args[0]),
+    ).toEqual(["/Create"]);
+  });
+
+  test("Windows: чужой marker при quiesce readback запрещает End и Create", async () => {
+    const fixture = serviceFixture("win32");
+    const options = { cwd: "/fixture", home: fixture.home };
+    await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+    fixture.commands.length = 0;
+    const runner = fixture.environment.runner;
+    if (!runner) {
+      throw new Error("Не настроен native fixture");
+    }
+    let changed = false;
+    const environment: GitSyncEnvironment = {
+      ...fixture.environment,
+      /**
+       * Имя занято другим владельцем после quiesce: поздний readback обязан отвергнуть его.
+       */
+      runner: async (command): Promise<ProcessResult> => {
+        const result = await runner(command);
+        if (command.args.includes("/Change")) {
+          changed = true;
+        } else if (command.executable === "powershell.exe" && changed) {
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              exists: true,
+              enabled: false,
+              state: 4,
+              runningInstances: 1,
+              description: "foreign",
+            }),
+          };
+        }
+        return result;
+      },
+    };
+
+    await expect(
+      controlGitSyncService("enable", options, environment, fixture.binary),
+    ).rejects.toMatchObject({ code: "GIT_SYNC_SERVICE_OWNERSHIP", exitCode: 4 });
+
+    expect(
+      fixture.commands
+        .filter((command) => command.executable === "schtasks.exe")
+        .map((command) => command.args[0]),
+    ).toEqual(["/Change"]);
+    expect(fixture.files.has(fixture.configuration.path)).toBe(true);
+  });
+
+  test("Windows status не обновляет definition и не активирует RegistrationTrigger", async () => {
+    const fixture = serviceFixture("win32");
+    const options = { cwd: "/fixture", home: fixture.home };
+    await controlGitSyncService("enable", options, fixture.environment, fixture.binary);
+    const before = [...fixture.files];
+    fixture.commands.length = 0;
+
+    const status = await controlGitSyncService("status", options, fixture.environment);
+
+    expect(status).toMatchObject({
+      registered: true,
+      enabled: true,
+      supervisor: { responsive: false },
+    });
+    expect(fixture.commands.every((command) => command.executable === "powershell.exe")).toBe(true);
+    expect([...fixture.files]).toEqual(before);
   });
 
   test.each([
@@ -513,7 +889,7 @@ describe("Конфигурации пользовательского supervisor
       name: "откат wall clock на минуту не увеличивает остаток stop budget",
       scenario: "rollback",
       pollBudgets: [75],
-      mutations: ["/End", "/Create", "/Run"],
+      mutations: ["/Change", "/End", "/Create"],
       result: {
         registered: true,
         state: "running",
@@ -526,7 +902,7 @@ describe("Конфигурации пользовательского supervisor
       name: "положительная четверть миллисекунды передаётся native как одна миллисекунда",
       scenario: "fractional",
       pollBudgets: [1],
-      mutations: ["/End", "/Create", "/Run"],
+      mutations: ["/Change", "/End", "/Create"],
       result: {
         registered: true,
         state: "running",
@@ -539,7 +915,7 @@ describe("Конфигурации пользовательского supervisor
       name: "истёкший во время End deadline запрещает первый COM poll",
       scenario: "expired-before-probe",
       pollBudgets: [],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -552,7 +928,7 @@ describe("Конфигурации пользовательского supervisor
       name: "истёкший во время COM deadline запрещает следующий poll и Run",
       scenario: "expired-after-probe",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -565,7 +941,7 @@ describe("Конфигурации пользовательского supervisor
       name: "SIGTERM во время ожидания сохраняет код отмены и запрещает Run",
       scenario: "cancelled",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -578,7 +954,7 @@ describe("Конфигурации пользовательского supervisor
       name: "SIGTERM после COM сохраняет код отмены и при исчерпании deadline",
       scenario: "cancelled-at-deadline",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -591,7 +967,7 @@ describe("Конфигурации пользовательского supervisor
       name: "busy mutex после COM расходует общий stop budget и запрещает Run",
       scenario: "lock-timeout",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -604,7 +980,7 @@ describe("Конфигурации пользовательского supervisor
       name: "SIGTERM при busy mutex сохраняет код отмены и запрещает Run",
       scenario: "lock-cancelled",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -617,7 +993,7 @@ describe("Конфигурации пользовательского supervisor
       name: "освобождение mutex после истечения stop budget не разрешает Run",
       scenario: "lock-expired-after-probe",
       pollBudgets: [75],
-      mutations: ["/End"],
+      mutations: ["/Change", "/End"],
       result: {
         registered: null,
         state: null,
@@ -626,33 +1002,109 @@ describe("Конфигурации пользовательского supervisor
         failurePhase: "wait-supervisor-lock",
       },
     },
-  ])("Windows monotonic stop: $name", ({ scenario, pollBudgets, mutations, result }) => {
-    const child = Bun.spawnSync(
-      [process.execPath, join(import.meta.dir, "service-clock.test-worker.ts"), scenario],
-      {
-        cwd: import.meta.dir,
-        env: process.env,
-        stdin: "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
-        timeout: 5000,
+    {
+      name: "quiesce и его readback расходуют тот же budget до End",
+      scenario: "quiesce-remaining",
+      pollBudgets: [75],
+      quiesceBudgets: [90],
+      endBudgets: [90],
+      mutations: ["/Change", "/End", "/Create"],
+      result: {
+        registered: true,
+        state: "running",
+        failureCode: null,
+        failureExit: null,
+        failurePhase: null,
       },
-    );
-
-    expect({ exitCode: child.exitCode, stderr: child.stderr.toString() }).toEqual({
-      exitCode: 0,
-      stderr: "",
-    });
-    const observation: unknown = JSON.parse(child.stdout.toString());
-    expect(observation).toEqual({
-      configuredBudget: 100,
-      wallClock: 940_000,
-      signalsPreserved: true,
+    },
+    {
+      name: "deadline во время quiesce запрещает readback и End",
+      scenario: "quiesce-expired",
+      pollBudgets: [],
+      quiesceBudgets: [],
+      endBudgets: [],
+      wallClock: 1_000_000,
+      mutations: ["/Change"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "quiesce",
+      },
+    },
+    {
+      name: "SIGTERM во время quiesce запрещает readback и End",
+      scenario: "quiesce-cancelled",
+      pollBudgets: [],
+      quiesceBudgets: [],
+      endBudgets: [],
+      wallClock: 1_000_000,
+      mutations: ["/Change"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_CANCELLED",
+        failureExit: 143,
+        failurePhase: null,
+      },
+    },
+    {
+      name: "исчерпание budget при readback Disabled не разрешает End",
+      scenario: "quiesce-readback-expired",
+      pollBudgets: [],
+      quiesceBudgets: [100],
+      endBudgets: [],
+      wallClock: 1_000_000,
+      mutations: ["/Change"],
+      result: {
+        registered: null,
+        state: null,
+        failureCode: "GIT_SYNC_SERVICE_FAILED",
+        failureExit: 4,
+        failurePhase: "wait-stopped",
+      },
+    },
+  ])(
+    "Windows monotonic stop: $name",
+    ({
+      scenario,
       pollBudgets,
       mutations,
-      ...result,
-    });
-  });
+      result,
+      quiesceBudgets = [100],
+      endBudgets = [100],
+      wallClock = 940_000,
+    }) => {
+      const child = Bun.spawnSync(
+        [process.execPath, join(import.meta.dir, "service-clock.test-worker.ts"), scenario],
+        {
+          cwd: import.meta.dir,
+          env: process.env,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+          timeout: 5000,
+        },
+      );
+
+      expect({ exitCode: child.exitCode, stderr: child.stderr.toString() }).toEqual({
+        exitCode: 0,
+        stderr: "",
+      });
+      const observation: unknown = JSON.parse(child.stdout.toString());
+      expect(observation).toEqual({
+        configuredBudget: 100,
+        wallClock,
+        signalsPreserved: true,
+        pollBudgets,
+        quiesceBudgets,
+        endBudgets,
+        mutations,
+        ...result,
+      });
+    },
+  );
 
   test("native отказ сохраняет реальный код и диагностику вместо успешной установки", async () => {
     const fixture = serviceFixture("linux");
