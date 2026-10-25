@@ -404,6 +404,7 @@ process.stdout.write(Buffer.concat([header,body]),()=>process.exit(0));});`,
         stderr = (stderr + chunk.toString("utf8")).slice(0, 4096);
       });
       const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      const failures: unknown[] = [];
       let pid: number | undefined;
       // Барьеры отказывают раньше внешнего watchdog теста, оставляя время для finally.
       const deadline = performance.now() + 4000;
@@ -466,13 +467,25 @@ process.stdout.write(Buffer.concat([header,body]),()=>process.exit(0));});`,
         if (scenario.mode !== "normal") {
           expect(existsSync(join(fixture.root, "flood-flushed"))).toBe(true);
         }
+      } catch (error) {
+        failures.push(error);
       } finally {
-        child.kill("SIGKILL");
-        await exited;
-        if (pid && running(pid)) {
-          process.kill(pid, "SIGKILL");
+        try {
+          child.kill("SIGKILL");
+          await exited;
+          if (pid && running(pid)) {
+            process.kill(pid, "SIGKILL");
+          }
+          await fixture.dispose();
+        } catch (error) {
+          failures.push(error);
         }
-        await fixture.dispose();
+      }
+      if (failures.length === 1) {
+        throw failures[0];
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "Ошибки stdin lease и очистки процессной fixture");
       }
     });
   }

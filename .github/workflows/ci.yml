@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_resource_probe:
+        description: "Base64 JSON v1: четыре TS-файла одноразового Windows resource probe"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -69,6 +75,84 @@ jobs:
         run: |
           bun install --frozen-lockfile 2>&1 | tee "$CI_LOG_DIR/install.log"
           git diff --exit-code -- bun.lock 2>&1 | tee "$CI_LOG_DIR/lockfile.log"
+
+      - name: Извлечь одноразовый Windows resource probe
+        id: windows_resource_bundle
+        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.install.outcome == 'success' }}
+        run: |
+          # Payload читается из файла события, без переноса в shell/env.
+          bun -e '
+            import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+            import { createHash } from "node:crypto";
+            import { join, resolve } from "node:path";
+            const event = await Bun.file(process.env.GITHUB_EVENT_PATH).json();
+            const input = event.inputs?.windows_resource_probe;
+            if (typeof input !== "string" || !input || input.length > 64000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(input)) {
+              throw new Error("Некорректный размер или Base64 Windows resource probe");
+            }
+            const bytes = Buffer.from(input, "base64");
+            if (bytes.length > 48000 || bytes.toString("base64") !== input) {
+              throw new Error("Неканонический или слишком большой Windows resource probe");
+            }
+            let bundle;
+            try {
+              bundle = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+            } catch {
+              throw new Error("Некорректный UTF-8 JSON Windows resource probe");
+            }
+            const names = ["windows-resource-preload.ts", "windows-resource-snapshot.ts",
+              "windows-resource-snapshot.types.ts", "windows-resource-snapshot.integration.test.ts"];
+            if (!bundle || bundle.version !== 1 || Object.keys(bundle).length !== 2 ||
+                !bundle.files || Array.isArray(bundle.files) || typeof bundle.files !== "object" ||
+                Object.keys(bundle.files).length !== names.length ||
+                !names.every(name => Object.hasOwn(bundle.files, name) &&
+                  typeof bundle.files[name] === "string" && bundle.files[name].length > 0)) {
+              throw new Error("Ожидался bundle v1 с четырьмя разрешёнными TS-файлами");
+            }
+            const directory = resolve(process.env.CI_LOG_DIR, "windows-resource-cleanup");
+            const head = Bun.spawnSync(["git", "rev-parse", "HEAD"]);
+            const git = Bun.spawnSync(["git", "--version"]);
+            if (head.exitCode !== 0 || git.exitCode !== 0) {
+              throw new Error("Не удалось сохранить HEAD и версию Git для probe");
+            }
+            const metadata = {
+              version: bundle.version, bytes: bytes.length,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              head: head.stdout.toString().trim(), githubSha: process.env.GITHUB_SHA,
+              bun: Bun.version, git: git.stdout.toString().trim(),
+              platform: process.platform, arch: process.arch,
+              files: Object.fromEntries(names.map(name => [name, {
+                bytes: Buffer.byteLength(bundle.files[name]),
+                sha256: createHash("sha256").update(bundle.files[name]).digest("hex"),
+              }])),
+            };
+            mkdirSync(directory, { recursive: true });
+            mkdirSync(join(directory, "probe"));
+            writeFileSync(join(directory, "bundle.json"), bytes, { flag: "wx" });
+            for (const name of names) {
+              writeFileSync(join(directory, "probe", name), bundle.files[name], { flag: "wx" });
+            }
+            writeFileSync(join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { flag: "wx" });
+            appendFileSync(process.env.GITHUB_ENV, `WINDOWS_RESOURCE_REPORT_DIR=${directory}\n`);
+            console.log(JSON.stringify(metadata, null, 2));
+          ' 2>&1 | tee "$CI_LOG_DIR/windows-resource-bundle.log"
+
+      - name: Проверить native Windows snapshot
+        id: windows_resource_validation
+        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_bundle.outcome == 'success' }}
+        run: |
+          bun test "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-snapshot.integration.test.ts" 2>&1 | tee "$CI_LOG_DIR/windows-resource-validation.log"
+
+      # Pre-rm snapshot меняет тайминг: успех адресного прогона не является lifetime-fix.
+      - name: Наблюдать очистку Runtime SIGKILL normal
+        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_validation.outcome == 'success' }}
+        run: |
+          bun test --cwd packages/project-runtime --preload "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-preload.ts" ./tests/integration/process-guardian.integration.test.ts -t "SIGKILL только владельца даёт stdin-eof target: обычный вывод" 2>&1 | tee "$CI_LOG_DIR/windows-resource-runtime.log"
+
+      - name: Наблюдать очистку Git refresh
+        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_validation.outcome == 'success' }}
+        run: |
+          bun test --cwd apps/git-sync --preload "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-preload.ts" ./tests/integration/exchange.integration.test.ts -t "refresh получает behind" 2>&1 | tee "$CI_LOG_DIR/windows-resource-git-refresh.log"
 
       - name: Проверить форматирование
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
