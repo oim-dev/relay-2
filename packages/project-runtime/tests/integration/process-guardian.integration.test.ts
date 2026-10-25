@@ -12,6 +12,7 @@ import {
 } from "@relay/project-runtime";
 import { RuntimeFixture } from "./helpers/runtime-fixture";
 import type { NativeTreeReady } from "./helpers/process-guardian-fixture.types";
+import { ProcessGuardianBrokerFixture } from "./helpers/process-guardian-broker-fixture";
 
 const group = "git-sync-implementation/process-runtime";
 const actor = fileURLToPath(new URL("./helpers/process-guardian-actor.ts", import.meta.url));
@@ -335,63 +336,60 @@ process.stdout.write(Buffer.concat([header,body]),()=>process.exit(0));});`,
     },
   );
 
+  // Внешний watchdog оставляет время для cleanup после отказа пятисекундного барьера сценария.
   test("постоянный worker независимого broker переживает строгую очистку короткого запроса", async () => {
-    const fixture = new RuntimeFixture(group);
-    const requests: string[] = [];
-    let worker: ReturnType<typeof spawn> | undefined;
-    let workerExit: Promise<void> | undefined;
-    const broker = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      /**
-       * Отдельный владелец создаёт worker вне ancestry/job короткого client-процесса.
-       */
-      async fetch(request): Promise<Response> {
-        if (request.method !== "POST" || new URL(request.url).pathname !== "/launch" || worker) {
-          return new Response(null, { status: 409 });
-        }
-        requests.push(await request.text());
-        worker = spawn(process.execPath, [actor, "persistent", fixture.root], {
-          cwd: fixture.cwd,
-          env: { PATH: process.env.PATH ?? "", HOME: fixture.root, USERPROFILE: fixture.root },
-          detached: true,
-          stdio: "ignore",
-        });
-        workerExit = new Promise((resolve, reject) => {
-          worker?.once("error", reject);
-          worker?.once("exit", () => resolve());
-        });
-        worker.unref();
-        await observe(() => existsSync(join(fixture.root, "leaf.pid")));
-        return Response.json({ started: true });
-      },
-    });
+    const fixture = new ProcessGuardianBrokerFixture(
+      "git-sync-finalization/windows-broker-fixture",
+    );
+    const cancellation = new AbortController();
+    const failures: unknown[] = [];
+    let operation: ReturnType<typeof runNativeProcess> | undefined;
     try {
-      const result = await bounded(
-        runNativeProcess({
-          ...command(fixture, "broker-client"),
-          args: [actor, "broker-client", fixture.root, `http://127.0.0.1:${broker.port}/launch`],
-          input: '{"action":"worker.start"}',
-        }),
-      );
+      const endpoint = fixture.start(actor);
+      operation = runNativeProcess({
+        ...command(fixture, "broker-client"),
+        args: [actor, "broker-client", fixture.root, endpoint],
+        input: '{"action":"worker.start"}',
+        signal: cancellation.signal,
+      });
+      const result = await bounded(operation);
 
       expect(result).toEqual({ exitCode: 0, stdout: "broker-accepted\n", stderr: "" });
-      expect(requests).toEqual(['{"action":"worker.start"}']);
+      expect(fixture.requests).toEqual(['{"action":"worker.start"}']);
       writeFileSync(join(fixture.root, "ping"), "ping");
       await observe(() => existsSync(join(fixture.root, "pong")));
       const pid = Number(readFileSync(join(fixture.root, "pong"), "utf8"));
-      const workerPid = worker?.pid;
+      const workerPid = fixture.workerPid;
       if (workerPid === undefined) {
         throw new Error("Broker не создал собственного worker");
       }
       expect(pid).toBe(workerPid);
       expect(running(pid)).toBe(true);
+    } catch (error) {
+      failures.push(error);
     } finally {
-      await broker.stop(true);
-      await disposeFixture(fixture);
-      await workerExit;
+      cancellation.abort("SIGTERM");
+      // При срабатывании bounded короткий запрос всё ещё принадлежит тесту.
+      try {
+        await operation;
+      } catch (error) {
+        if (!failures.includes(error)) {
+          failures.push(error);
+        }
+      }
+      try {
+        await fixture.dispose();
+      } catch (error) {
+        failures.push(error);
+      }
     }
-  });
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "Ошибки сценария и очистки независимого broker");
+    }
+  }, 20_000);
 
   for (const scenario of leaseOwnerCases) {
     test(`SIGKILL только владельца даёт stdin-eof target: ${scenario.name}`, async () => {
