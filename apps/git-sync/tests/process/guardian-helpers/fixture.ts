@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GuardedCommandOptions } from "@relay/project-runtime";
 import type { CommandOwner, GuardianFixture, TreeReady } from "./fixture.types";
@@ -64,18 +64,22 @@ export async function ready(root: string): Promise<TreeReady> {
 
 /**
  * Создаёт собственное окружение; аварийная очистка вызывается лишь после assert сценария.
+ * При отказе очистки сохраняет обе причины в AggregateError; успешная очистка не меняет primary.
+ * Каталог удаляется только после подтверждённой остановки акторов.
  */
 export async function withGuardianFixture(
   operation: (fixture: GuardianFixture) => Promise<void>,
 ): Promise<void> {
-  const artifacts = join(
-    repository,
-    ".artifacts",
-    new Date().toISOString().slice(0, 10),
-    "git-sync-implementation",
-    "guardian",
-    "fixtures",
-  );
+  const artifacts = process.env.CI_LOG_DIR
+    ? resolve(repository, process.env.CI_LOG_DIR, "guardian-fixtures")
+    : join(
+        repository,
+        ".artifacts",
+        new Date().toISOString().slice(0, 10),
+        "git-sync-implementation",
+        "guardian",
+        "fixtures",
+      );
   mkdirSync(artifacts, { recursive: true });
   const root = mkdtempSync(join(artifacts, "case-"));
   const home = join(root, "home");
@@ -91,6 +95,8 @@ export async function withGuardianFixture(
     );
   const component = [binary];
   const actor = [process.execPath, actorPath];
+  let operationFailed = false;
+  let operationFailure: unknown;
   try {
     await operation({
       root,
@@ -105,20 +111,31 @@ export async function withGuardianFixture(
         maxOutputBytes: 1024 * 1024,
       },
     });
-  } finally {
+  } catch (error) {
+    operationFailed = true;
+    operationFailure = error;
+  }
+  try {
     if (existsSync(join(root, "tree.ready"))) {
       const tree = await ready(root);
-      for (const pid of [tree.leaf, tree.branch, tree.command, tree.anchor]) {
-        if (running(pid)) {
-          try {
-            process.kill(pid, "SIGKILL");
-          } catch {
-            // Между наблюдением и cleanup guardian мог завершить принадлежащий fixture PID.
-          }
-        }
-      }
+      // Аварийные барьеры адресуют только собственных акторов, без сигналов по сохранённым PID.
+      writeFileSync(join(root, "stop"), "stop");
+      writeFileSync(join(root, "release"), "exit");
+      await observe(() => Object.values(tree).every((pid) => !running(pid)), 1000);
     }
     rmSync(root, { recursive: true, force: true });
+  } catch (cleanupFailure) {
+    if (operationFailed) {
+      throw new AggregateError(
+        [operationFailure, cleanupFailure],
+        "Сценарий и очистка guardian fixture завершились с ошибками",
+        { cause: operationFailure },
+      );
+    }
+    throw cleanupFailure;
+  }
+  if (operationFailed) {
+    throw operationFailure;
   }
 }
 

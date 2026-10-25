@@ -3,6 +3,7 @@ import { workerMessages } from "./worker.messages";
 import type {
   InitializationResult,
   InitializationWorkerInput,
+  RegistrationWorkerEvent,
   RegistrationWorkerInput,
 } from "./worker.types";
 
@@ -123,4 +124,41 @@ export function validateWorkspaceSnapshot(value: unknown): void {
   if (!isObject(value) || value.version !== 1 || !Array.isArray(value.projects)) {
     throw new Error(workerMessages.incompleteWorkspace);
   }
+}
+
+/**
+ * Проверяет фазу IPC перед использованием её в координаторе реальных процессов.
+ */
+export function readRegistrationEvent(value: unknown): RegistrationWorkerEvent {
+  if (isObject(value)) {
+    const { phase, index, count, snapshots } = value;
+    if (
+      (phase === "ready" || phase === "started" || phase === "completed") &&
+      typeof index === "number" &&
+      Number.isSafeInteger(index) &&
+      index >= 0
+    ) {
+      return { phase, index };
+    }
+    if (
+      phase === "finished" &&
+      typeof count === "number" &&
+      Number.isSafeInteger(count) &&
+      count > 0
+    ) {
+      return { phase, count };
+    }
+    if (phase === "reading") {
+      return { phase };
+    }
+    if (
+      phase === "stopped" &&
+      typeof snapshots === "number" &&
+      Number.isSafeInteger(snapshots) &&
+      snapshots > 0
+    ) {
+      return { phase, snapshots };
+    }
+  }
+  throw new Error(workerMessages.invalidRegistrationEvent);
 }

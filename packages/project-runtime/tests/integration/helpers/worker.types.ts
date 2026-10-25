@@ -72,4 +72,66 @@ export interface RunningWorker {
   readonly child: Subprocess<"pipe", "pipe", "pipe">;
   /* Завершение процесса вместе с полным чтением обоих потоков. */
   readonly result: Promise<WorkerResult>;
+  /* Фазы IPC и завершения с относительным временем для диагностики deadline. */
+  readonly trace: readonly string[];
+  /**
+   * Отправляет сообщение координатора и сохраняет его в диагностике процесса.
+   */
+  send(message: unknown): void;
+}
+
+/**
+ * Команды координатора: разрешение ровно одной операции, остановка чтения и приём результата.
+ */
+export type RegistrationCommand =
+  | {
+      /* Разрешение следующей записи либо первого чтения. */
+      readonly kind: "go";
+      /* Нулевой индекс операции; повтор прежнего индекса не разрешает новую мутацию. */
+      readonly index: number;
+    }
+  | {
+      /* finish подтверждает получение конечного результата перед закрытием IPC. */
+      readonly kind: "stop" | "finish";
+    };
+
+/**
+ * Наблюдаемые фазы реального workspace worker; отправляются до и после синхронной мутации.
+ */
+export type RegistrationWorkerEvent =
+  | {
+      /* Готовность, получение go перед Runtime либо успешный возврат из мутации. */
+      readonly phase: "ready" | "started" | "completed";
+      /* Нулевой индекс конкретной операции. */
+      readonly index: number;
+    }
+  | {
+      /* Все заявленные мутации выполнены; worker ждёт finish. */
+      readonly phase: "finished";
+      /* Подтверждённое число операций. */
+      readonly count: number;
+    }
+  | {
+      /* Читатель уже проверил первый снимок и продолжает чтение между оборотами event loop. */
+      readonly phase: "reading";
+    }
+  | {
+      /* Читатель остановлен и ждёт finish. */
+      readonly phase: "stopped";
+      /* Число успешно разобранных и проверенных снимков JSON. */
+      readonly snapshots: number;
+    };
+
+/**
+ * Workspace worker с очередью фаз, подписанной до запуска процесса и сохраняющей ранние сообщения.
+ */
+export interface RunningRegistrationWorker extends RunningWorker {
+  /**
+   * Передаёт только команды workspace-протокола с явным индексом мутации.
+   */
+  send(command: RegistrationCommand): void;
+  /**
+   * Возвращает следующую проверенную фазу; EOF до неё даёт диагностику с полным результатом процесса.
+   */
+  nextEvent(): Promise<RegistrationWorkerEvent>;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GuardedCommandError, runGuardedCommand } from "@relay/project-runtime";
@@ -17,6 +17,9 @@ import { withOwnerObservation } from "./guardian-helpers/owner-observation";
 
 const brokenEntry = fileURLToPath(new URL("./guardian-helpers/broken-entry.ts", import.meta.url));
 const sourceEntry = fileURLToPath(new URL("./guardian-helpers/entry.ts", import.meta.url));
+const linuxProcfsEntry = fileURLToPath(
+  new URL("./guardian-helpers/linux-procfs-entry.ts", import.meta.url),
+);
 
 /**
  * Подтверждает остановку всех известных PID до выхода теста и до аварийного finally fixture.
@@ -263,6 +266,51 @@ describe("Владение деревом защищённой команды", 
             await owner.exited;
 
             phase("tree-stop");
+            await expectTreeStopped(tree);
+          });
+        } finally {
+          owner.child.kill("SIGKILL");
+          await owner.exited;
+        }
+      });
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "SIGKILL владельца очищает detached-дерево даже при пропуске усыновлённых детей в procfs",
+    async () => {
+      await withGuardianFixture(async ({ options, actor, root }) => {
+        const owner = startOwner(root, {
+          ...options,
+          component: [process.execPath, linuxProcfsEntry, root],
+          argv: [...actor, "tree-detached", root],
+        });
+        try {
+          await withOwnerObservation(root, owner, async (phase) => {
+            const tree = await ready(root);
+            const anchorStat = readFileSync(`/proc/${tree.anchor}/stat`, "utf8");
+            const guardian = Number(
+              anchorStat.slice(anchorStat.lastIndexOf(")") + 2).split(" ")[1],
+            );
+            expect(Object.values(tree).every(running)).toBe(true);
+            writeFileSync(join(root, "procfs-arm.json"), JSON.stringify(tree));
+
+            phase("owner-exit");
+            owner.child.kill("SIGKILL");
+            await owner.exited;
+            phase("tree-stop");
+            const fault = join(root, "procfs-omitted.json");
+            await observe(
+              () => existsSync(fault) && JSON.parse(readFileSync(fault, "utf8")).scans === 2,
+              1000,
+            );
+            expect(JSON.parse(readFileSync(fault, "utf8"))).toEqual({
+              scans: 2,
+              branch: tree.branch,
+              parent: guardian,
+            });
+
+            await observe(() => Object.values(tree).every((pid) => !running(pid)), 1500);
             await expectTreeStopped(tree);
           });
         } finally {
