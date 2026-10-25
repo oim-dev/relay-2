@@ -1,0 +1,16 @@
+{
+  "extends": "@relay/typescript-config/browser.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "types": ["vite/client", "node", "react", "react-dom"],
+    "paths": {
+      "app/*": ["./src/app/*"],
+      "compositions/*": ["./src/compositions/*"],
+      "domains/*": ["./src/domains/*"],
+      "infra/*": ["./src/infra/*"],
+      "ui/*": ["./src/ui/*"],
+      "shared/*": ["./src/shared/*"]
+    }
+  },
+  "include": ["src", "vite.config.ts"]
+}

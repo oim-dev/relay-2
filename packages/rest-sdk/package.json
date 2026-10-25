@@ -7,8 +7,12 @@
     ".": "./src/index.ts"
   },
   "scripts": {
-    "typecheck": "bun --bun tsc --noEmit",
-    "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
+    "generate": "bun run --filter @relay/server generate && bun run generate:client",
+    "generate:client": "node scripts/generate.ts && bun run build",
+    "generate:check": "node scripts/generate.ts --check",
+    "build": "node scripts/clean-generated.ts && bun --bun tsc -p tsconfig.generated.json",
+    "typecheck": "bun run build && bun --bun tsc --noEmit && bun --bun tsc --noEmit -p tests/tsconfig.json",
+    "test:unit": "bun run build && bun test .unit.test.ts",
     "test:integration": "bun test --pass-with-no-tests .integration.test.ts"
   },
   "dependencies": {
@@ -16,6 +20,7 @@
   },
   "devDependencies": {
     "@relay/typescript-config": "workspace:*",
+    "@types/bun": "1.4.3",
     "typescript": "7.0.2"
   }
 }

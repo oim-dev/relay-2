@@ -5,6 +5,7 @@ import { renderConfiguration, renderOverview } from "./project";
 import { renderEntityRead } from "./reads";
 import { terminalText } from "./terminal";
 import { renderGitSyncStatus } from "./git-sync";
+import { renderServerStatus } from "./server";
 
 /**
  * Оборачивает завершённые данные предметного сценария без изменения формы; Promise нужно ожидать до вызова.
@@ -37,6 +38,9 @@ export function renderResult(
   }
   if (presentation === "git-sync-status") {
     return terminalText(renderGitSyncStatus(result.data));
+  }
+  if (presentation === "server-status") {
+    return terminalText(renderServerStatus(result.data));
   }
   if (presentation === "entity-read") {
     return terminalText(renderEntityRead(result.data, result.meta?.versions));

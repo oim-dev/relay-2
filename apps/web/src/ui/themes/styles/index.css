@@ -1,0 +1,78 @@
+@layer mantine;
+@import "@mantine/core/styles.layer.css";
+@import "@mantine/notifications/styles.layer.css";
+@import "@fontsource-variable/inter";
+@import "./variables.css";
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: var(--mantine-color-scheme);
+  background: var(--tasks-canvas);
+  color: var(--tasks-ink);
+  font-family: var(--mantine-font-family);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-width: 20rem;
+}
+
+button {
+  font: inherit;
+}
+
+/* Размер и межстрочный интервал полей определяет size компонента Mantine. */
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+[tabindex] {
+  &:focus-visible {
+    outline: 2px solid var(--tasks-focus-ring);
+    outline-offset: 3px;
+  }
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* У полей фокус меняет существующую рамку, не добавляя вторую снаружи. */
+input:not([type="checkbox"]):not([type="radio"]),
+textarea,
+select,
+[role="combobox"],
+[contenteditable="true"] {
+  &:focus-visible {
+    outline: none;
+    outline-offset: 0;
+    border-color: var(--tasks-focus-ring);
+  }
+}
+
+::selection {
+  background: var(--tasks-selection);
+  color: var(--tasks-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

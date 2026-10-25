@@ -12,6 +12,7 @@ import { registerHistoryCommands } from "../commands/history/register";
 import { registerQueryCommands } from "../commands/queries/register";
 import { registerBatchCommands } from "../commands/batch/register";
 import { registerGitSyncCommands } from "../commands/git-sync/register";
+import { registerServerCommands } from "../commands/server/register";
 import { checkPositionals, CommandRegistry } from "../execution/registry";
 import { createHelpRenderer } from "../output/help";
 import { processRuntime } from "../execution/runtime";
@@ -34,6 +35,7 @@ export function createProgram(runtime: CliRuntime = processRuntime()): CliProgra
     registerQueryCommands,
     registerBatchCommands,
     registerGitSyncCommands,
+    registerServerCommands,
   ]) {
     register(registry);
   }

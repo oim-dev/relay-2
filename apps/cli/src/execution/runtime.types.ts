@@ -1,4 +1,4 @@
-import type { GitSyncClient } from "@relay/project-runtime";
+import type { GitSyncClient, ServerClient } from "@relay/project-runtime";
 
 /**
  * Окружение одного вызова CLI, передаваемое явно для изоляции параллельных запусков.
@@ -13,6 +13,8 @@ export interface CliRuntime {
   readonly stdin: string | ((maxBytes?: number) => string | Promise<string>);
   /* Процессный порт Git Sync; отсутствие использует ленивый production client Runtime. */
   readonly gitSync?: GitSyncClient;
+  /* Процессный порт Server; отсутствие использует ленивый production client Runtime. */
+  readonly server?: ServerClient;
   /* Путь исполняемой CLI для sibling discovery; процессный вход передаёт process.execPath. */
   readonly executablePath?: string;
   /* Сигнал отмены только текущего вызова; глобальные listeners подключает процессный вход. */

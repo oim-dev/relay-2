@@ -53,3 +53,22 @@ export type {
   RestorationResumeResult,
   RestorationResumeRecovery,
 } from "./project/restoration-resume.types";
+export { createServerClient } from "./server/client";
+export { discoverServerBinary } from "./server/discovery";
+export { createServerLaunch, readServerLaunch } from "./server/registry";
+export { resolveServerScope } from "./server/scope";
+export { acquireServerInstance } from "./server/registration";
+export { listServerInstances, probeServerInstance } from "./server/probe";
+export { createServerServiceConfiguration } from "./server/service-configuration";
+export type { ServerServiceInput } from "./server/service.types";
+export type {
+  ServerClient,
+  ServerEnvironment,
+  ServerLaunch,
+  ServerLaunchInput,
+  ServerStartInput,
+  ServerProjectLocation,
+  ResolvedServerScope,
+  ServerReadyInput,
+  ServerRegistration,
+} from "./server/server.types";

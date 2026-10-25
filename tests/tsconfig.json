@@ -1,4 +1,7 @@
 {
   "extends": "../packages/typescript-config/bun.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
   "include": ["e2e/**/*.ts"]
 }

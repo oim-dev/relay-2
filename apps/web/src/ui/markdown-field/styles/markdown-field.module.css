@@ -1,0 +1,46 @@
+.root {
+  min-width: 0;
+}
+
+.heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.625rem;
+}
+
+.label {
+  flex-shrink: 0;
+  font-size: var(--mantine-font-size-sm);
+  font-weight: 550;
+}
+
+.preview {
+  min-height: 10rem;
+  padding: 0.75rem;
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-md);
+}
+
+.tabs {
+  flex-shrink: 0;
+}
+
+.hint {
+  display: block;
+  margin-top: 0.375rem;
+  color: var(--tasks-soft);
+  font-size: 0.6875rem;
+}
+.editor {
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-sm);
+  overflow: hidden;
+  margin-top: 4px;
+
+  &:focus-within {
+    border-color: var(--tasks-focus-ring);
+  }
+}

@@ -236,6 +236,40 @@ relay git-sync supervise --home /var/lib/relay
 и данные проектов при остановке сохраняются. Политику запуска при загрузке системы в этом режиме задаёт внешний
 supervisor. Подробности каждой команды доступны через `relay git-sync --help`.
 
+## Сервер и Web
+
+`relay server start` запускает отдельный `relay-server` для текущего проекта либо всего
+workspace. Совместимый компонент устанавливается рядом с `relay`, в PATH или задаётся
+через `RELAY_SERVER_BIN`. Справка, список и остановка доступны без проекта.
+
+```bash
+relay server start --actor human
+relay server list
+relay server open
+```
+
+`start` явно устанавливает независимую пользовательскую native-службу: systemd --user,
+LaunchAgent или Task Scheduler. Она продолжает работу после выхода CLI и запускается
+при входе пользователя до явного `server stop`. Для терминала, контейнера либо внешнего
+supervisor используйте `relay server run`; этот процесс связан с жизнью CLI.
+Порт по умолчанию выбирает ОС, конкретный можно задать через `--port 8080`.
+
+Список показывает число серверов с подтверждённым health, URL, PID, версию, scope и
+проекты с отдельными ошибками. Запись реестра без живого владельца имеет статус `stale`,
+занятый lease без ответа — `unresponsive`. Реестр находится в `RELAY_HOME`; `--home`
+переопределяет его для серверной команды. При нескольких серверах `open` требует
+`--instance UUID` из списка. Тот же UUID обязателен для `stop` и `restart`:
+
+```bash
+relay server status --instance UUID --format json
+relay server stop --instance UUID
+relay server restart --instance UUID
+```
+
+Замените `UUID` идентификатором из `list`. `restart` сохраняет параметры запуска;
+после foreground он создаёт native-службу. `stop` удаляет автозапуск выбранной службы,
+сохраняя launch-запись для перезапуска и все данные проектов.
+
 ## Разработка CLI
 
 CLI входит в монорепозиторий Relay. `bun run dev:cli` из корня пересобирает бинарник

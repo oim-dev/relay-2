@@ -200,9 +200,8 @@ interface ScenarioImplementationFields extends ImplementationFields {
  * Содержимое реализации с формой цели, определяемой targetKind.
  * EntityData сохраняет дискриминированное объединение и совместимость с хранением.
  */
-export type ImplementationData = EntityData<
-  FeatureImplementationFields | ScenarioImplementationFields
->;
+export type ImplementationData =
+  EntityData<FeatureImplementationFields> | EntityData<ScenarioImplementationFields>;
 
 /**
  * Поля документа, его размещения и структурированных отношений.

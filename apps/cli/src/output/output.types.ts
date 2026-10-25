@@ -12,7 +12,8 @@ export type TextPresentation =
   | "overview"
   | "workspace-projects"
   | "entity-read"
-  | "git-sync-status";
+  | "git-sync-status"
+  | "server-status";
 
 /**
  * Дополнительные сведения результата; page присутствует только у списочного ответа.

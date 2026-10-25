@@ -11,8 +11,34 @@
       "outputs": ["dist/**"]
     },
     "@relay/cli#build": {
-      "dependsOn": ["^build", "typecheck", "@relay/git-sync#build"],
+      "dependsOn": ["^build", "typecheck", "@relay/git-sync#build", "@relay/server#build"],
       "outputs": ["dist/**"]
+    },
+    "@relay/server#build": {
+      "dependsOn": ["^build", "typecheck", "@relay/web#build"],
+      "outputs": ["dist/**"]
+    },
+    "@relay/rest-sdk#build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/generated/**"]
+    },
+    "@relay/rest-sdk#typecheck": {
+      "dependsOn": ["^typecheck", "@relay/rest-sdk#build"],
+      "outputs": ["dist/generated/**"]
+    },
+    "@relay/rest-sdk#test:unit": {
+      "dependsOn": ["^test:unit", "@relay/rest-sdk#build"],
+      "outputs": ["dist/generated/**"]
+    },
+    "@relay/server#test:integration": {
+      "dependsOn": ["@relay/rest-sdk#build"],
+      "cache": false,
+      "passThroughEnv": ["CI_LOG_DIR"]
+    },
+    "@relay/web#dev": {
+      "dependsOn": ["@relay/rest-sdk#build"],
+      "cache": false,
+      "persistent": true
     },
     "dev": {
       "cache": false,

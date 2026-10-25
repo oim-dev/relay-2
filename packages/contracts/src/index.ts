@@ -24,6 +24,16 @@ export { validateEntityReadRequest } from "./queries/entity-read";
 export type * from "./queries/entity-read.types";
 export type * from "./batch/batch.types";
 export type * from "./batch/command.types";
+export type * from "./http/http.types";
+export type * from "./http/git-sync.types";
+export type * from "./http/read.types";
+export type * from "./http/api-schema.types";
+export type {
+  ServerScope,
+  ServerProjectStatus,
+  ServerInstanceStatus,
+  ServerInstanceList,
+} from "./server/lifecycle.types";
 export type * from "./commands/command-store.types";
 export type * from "./commands/command-write.types";
 export { BATCH_LIMITS, BATCH_NESTED_RESULT_KINDS } from "./batch/batch.constants";
@@ -51,3 +61,6 @@ export {
   componentPositionBetween,
   compareComponentPositions,
 } from "./components/component-position";
+export { HTTP_COMMAND_INPUT_SCHEMAS, HTTP_COMMAND_EXAMPLES } from "./http/command-schema";
+export type { CommandJsonSchema } from "./http/command-schema.types";
+export { ENTITY_PAGE_SIZE, ENTITY_PAGE_SORTS } from "./pagination/pagination.constants";

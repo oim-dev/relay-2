@@ -1,0 +1,8 @@
+{
+  "$schema": "https://agent-browser.dev/schema.json",
+  "headed": false,
+  "autoConnect": false,
+  "engine": "chrome",
+  "hideScrollbars": false,
+  "noAutoDialog": true
+}

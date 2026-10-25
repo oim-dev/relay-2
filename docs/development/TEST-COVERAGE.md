@@ -316,6 +316,74 @@ sync validator, чтение и следующая запись на том же
 причину и companion-файл; после полной уборки `RESTORE_NOT_PENDING` не вызывает validator
 и не меняет БД.
 
+### Lifecycle Server
+
+[Discovery Server](../../packages/project-runtime/src/server/discovery.unit.test.ts)
+отвергает несовместимый явный binary без fallback на другой выпуск.
+[Конфигурация службы](../../packages/project-runtime/src/server/service-configuration.unit.test.ts)
+сверяет независимость UUID/пути службы и launch без foreground parent lease для
+systemd, LaunchAgent и Task Scheduler. Эти unit-проверки не запускают native manager.
+
+[CLI/Runtime lifecycle](../../apps/cli/tests/integration/server-lifecycle.integration.test.ts)
+использует реальные тестовые child-процессы и control listener: два экземпляра видны
+независимо, остановка одного сохраняет другой, nonce не попадает в публичный JSON.
+Проверяются отказ неверного nonce/boot/Origin, занятый lease без health, crash/stale,
+сохранность чужого процесса при подмене PID и отказ устаревшего launch. Workspace
+сохраняет недоступный элемент и отклоняет один projectId разных физических БД.
+
+[Запуск через Runtime](../../apps/cli/tests/integration/server-native.integration.test.ts)
+связывает start/restart/stop с реальным control/mutex тестового процесса, сохранением
+контекста и новым bootId. Native manager в этом сценарии подменён. Отдельный foreground
+случай использует production guardian и проверяет остановку при отмене CLI.
+Эти тесты не заменяют проверку поставляемого HTTP/SPA-бинарника или настоящей login-службы ОС.
+
+## Server, REST SDK и HTTP-контракты
+
+[Команды](../../apps/server/tests/integration/commands.integration.test.ts) проходят через
+настоящие loopback HTTP, SDK и файловую SQLite. Утверждения сохраняют точный Markdown
+и автора, первоначальную receipt после поздней правки, отклоняют stale CAS/token до no-op
+и неверный адресный guard. Неуспешный второй шаг откатывает данные и квитанцию;
+`check` сохраняет возможность применить тот же operationKey. Конкурентные HTTP writers
+сохраняют одну правку, владелец соединения ожидает async writer перед close.
+
+[Чтения](../../apps/server/tests/integration/reads.integration.test.ts) проверяют
+страницы с total/generation, отказ продолжения после внешнего commit и обязательность
+поколения для offset. Отдельные assertions защищают root-фильтр задач, false и отсутствие
+раздела, ошибки неизвестных фильтров, комментарии/критерии/зависимости, составы этапа и
+релиза, session/checkpoint, summary-ошибку отдельного адреса и metadata версий.
+Точные counts обзора и согласованные status/doctor проверяются на подготовленном проекте.
+
+[Проекты](../../apps/server/tests/integration/projects.integration.test.ts) подтверждают
+независимость workspace-БД, отдельную недоступную регистрацию и отказ двух физических
+реплик одного projectId. После перепривязки конфига Git Sync не вызывается для другого
+проекта под прежним HTTP ID.
+
+[Транспорт](../../apps/server/tests/integration/transport.integration.test.ts) проверяет
+JSON 413 для обычного и потокового body без записи, ошибки JSON/media/Host/Origin,
+границу static handler и `INVALID_RESPONSE` SDK с исходным HTTP status. SSE замечает
+внешний commit по generation без `list`/графа и заканчивает stream при close.
+[Медленный подписчик](../../apps/server/tests/integration/events-backpressure.integration.test.ts)
+защищает ограниченную очередь SSE и последнее поколение;
+[стандартный порт](../../apps/server/tests/integration/local-policy-default-port.integration.test.ts) —
+канонизацию Host/Origin без ослабления loopback-проверки.
+[Завершение](../../apps/server/tests/integration/shutdown.integration.test.ts) освобождает
+недочитанный HTTP-ввод, включая отказ Origin, и ожидает принятый writer после disconnect.
+[Git Sync](../../apps/server/tests/integration/git-sync.integration.test.ts) подтверждает
+`refresh:false`, unknown/null/partial, отдельное чтение исхода `now` и точную корреляцию requestId.
+
+[Генерация](../../apps/server/tests/integration/openapi-generation.integration.test.ts)
+сопоставляет OpenAPI с реальными Nest-маршрутами и защищает связи схем.
+[Команды](../../apps/server/tests/integration/openapi-commands.integration.test.ts) сверяют
+формы всех опубликованных операций, пакетные ссылки и guards с Core. Настоящие реализации
+фичи/сценария проверяют дискриминацию `targetKind/scenarioId` в данных, карточке и ответе команды;
+схема успешного HTTP 200 не принимает ошибочную оболочку.
+[Адреса](../../apps/server/tests/integration/address-refs.integration.test.ts) сохраняют
+допустимые ключи `.` и `..`, версии и точные query-значения без предварительного разрешения ID.
+
+Интерактивные сценарии Web и границы браузерной приёмки описаны в
+[организации наборов](../../tests/README.md#браузерные-сценарии-web).
+HTTP-утверждения не означают автоматизированного покрытия поведения React-форм.
+
 ## Git-транспорт и постоянный обмен
 
 [Snapshot codec](../../apps/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip
@@ -385,8 +453,7 @@ origin, новый instance после crash и сохранение desired `st
 результатом запуска на другой ОС.
 
 [Штатный командный сценарий](../../apps/git-sync/tests/integration/team-replication.integration.test.ts)
-проверяет [AC-TEAM](../../GIT-SYNC-IMPLEMENTATION-SPEC.md#командный-сценарий-23-независимых-реплик)
-на трёх независимых SQLite/Git-репликах: два активных писателя и offline-return третьего
+проверяет обмен на трёх независимых SQLite/Git-репликах: два активных писателя и offline-return третьего
 участника. Он связывает коллизии ключей, настоящий non-FF, потерянный ответ push,
 crash с поздней записью, whole-batch конфликт с зависимым и независимым продолжением,
 явное решение и restore. Assertions сравнивают исходные ID/ссылки, точные тексты,
@@ -519,7 +586,24 @@ resolve blocked без повторного запроса. Full remaining diagn
 до запуска компонента, сохранение `recovery.failure` и исходных кодов recovery-ошибок
 без retry. Help/version остаются автономными.
 
-## Поставляемый бинарник и пользовательские маршруты
+[Адаптер Server](../../apps/cli/src/commands/server/register.unit.test.ts) проверяет
+автономные help/version всех действий, пустой list без проекта и создания home,
+дословные home/config/project/actor и port 0. Отсутствующий UUID stop/restart и неверный
+порт отвергаются до discovery компонента.
+
+## Поставляемые бинарники и пользовательские маршруты
+
+[Процессный набор Server](../../apps/server/tests/process/server.process.test.ts)
+проверяет автономные help/version без внешних Node-пакетов, Core-запись и первоначальную
+квитанцию из перенесённого бинарника, точный авторский контекст и Runtime-регистрацию.
+Проверяются байты готовых Vite-файлов, MIME, HEAD/304, SPA fallback и отказ отсутствующего
+asset. Несовместимый launch не публикует ready; EOF parent-lease завершает SSE и освобождает
+владение. Fixtures закрывают child и потоки также при отказе ожидания.
+[Упаковка](../../apps/server/tests/process/embedding.process.test.ts) удаляет build inputs
+после компиляции и сверяет встроенные lazy chunks, Workers, шрифты и public assets.
+[Процессный shutdown](../../apps/server/tests/process/shutdown.process.test.ts) проверяет
+незавершённый ввод, отмену Runtime после grace, удержание lease до cleanup и явный отказ
+по deadline с диагностикой stale, а не ложным успешным завершением.
 
 [Процессный набор CLI](../../apps/cli/tests/process/cli.process.test.ts) проверяет
 встроенную версию, код/поток ошибки ввода, несколько форм вложенной справки,
@@ -568,10 +652,17 @@ JSON-файла, применение через stdin, локальные сс�
 - [Worker](../../tests/e2e/git-sync-worker.e2e.test.ts) проверяет readiness `auto enable`,
   тот же instance из следующего CLI-процесса и сохранение stopped без ложного retry.
 
+[CLI/Server/Web/Git Sync](../../tests/e2e/server-web-workflow.e2e.test.ts) запрашивает
+встроенный HTML и production JavaScript у копии `relay-server` вне каталога сборки.
+Документ, созданный через HTTP, читается через CLI с точным Markdown; поздняя CLI-правка
+отклоняет исходный token HTTP-формы, replay и receipt сохраняют первоначальный результат.
+Явный HTTP `now` доставляет актуальную запись, а restore второй реплики сохраняет её ID
+и содержание. Этот маршрут проверяет поставку Web и API, не исполняя UI в браузере.
+
 ## Границы карты
 
-- Модульные проверки есть у Contracts, CLI и Core: общие правила идентичности,
-  декодеры знаний/истории и чистый граф задач проверяются без SQLite;
+- Общие правила идентичности, декодеры знаний/истории и чистый граф задач проверяются
+  модульными наборами Contracts, CLI и Core без SQLite;
   сохранение, транзакции и предметная интеграция — с реальной БД.
   Наличие unit-теста не заменяет проверку границы хранения.
 - Ограниченное чтение карточек проверяется для базовых страниц без предметных фильтров
@@ -587,8 +678,11 @@ JSON-файла, применение через stdin, локальные сс�
   пропускной способности и не доказывают устойчивость всех данных к отключению питания.
 - Измерения количества команд в секунду, p95/p99, памяти и пределов размера проекта
   относятся к [ручной нагрузке](CLI-PERFORMANCE.md); исполняемый стенд пока не создан.
-- Server, Web, HTTP API, PostgreSQL и MCP относятся к следующим этапам и не считаются
-  покрытыми этими наборами.
+- Настоящий native lifecycle Server, интерактивные browser-сценарии и HTTP-сценарии имеют
+  разные границы. Fake manager и выдача Web assets не подтверждают запуск службы после
+  login/reboot или работу форм в браузере.
+- Удалённый CLI, PostgreSQL, MCP и перенос данных первой версии остаются отложенными
+  и не считаются покрытыми этими наборами.
 
 При изменении гарантии обновите соответствующую строку и ссылку. Если проверка удалена,
 укажите оставшееся подтверждение либо уберите утверждение о покрытии. Новые случаи

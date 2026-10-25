@@ -1,0 +1,15 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-lg);
+  min-width: 0;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(260px, 1fr));
+  gap: var(--mantine-spacing-md);
+  overflow-x: auto;
+  padding-bottom: var(--mantine-spacing-md);
+  align-items: start;
+}

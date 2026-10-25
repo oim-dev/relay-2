@@ -1,0 +1,12 @@
+{
+  "extends": "@relay/typescript-config/browser.json",
+  "compilerOptions": {
+    "rootDir": "src/generated",
+    "outDir": "dist/generated",
+    "noEmit": false,
+    "declaration": true,
+    "exactOptionalPropertyTypes": false,
+    "noUnusedParameters": false
+  },
+  "include": ["src/generated/**/*.ts"]
+}

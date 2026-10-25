@@ -1,0 +1,23 @@
+.root {
+  margin: 0.75rem 1rem 0;
+  border: 1px solid var(--tasks-border);
+  border-radius: 0.5rem;
+  background: var(--tasks-surface);
+  color: var(--tasks-muted);
+  font-size: 0.75rem;
+
+  & summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 2.75rem;
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+  }
+}
+
+.details {
+  padding: 0.5rem 0.75rem 0.75rem;
+  overflow-wrap: anywhere;
+}

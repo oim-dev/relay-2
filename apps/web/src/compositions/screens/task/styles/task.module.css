@@ -1,0 +1,18 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-md);
+  min-width: 0;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--mantine-spacing-xl);
+}
+
+@media (min-width: 64em) {
+  .workspace {
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+  }
+}

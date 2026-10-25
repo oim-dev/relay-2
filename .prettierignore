@@ -4,3 +4,5 @@ dist/
 coverage/
 .artifacts/
 bun.lock
+apps/web/.templates/**
+packages/rest-sdk/src/generated/**

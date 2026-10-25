@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   native:
-    name: CLI и Git Sync — ${{ matrix.os }}
+    name: CLI, Server, Web и Git Sync — ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -43,6 +43,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
+
+      - name: Установить Node.js для Vite
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
 
       - name: Подготовить каталог журналов
         id: artifacts
@@ -166,7 +171,7 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: bun run typecheck 2>&1 | tee "$CI_LOG_DIR/typecheck.log"
 
-      - name: Собрать CLI и Git Sync
+      - name: Собрать CLI, Server с Web и Git Sync
         id: build
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         run: bun run build 2>&1 | tee "$CI_LOG_DIR/build.log"
@@ -175,15 +180,15 @@ jobs:
       # Отказ одного независимого пакета сохраняет ошибку job, но не обрывает проверки остальных.
       - name: Модульные тесты
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun --bun turbo run test:unit --continue=always 2>&1 | tee "$CI_LOG_DIR/unit.log"
+        run: bun x --no-install turbo run test:unit --continue=always 2>&1 | tee "$CI_LOG_DIR/unit.log"
 
       - name: Интеграционные тесты
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun --bun turbo run test:integration --continue=always 2>&1 | tee "$CI_LOG_DIR/integration.log"
+        run: bun x --no-install turbo run test:integration --continue=always 2>&1 | tee "$CI_LOG_DIR/integration.log"
 
-      - name: Процессные тесты CLI и Git Sync
+      - name: Процессные тесты CLI, Server и Git Sync
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: bun --bun turbo run test:process --filter=@relay/cli --filter=@relay/git-sync --continue=always 2>&1 | tee "$CI_LOG_DIR/process.log"
+        run: bun x --no-install turbo run test:process --filter=@relay/cli --filter=@relay/git-sync --filter=@relay/server --continue=always 2>&1 | tee "$CI_LOG_DIR/process.log"
 
       - name: Сквозные сценарии
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -228,6 +233,11 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4.3"
+
+      - name: Установить Node.js для Vite
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
 
       - name: Подготовить каталог журналов native service
         id: artifacts
