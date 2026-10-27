@@ -1,12 +1,13 @@
 import { Controller, Inject, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
 import { RelayError, type HttpApiSchemas } from "@relay/contracts";
-import { QueryService } from "@relay/core";
+import { QueryService, readRelationNeighborhood } from "@relay/core";
 import { Operation } from "../../http/operation";
 import { booleanQuery, filters, invalidInput, QueryInput, single } from "../../http/query";
 import { httpMessages } from "../../http/http.messages";
 import { ProjectsService } from "../projects/projects.service";
 import { readPage } from "./page";
+import { relationNeighborhoodQuery } from "./graph-view-query";
 
 /**
  * Адресные чтения, согласованные страницы и поиск с точной full/summary union формой Core.
@@ -14,6 +15,20 @@ import { readPage } from "./page";
 @ApiTags("Чтения и поиск")
 @Controller()
 export class QueriesController {
+  /**
+   * Читает bounded соседство существующих структурированных полей одним Core snapshot.
+   */
+  @Operation("relationNeighborhood")
+  async relations(
+    @Param("projectId") projectId: string,
+    @QueryInput() query: URLSearchParams,
+  ): Promise<HttpApiSchemas["relationNeighborhood"]> {
+    const input = relationNeighborhoodQuery(query);
+    return this.projects.run(projectId, (db) => ({
+      ok: true,
+      data: readRelationNeighborhood(db, input),
+    }));
+  }
   /**
    * Получает зарегистрированную область Runtime и владельца соединений.
    */

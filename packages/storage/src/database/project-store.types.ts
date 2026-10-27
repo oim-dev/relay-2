@@ -143,6 +143,11 @@ export interface ProjectStore {
    */
   listTaskGraph(): EntityRecord[];
   /**
+   * Узкие raw-источники timeline/связей без Markdown и журналов; Core проверяет выбранные поля.
+   * Сканирует metadata соответствующих owners/parts, не ограничивает размер проекта.
+   */
+  listGraphSources(view: "history" | "relations"): EntityRecord[];
+  /**
    * Вставляет карточку и адреса, включая её в атомарный changeset внешней транзакции.
    */
   insert(entity: EntityRecord): void;

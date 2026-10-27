@@ -1,0 +1,24 @@
+.root {
+  display: grid;
+  gap: 24px;
+  min-width: 0;
+}
+
+.day {
+  margin: 0 0 18px;
+  font-size: var(--mantine-font-size-xs);
+  font-weight: 500;
+  color: var(--tasks-muted);
+}
+
+.messages {
+  display: grid;
+  gap: 12px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.message {
+  min-width: 0;
+}

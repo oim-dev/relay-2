@@ -8,7 +8,7 @@ import type {
   ApplicationParticipationParams,
   ContextOkEnum,
   HttpError,
-  HttpSuccessResponseStructure1232816848186821381232816848179521391232816848128845411232816848099015F2A3Dfc0A62,
+  HttpSuccessResponseStructure1232816848244127111232816848236827121232816848163953661232816848011578217B64Fbcc39,
 } from "../data-contracts.js";
 import type { ApiRequestClient, RequestParams } from "../http-client.js";
 
@@ -25,7 +25,7 @@ export const applicationParticipation = (
   params: RequestParams = {},
 ) =>
   http.request<
-    HttpSuccessResponseStructure1232816848186821381232816848179521391232816848128845411232816848099015F2A3Dfc0A62,
+    HttpSuccessResponseStructure1232816848244127111232816848236827121232816848163953661232816848011578217B64Fbcc39,
     {
       ok: ContextOkEnum;
       /** Машинная диагностика HTTP без стека и процессного exit code. */

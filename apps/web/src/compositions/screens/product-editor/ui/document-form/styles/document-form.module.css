@@ -1,0 +1,39 @@
+.root {
+  max-width: 62rem;
+  min-width: 0;
+}
+
+.fields {
+  min-width: 0;
+  margin: 0;
+  padding: 1.25rem;
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-surface);
+
+  @media (--md) {
+    padding: 1.75rem;
+  }
+}
+
+.footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-chrome);
+  box-shadow: var(--tasks-card-shadow);
+}
+
+.dirty {
+  text-transform: none;
+  letter-spacing: 0;
+}

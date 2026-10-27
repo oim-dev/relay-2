@@ -25,6 +25,7 @@ import { historyContext } from "./operations/history-context.js";
 import { historyIntents } from "./operations/history-intents.js";
 import { historySession } from "./operations/history-session.js";
 import { historySessions } from "./operations/history-sessions.js";
+import { historyTimeline } from "./operations/history-timeline.js";
 import { historyTree } from "./operations/history-tree.js";
 import { openapi } from "./operations/openapi.js";
 import { overview } from "./operations/overview.js";
@@ -35,9 +36,11 @@ import { planStages } from "./operations/plan-stages.js";
 import { projectCheck } from "./operations/project-check.js";
 import { projectStatus } from "./operations/project-status.js";
 import { receipt } from "./operations/receipt.js";
+import { relationNeighborhood } from "./operations/relation-neighborhood.js";
 import { releasePlans } from "./operations/release-plans.js";
 import { releaseProgress } from "./operations/release-progress.js";
 import { search } from "./operations/search.js";
+import { taskCandidates } from "./operations/task-candidates.js";
 import { taskChildren } from "./operations/task-children.js";
 import { taskComment } from "./operations/task-comment.js";
 import { taskComments } from "./operations/task-comments.js";
@@ -47,6 +50,7 @@ import { taskDependencies } from "./operations/task-dependencies.js";
 import { taskMemberships } from "./operations/task-memberships.js";
 import { taskProgress } from "./operations/task-progress.js";
 import { taskRelated } from "./operations/task-related.js";
+import { taskViews } from "./operations/task-views.js";
 
 export const operationsTree = {
   server: {
@@ -59,6 +63,7 @@ export const operationsTree = {
     projectCheck: projectCheck,
   },
   чтенияИПоиск: {
+    relationNeighborhood: relationNeighborhood,
     entity: entity,
     entities: entities,
     getMany: getMany,
@@ -75,6 +80,8 @@ export const operationsTree = {
     applicationParticipation: applicationParticipation,
   },
   задачи: {
+    taskViews: taskViews,
+    taskCandidates: taskCandidates,
     taskProgress: taskProgress,
     taskComments: taskComments,
     taskComment: taskComment,
@@ -94,6 +101,7 @@ export const operationsTree = {
     releasePlans: releasePlans,
   },
   история: {
+    historyTimeline: historyTimeline,
     historySessions: historySessions,
     historySession: historySession,
     historyContext: historyContext,

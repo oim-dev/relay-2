@@ -1,20 +1,18 @@
-import type { ReactElement } from "react";
-import { SWRConfig } from "swr";
 import { RouterProvider } from "react-router-dom";
+import { DataProvider } from "infra/query-cache";
 import { ThemeProvider } from "ui/themes";
-import { router } from "./router/app-router";
+import { appRouter } from "./router/app-router";
 
 /**
- * Связывает визуальный Provider, GET-кеш и дерево маршрутов приложения.
+ * Подключает публичные провайдеры и маршруты приложения.
+ *
+ * Используется для:
+ *  - запуска браузерного рабочего пространства
  */
-export function App(): ReactElement {
-  return (
-    <ThemeProvider>
-      <SWRConfig
-        value={{ revalidateOnFocus: true, shouldRetryOnError: false, keepPreviousData: false }}
-      >
-        <RouterProvider router={router} />
-      </SWRConfig>
-    </ThemeProvider>
-  );
-}
+export const App = () => (
+  <ThemeProvider>
+    <DataProvider>
+      <RouterProvider router={appRouter} />
+    </DataProvider>
+  </ThemeProvider>
+);

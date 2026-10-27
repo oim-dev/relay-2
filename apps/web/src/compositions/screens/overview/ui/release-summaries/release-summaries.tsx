@@ -1,0 +1,52 @@
+import clsx from "clsx";
+import { RELEASE_STATUS_COUNT_LABELS } from "../../config/overview.config";
+import { ReleaseGroup } from "./ui/release-group/release-group";
+import { ReleasePreparation } from "./ui/release-preparation/release-preparation";
+import type { ReleaseSummariesProps } from "./types/release-summaries-props.type";
+import styles from "./styles/release-summaries.module.css";
+
+/**
+ * Показывает статусы и ограниченные подборки релизов в доступном порядке Core,
+ * а также подготовку выпуска: что можно готовить к выпуску и что ещё не включено в релиз.
+ *
+ * Используется для:
+ *  - оценки выпусков проекта и фактической готовности их состава
+ */
+export const ReleaseSummaries = (props: ReleaseSummariesProps) => {
+  const { releases, preparation, snapshotVersion, basePath, className, ...rootAttrs } = props;
+  const statusItems = Object.entries(RELEASE_STATUS_COUNT_LABELS).map(([status, label]) => ({
+    status,
+    label,
+    count: releases.byStatus[status as keyof typeof RELEASE_STATUS_COUNT_LABELS],
+  }));
+  return (
+    <div {...rootAttrs} className={clsx(styles.root, className)}>
+      <ul className={styles.statuses} aria-label="Релизы по статусам">
+        {statusItems.map((item) => (
+          <li key={item.status}>
+            {item.label} <strong>{item.count}</strong>
+          </li>
+        ))}
+      </ul>
+      <ReleaseGroup
+        title="Запланированные · по ключу"
+        emptyText="Запланированных релизов нет."
+        preview={releases.upcoming}
+        basePath={basePath}
+      />
+      <ReleaseGroup
+        title="Выпущенные · недавно изменённые"
+        emptyText="Выпущенных релизов пока нет."
+        preview={releases.recent}
+        basePath={basePath}
+      />
+      {preparation !== null && (
+        <ReleasePreparation
+          preparation={preparation}
+          snapshotVersion={snapshotVersion}
+          basePath={basePath}
+        />
+      )}
+    </div>
+  );
+};

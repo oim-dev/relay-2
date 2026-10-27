@@ -5,7 +5,7 @@ import type { ThemeProviderProps } from "./types/theme-provider-props.type";
 import "../../styles/index.css";
 
 /**
- * Подключает визуальную систему Relay и цветовые схемы.
+ * Подключает визуальную систему Tasks и цветовые схемы.
  *
  * Используется для:
  *  - согласованного оформления доски, диалогов и уведомлений

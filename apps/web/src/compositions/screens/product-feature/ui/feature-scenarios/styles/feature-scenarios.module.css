@@ -1,0 +1,31 @@
+.root {
+  min-width: 0;
+  scroll-margin-top: 6rem;
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.title {
+  margin: 0 0 0.3rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.sections {
+  display: grid;
+  gap: 1rem;
+}
+
+.empty {
+  padding: 1.5rem;
+  border: 1px dashed var(--tasks-selected-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-surface);
+}

@@ -1,10 +1,11 @@
 import { Controller, Inject, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
-import { HistoryService } from "@relay/core";
+import { HistoryService, readHistoryTimeline } from "@relay/core";
 import type { HttpApiSchemas } from "@relay/contracts";
 import { Operation } from "../../http/operation";
 import { booleanQuery, filters, QueryInput, single } from "../../http/query";
 import { ProjectsService } from "../projects/projects.service";
+import { historyTimelineQuery } from "../queries/graph-view-query";
 
 /**
  * История текущего Core: сессии, контекст, дерево и неизменяемые материалы.
@@ -13,6 +14,20 @@ import { ProjectsService } from "../projects/projects.service";
 @ApiTags("История")
 @Controller()
 export class HistoryController {
+  /**
+   * Возвращает компактное окно и границы одного поколения без Markdown соседних работ.
+   */
+  @Operation("historyTimeline")
+  async timeline(
+    @Param("projectId") projectId: string,
+    @QueryInput() query: URLSearchParams,
+  ): Promise<HttpApiSchemas["historyTimeline"]> {
+    const input = historyTimelineQuery(query);
+    return this.projects.run(projectId, (db) => ({
+      ok: true,
+      data: readHistoryTimeline(db, input),
+    }));
+  }
   /**
    * Получает владельца проектных соединений и согласованных snapshots.
    */

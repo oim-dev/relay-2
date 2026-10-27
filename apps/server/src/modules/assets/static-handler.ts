@@ -1,6 +1,7 @@
 import type { ServerStaticHandler } from "../../server.types";
 import type { WebAsset } from "./assets.types";
 import { loadWebAssets } from "./load-assets";
+import { isSpaRoute } from "./spa-routes";
 
 /**
  * Канонизирует ровно один уровень URL escaping; separators/dot/NUL не адресуют другой файл.
@@ -34,12 +35,7 @@ function navigation(request: Request, path: string): boolean {
         !parameters.some((parameter) => /^\s*q=0(?:\.0*)?\s*$/.test(parameter))
       );
     });
-  return (
-    Boolean(html) &&
-    /^\/projects\/[^/]+(?:\/(?:documents|board|plans|releases|history)|\/(?:knowledge|entities|tasks|plans|releases)\/[^/]+|\/history\/sessions\/[^/]+)?\/?$/.test(
-      path,
-    )
-  );
+  return Boolean(html) && isSpaRoute(path);
 }
 
 /**
@@ -51,12 +47,13 @@ export function createStaticHandler(assets: ReadonlyMap<string, WebAsset>): Serv
     if (request.method !== "GET" && request.method !== "HEAD") {
       return null;
     }
-    const path = canonicalAssetPath(new URL(request.url).pathname);
-    if (path === null || path === "/api" || path.startsWith("/api/")) {
+    const pathname = new URL(request.url).pathname;
+    const path = canonicalAssetPath(pathname);
+    if (path === "/api" || path?.startsWith("/api/")) {
       return null;
     }
-    const direct = assets.get(path === "/" ? "/index.html" : path);
-    const fallback = direct === undefined && navigation(request, path);
+    const direct = path === null ? undefined : assets.get(path === "/" ? "/index.html" : path);
+    const fallback = direct === undefined && navigation(request, pathname);
     const asset = direct ?? (fallback ? assets.get("/index.html") : undefined);
     if (asset === undefined) {
       return null;

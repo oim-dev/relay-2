@@ -213,6 +213,10 @@ export type HttpCommandRequest =
 /** Именованные схемы генератора OpenAPI. Корень доступен без Runtime, Core и открытия БД. */
 export interface HttpApiSchemas {
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+  taskViews: HttpResponseTaskViewPage527Ac6Df7721;
+  /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+  taskCandidates: HttpResponseTaskCandidatePage7308B40Bf161;
+  /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   projectStatus: HttpResponseHttpProjectStatusD97Befac9Cba;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   projectCheck: HttpResponseHttpProjectCheck3B7A9Cd592Ca;
@@ -221,7 +225,7 @@ export interface HttpApiSchemas {
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   documentLinks: HttpResponseDocumentLinksC0216001Bef9;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
-  applicationParticipation: HttpResponseStructure123281684818682138123281684817952139123281684812884541123281684809901Bee6Ae0D9D13;
+  applicationParticipation: HttpResponseStructure123281684824412711123281684823682712123281684816395366123281684801157879Bfc6B6554B;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   taskProgress: HttpResponseTaskProgress496Cd19B5A37;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
@@ -254,6 +258,10 @@ export interface HttpApiSchemas {
   releasePlans: HttpResponseReleasePlans6F14Ae2F14A2;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   historySessions: HttpHistorySessionsResponse;
+  /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+  historyTimeline: HttpResponseHistoryTimelinePageB6F0099D9Bf1;
+  /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+  relationNeighborhood: HttpResponseRelationNeighborhoodF0722D91E28E;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
   historySession: HttpResponseHistorySessionB7415Fd33Dde;
   /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
@@ -302,8 +310,8 @@ export interface HttpApiSchemas {
 }
 
 /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
-export type HttpResponseHttpProjectStatusD97Befac9Cba =
-  | HttpSuccessResponseHttpProjectStatus82824976Ba5E
+export type HttpResponseTaskViewPage527Ac6Df7721 =
+  | HttpSuccessResponseTaskViewPageD394E3Db4540
   | {
       ok: false;
       /** Машинная диагностика HTTP без стека и процессного exit code. */
@@ -311,21 +319,81 @@ export type HttpResponseHttpProjectStatusD97Befac9Cba =
     };
 
 /** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
-export interface HttpSuccessResponseHttpProjectStatus82824976Ba5E {
+export interface HttpSuccessResponseTaskViewPageD394E3Db4540 {
   ok: true;
-  /** Текущий технический status Core; размер основного SQLite файла не включает WAL/SHM. */
-  data: HttpProjectStatus;
+  /** Ограниченная страница, сводка и поколение одного снимка проекта. */
+  data: TaskViewPage;
   /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
   meta?: HttpMeta;
 }
 
-/** Текущий технический status Core; размер основного SQLite файла не включает WAL/SHM. */
-export interface HttpProjectStatus {
-  projectId: string;
-  databasePath: string;
-  bytes: number;
+/** Ограниченная страница, сводка и поколение одного снимка проекта. */
+export interface TaskViewPage {
+  items: TaskView[];
+  total: number;
+  /** Сводка всего выбранного набора задач, а не готовность продукта или приложения. */
+  counts: TaskViewCounts;
   generation: number;
-  records: number;
+  nextOffset: number | null;
+}
+
+/** Компактная карточка задачи без описания, текстов критериев и журнала комментариев. Все ссылки, прогресс и реквизиты доски относятся к одному снимку страницы. */
+export interface TaskView {
+  id: string;
+  key: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+  title: string;
+  boardId: string;
+  boardSlug: string;
+  /** Колонка задачи из общего перечня TASK_COLUMNS. */
+  column: TaskColumn;
+  parentId: string | null;
+  dependencies: string[];
+  related: string[];
+  targets: TaskViewTarget[];
+  acceptance: {
+    total: number;
+    completed: number;
+  };
+  /** Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core. */
+  progress: TaskProgress;
+}
+
+/** Идентичность цели задачи, разрешённая в текущем снимке. */
+export interface TaskViewTarget {
+  kind: TaskViewTargetKindEnum;
+  id: string;
+}
+
+/** Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core. */
+export interface TaskProgress {
+  completed: boolean;
+  canComplete: boolean;
+  blockers: string[];
+}
+
+/** Сводка всего выбранного набора задач, а не готовность продукта или приложения. */
+export interface TaskViewCounts {
+  total: number;
+  completed: number;
+  allCompleted: boolean;
+  targetedCompleted: number;
+  targetedTotal: number;
+  blocked: number;
+  columns: ReadonlyRecordTaskColumnNumber3Fa6B582Caa2;
+}
+
+export interface ReadonlyRecordTaskColumnNumber3Fa6B582Caa2 {
+  inbox: number;
+  ready: number;
+  "in-progress": number;
+  review: number;
+  done: number;
+  cancelled: number;
 }
 
 /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
@@ -353,6 +421,96 @@ export interface HttpError {
 }
 
 export type ReadonlyRecordStringUnknown82Dff58D4Ffe = Record<string, any>;
+
+/** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+export type HttpResponseTaskCandidatePage7308B40Bf161 =
+  | HttpSuccessResponseTaskCandidatePage8492464A4C3D
+  | {
+      ok: false;
+      /** Машинная диагностика HTTP без стека и процессного exit code. */
+      error: HttpError;
+    };
+
+/** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
+export interface HttpSuccessResponseTaskCandidatePage8492464A4C3D {
+  ok: true;
+  /** Страница кандидатов с итогами после проверки доступности и до окна. */
+  data: TaskCandidatePage;
+  /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
+  meta?: HttpMeta;
+}
+
+/** Страница кандидатов с итогами после проверки доступности и до окна. */
+export interface TaskCandidatePage {
+  total: number;
+  /** Сводка всего выбранного набора задач, а не готовность продукта или приложения. */
+  counts: TaskViewCounts;
+  generation: number;
+  nextOffset: number | null;
+  items: TaskCandidate[];
+}
+
+/** Кандидат с текущим включением; null означает отсутствие открытого плана. */
+export interface TaskCandidate {
+  id: string;
+  key: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  updatedBy: string;
+  title: string;
+  boardId: string;
+  boardSlug: string;
+  /** Колонка задачи из общего перечня TASK_COLUMNS. */
+  column: TaskColumn;
+  parentId: string | null;
+  dependencies: string[];
+  related: string[];
+  targets: TaskViewTarget[];
+  acceptance: {
+    total: number;
+    completed: number;
+  };
+  /** Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core. */
+  progress: TaskProgress;
+  assignment: TaskViewAssignment | null;
+}
+
+/** Проверенное текущее включение задачи в незакрытый план. */
+export interface TaskViewAssignment {
+  planId: string;
+  planKey: string;
+  stageId: string;
+  stageTitle: string;
+}
+
+/** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+export type HttpResponseHttpProjectStatusD97Befac9Cba =
+  | HttpSuccessResponseHttpProjectStatus82824976Ba5E
+  | {
+      ok: false;
+      /** Машинная диагностика HTTP без стека и процессного exit code. */
+      error: HttpError;
+    };
+
+/** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
+export interface HttpSuccessResponseHttpProjectStatus82824976Ba5E {
+  ok: true;
+  /** Текущий технический status Core; размер основного SQLite файла не включает WAL/SHM. */
+  data: HttpProjectStatus;
+  /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
+  meta?: HttpMeta;
+}
+
+/** Текущий технический status Core; размер основного SQLite файла не включает WAL/SHM. */
+export interface HttpProjectStatus {
+  projectId: string;
+  databasePath: string;
+  bytes: number;
+  generation: number;
+  records: number;
+}
 
 /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
 export type HttpResponseHttpProjectCheck3B7A9Cd592Ca =
@@ -452,8 +610,8 @@ export interface DocumentRelationTarget {
 }
 
 /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
-export type HttpResponseStructure123281684818682138123281684817952139123281684812884541123281684809901Bee6Ae0D9D13 =
-  | HttpSuccessResponseStructure1232816848186821381232816848179521391232816848128845411232816848099015F2A3Dfc0A62
+export type HttpResponseStructure123281684824412711123281684823682712123281684816395366123281684801157879Bfc6B6554B =
+  | HttpSuccessResponseStructure1232816848244127111232816848236827121232816848163953661232816848011578217B64Fbcc39
   | {
       ok: false;
       /** Машинная диагностика HTTP без стека и процессного exit code. */
@@ -461,7 +619,7 @@ export type HttpResponseStructure12328168481868213812328168481795213912328168481
     };
 
 /** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
-export interface HttpSuccessResponseStructure1232816848186821381232816848179521391232816848128845411232816848099015F2A3Dfc0A62 {
+export interface HttpSuccessResponseStructure1232816848244127111232816848236827121232816848163953661232816848011578217B64Fbcc39 {
   ok: true;
   data: {
     application: string;
@@ -536,13 +694,6 @@ export interface HttpSuccessResponseTaskProgressD32D5Aab3D5A {
   data: TaskProgress;
   /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
   meta?: HttpMeta;
-}
-
-/** Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core. */
-export interface TaskProgress {
-  completed: boolean;
-  canComplete: boolean;
-  blockers: string[];
 }
 
 /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
@@ -1056,6 +1207,215 @@ export interface HistoryOperator {
   name: string | null;
   email: string | null;
   source: HistoryOperatorSourceEnum;
+}
+
+/** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+export type HttpResponseHistoryTimelinePageB6F0099D9Bf1 =
+  | HttpSuccessResponseHistoryTimelinePage8096B1D0Cebc
+  | {
+      ok: false;
+      /** Машинная диагностика HTTP без стека и процессного exit code. */
+      error: HttpError;
+    };
+
+/** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
+export interface HttpSuccessResponseHistoryTimelinePage8096B1D0Cebc {
+  ok: true;
+  /** Окно одного снимка. openEnds имеет отдельный компактный порядок: старые незакрытые работы не исчезают из-за их времени вне items. Его окно использует тот же offset/limit; totalOpenEnds <= total, поэтому обычное продолжение дочитывает оба состава. Branches содержит только владельцев/авторов концов и цепочки предков: O(limit * depth). */
+  data: HistoryTimelinePage;
+  /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
+  meta?: HttpMeta;
+}
+
+/** Окно одного снимка. openEnds имеет отдельный компактный порядок: старые незакрытые работы не исчезают из-за их времени вне items. Его окно использует тот же offset/limit; totalOpenEnds <= total, поэтому обычное продолжение дочитывает оба состава. Branches содержит только владельцев/авторов концов и цепочки предков: O(limit * depth). */
+export interface HistoryTimelinePage {
+  items: HistoryTimelinePoint[];
+  openEnds: HistoryTimelinePoint[];
+  totalOpenEnds: number;
+  branches: OmitHistoryTimelineSessionRunsB4Eb5Ba0Ef7F[];
+  runs: HistoryTimelineRun[];
+  edges: HistoryTimelineEdge[];
+  boundaryNodes: HistoryTimelineBoundary[];
+  total: number;
+  nextOffset: number | null;
+  generation: number;
+}
+
+/** Материал и сохранённые границы lifecycle различаются дискриминатором. */
+export type HistoryTimelinePoint =
+  | {
+      kind: "checkpoint";
+      checkpointId: string;
+      /** Вид неизменяемого материала истории из historyCheckpointKinds. */
+      checkpointKind: HistoryCheckpointKind;
+      runId: string;
+      runSessionId: string;
+      intentState: HistoryTimelinePointIntentStateEnum;
+      id: string;
+      sessionId: string;
+      sequence: number;
+      at: string;
+      title: string;
+      summary: string;
+      predecessorRunId: string | null;
+    }
+  | {
+      kind: HistoryTimelinePointKindEnum;
+      runId: string | null;
+      runSessionId: string | null;
+      checkpointId: null;
+      checkpointKind: null;
+      intentState: null;
+      id: string;
+      sessionId: string;
+      sequence: number;
+      at: string;
+      title: string;
+      summary: string;
+      predecessorRunId: string | null;
+    };
+
+export type OmitHistoryTimelineSessionRunsB4Eb5Ba0Ef7F =
+  PickHistoryTimelineSessionExcludeTitleStatusCurrentRunIdParentSessionIdOriginCheckpointIdCreatedByRunIdClosedAtRunsIdKeyRevisionCreatedAtRuns908499A99A98;
+
+export interface PickHistoryTimelineSessionExcludeTitleStatusCurrentRunIdParentSessionIdOriginCheckpointIdCreatedByRunIdClosedAtRunsIdKeyRevisionCreatedAtRuns908499A99A98 {
+  title: string;
+  /** Состояние рабочей сессии из historySessionStatuses. */
+  status: HistorySessionStatus;
+  currentRunId: string | null;
+  parentSessionId: string | null;
+  originCheckpointId: string | null;
+  createdByRunId: string | null;
+  closedAt: string | null;
+  id: string;
+  key: string;
+  revision: number;
+  createdAt: string;
+}
+
+/** Сохранённая атрибуция участия без полных причин подключения и окончания. */
+export interface HistoryTimelineRun {
+  sessionId: string;
+  id: string;
+  key: string;
+  actor: string;
+  state: HistoryTimelineRunStateEnum;
+  operator: HistoryOperator | null;
+  client: string | null;
+  sourceSessionId: string | null;
+  predecessorRunId: string | null;
+  startedAt: string;
+  endedAt: string | null;
+}
+
+/** Рёбра хронологии и происхождения; координаты и layout не входят в Core. */
+export type HistoryTimelineEdge =
+  | {
+      kind: "sequence";
+      from: string;
+      to: string;
+    }
+  | {
+      kind: "fork";
+      fromSessionId: string;
+      to: string;
+    }
+  | {
+      kind: "branch-end";
+      from: string;
+      toSessionId: string;
+    }
+  | {
+      kind: "root-start";
+      from: null;
+      to: string;
+    }
+  | {
+      kind: "root-end";
+      from: string;
+      to: null;
+    };
+
+/** Невидимый конец хронологического ребра без полного содержания точки. */
+export interface HistoryTimelineBoundary {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  at: string;
+  kind: HistoryTimelineBoundaryKindEnum;
+  side: HistoryTimelineBoundarySideEnum;
+}
+
+/** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
+export type HttpResponseRelationNeighborhoodF0722D91E28E =
+  | HttpSuccessResponseRelationNeighborhood67A0C92E21A7
+  | {
+      ok: false;
+      /** Машинная диагностика HTTP без стека и процессного exit code. */
+      error: HttpError;
+    };
+
+/** Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа. */
+export interface HttpSuccessResponseRelationNeighborhood67A0C92E21A7 {
+  ok: true;
+  /** Узлы/рёбра одного snapshot; endpoints не более двух на ребро. Полный проход metadata O(N+E) пока необходим для входящих связей, но не передаёт тела. */
+  data: RelationNeighborhood;
+  /** Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки. */
+  meta?: HttpMeta;
+}
+
+/** Узлы/рёбра одного snapshot; endpoints не более двух на ребро. Полный проход metadata O(N+E) пока необходим для входящих связей, но не передаёт тела. */
+export interface RelationNeighborhood {
+  root: RelationReference | null;
+  nodes: RelationViewNode[];
+  edges: RelationViewEdge[];
+  endpoints: RelationViewNode[];
+  paths: RelationViewPath[];
+  totalNodes: number;
+  totalEdges: number;
+  nextOffset: number | null;
+  boundary: RelationReference[];
+  depthLimited: boolean;
+  generation: number;
+}
+
+/** Постоянный адрес существующего отношения, не произвольный вид графового узла. */
+export type RelationReference = PickEntityIdentityIdKindBbe505214477;
+
+export interface PickEntityIdentityIdKindBbe505214477 {
+  id: string;
+  /** Вид локальной сущности, выведенный из единого перечня ENTITY_KINDS. */
+  kind: EntityKind;
+}
+
+/** Компактная карточка узла без полного содержания. */
+export interface RelationViewNode {
+  /** Постоянный адрес существующего отношения, не произвольный вид графового узла. */
+  ref: RelationReference;
+  key: string;
+  title: string;
+  status: string;
+  revision: number;
+}
+
+/** Представление реально сохранённого структурированного поля Core. Отдельная сущность-ребро и её авторство/время не выдумываются. */
+export interface RelationViewEdge {
+  id: string;
+  type: string;
+  /** Постоянный адрес существующего отношения, не произвольный вид графового узла. */
+  from: RelationReference;
+  /** Постоянный адрес существующего отношения, не произвольный вид графового узла. */
+  to: RelationReference;
+  description: string;
+  revision: number;
+}
+
+/** Один кратчайший путь в выбранном направлении. */
+export interface RelationViewPath {
+  /** Постоянный адрес существующего отношения, не произвольный вид графового узла. */
+  target: RelationReference;
+  nodes: RelationReference[];
+  edges: string[];
 }
 
 /** Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators. */
@@ -9017,6 +9377,8 @@ export type HttpCommandCheckpointCancel = {
   expectedVersion?: string;
 };
 
+export type TaskViewTargetKindEnum = "feature" | "scenario" | "implementation";
+
 export type DocumentRelationTypeEnum = "documents" | "references";
 
 export type DocumentRelationTargetKindEnum =
@@ -9062,6 +9424,33 @@ export type HistoryOperatorSourceEnum =
   | "environment"
   | "git"
   | "inherited";
+
+export type HistoryTimelinePointIntentStateEnum =
+  | "open"
+  | "completed"
+  | "cancelled";
+
+export type HistoryTimelinePointKindEnum =
+  | "session-created"
+  | "session-closed"
+  | "run-started"
+  | "run-ended";
+
+export type HistoryTimelineRunStateEnum =
+  | "active"
+  | "paused"
+  | "transferred"
+  | "completed"
+  | "cancelled";
+
+export type HistoryTimelineBoundaryKindEnum =
+  | "checkpoint"
+  | "session-created"
+  | "session-closed"
+  | "run-started"
+  | "run-ended";
+
+export type HistoryTimelineBoundarySideEnum = "before" | "after";
 
 export type EntityDataApplicationFields1B106E990F1ETypeEnum =
   | "frontend"
@@ -9757,6 +10146,50 @@ export interface ProjectCheckParams {
   projectId: string;
 }
 
+export interface RelationNeighborhoodParams {
+  ref?: string;
+  component?: boolean;
+  /**
+   * @min 0
+   * @max 100
+   * @default 3
+   */
+  depth?: number;
+  /** @default "both" */
+  direction?: DirectionEnum;
+  type?: string;
+  q?: string;
+  /**
+   * @min 0
+   * @max 9007199254740991
+   * @default 0
+   */
+  offset?: number;
+  /**
+   * @min 1
+   * @max 100
+   * @default 50
+   */
+  limit?: number;
+  /**
+   * Исходное поколение; обязательно при offset>0.
+   * @min 0
+   * @max 9007199254740991
+   */
+  generation?: number;
+  /** @minLength 1 */
+  projectId: string;
+}
+
+/** @default "both" */
+export type DirectionEnum = "both" | "incoming" | "outgoing";
+
+/** @default "both" */
+export type RelationNeighborhoodParams1DirectionEnum =
+  | "both"
+  | "incoming"
+  | "outgoing";
+
 export interface EntityParams {
   /**
    * Одиночный исходный адрес Core; повторы запрещены, '.' и '..' сохраняются дословно.
@@ -9946,6 +10379,157 @@ export interface ApplicationParticipationParams {
   ref: string;
 }
 
+export interface TaskViewsParams {
+  /**
+   * @min 0
+   * @max 9007199254740991
+   * @default 0
+   */
+  offset?: number;
+  /**
+   * @min 1
+   * @max 100
+   * @default 40
+   */
+  limit?: number;
+  /** @default "key" */
+  sort?: SortEnum1;
+  /**
+   * Исходное поколение; обязательно при offset > 0.
+   * @min 0
+   * @max 9007199254740991
+   */
+  generation?: number;
+  ref?: string;
+  board?: string;
+  column?: ColumnEnum;
+  parentId?: string;
+  q?: string;
+  /**
+   * @maxItems 200
+   * @minItems 1
+   */
+  refs?: string[];
+  target?: string;
+  productTarget?: string;
+  searchIn?: SearchInEnum;
+  completion?: CompletionEnum;
+  readiness?: ReadinessEnum;
+  /** @minLength 1 */
+  projectId: string;
+}
+
+/** @default "key" */
+export type SortEnum1 = "key" | "title" | "updated";
+
+export type ColumnEnum =
+  | "inbox"
+  | "ready"
+  | "in-progress"
+  | "review"
+  | "done"
+  | "cancelled";
+
+export type SearchInEnum = "title" | "all";
+
+export type CompletionEnum = "finished" | "unfinished";
+
+export type ReadinessEnum = "ready" | "blocked";
+
+/** @default "key" */
+export type TaskViewsParams1SortEnum = "key" | "title" | "updated";
+
+export type TaskViewsParams1ColumnEnum =
+  | "inbox"
+  | "ready"
+  | "in-progress"
+  | "review"
+  | "done"
+  | "cancelled";
+
+export type TaskViewsParams1SearchInEnum = "title" | "all";
+
+export type TaskViewsParams1CompletionEnum = "finished" | "unfinished";
+
+export type TaskViewsParams1ReadinessEnum = "ready" | "blocked";
+
+export interface TaskCandidatesParams {
+  /**
+   * @min 0
+   * @max 9007199254740991
+   * @default 0
+   */
+  offset?: number;
+  /**
+   * @min 1
+   * @max 100
+   * @default 40
+   */
+  limit?: number;
+  /** @default "key" */
+  sort?: SortEnum2;
+  /**
+   * Исходное поколение; обязательно при offset > 0.
+   * @min 0
+   * @max 9007199254740991
+   */
+  generation?: number;
+  ref?: string;
+  board?: string;
+  column?: ColumnEnum1;
+  parentId?: string;
+  q?: string;
+  /**
+   * @maxItems 200
+   * @minItems 1
+   */
+  refs?: string[];
+  target?: string;
+  productTarget?: string;
+  searchIn?: SearchInEnum1;
+  completion?: CompletionEnum1;
+  readiness?: ReadinessEnum1;
+  plan?: string;
+  stageId?: string;
+  availableOnly?: boolean;
+  /** @minLength 1 */
+  projectId: string;
+}
+
+/** @default "key" */
+export type SortEnum2 = "key" | "title" | "updated";
+
+export type ColumnEnum1 =
+  | "inbox"
+  | "ready"
+  | "in-progress"
+  | "review"
+  | "done"
+  | "cancelled";
+
+export type SearchInEnum1 = "title" | "all";
+
+export type CompletionEnum1 = "finished" | "unfinished";
+
+export type ReadinessEnum1 = "ready" | "blocked";
+
+/** @default "key" */
+export type TaskCandidatesParams1SortEnum = "key" | "title" | "updated";
+
+export type TaskCandidatesParams1ColumnEnum =
+  | "inbox"
+  | "ready"
+  | "in-progress"
+  | "review"
+  | "done"
+  | "cancelled";
+
+export type TaskCandidatesParams1SearchInEnum = "title" | "all";
+
+export type TaskCandidatesParams1CompletionEnum = "finished" | "unfinished";
+
+export type TaskCandidatesParams1ReadinessEnum = "ready" | "blocked";
+
 export interface TaskProgressParams {
   /** @minLength 1 */
   projectId: string;
@@ -10057,6 +10641,30 @@ export interface ReleasePlansParams {
   projectId: string;
   /** @minLength 1 */
   ref: string;
+}
+
+export interface HistoryTimelineParams {
+  session?: string;
+  /**
+   * @min 0
+   * @max 9007199254740991
+   * @default 0
+   */
+  offset?: number;
+  /**
+   * @min 1
+   * @max 100
+   * @default 50
+   */
+  limit?: number;
+  /**
+   * Исходное поколение; обязательно при offset>0.
+   * @min 0
+   * @max 9007199254740991
+   */
+  generation?: number;
+  /** @minLength 1 */
+  projectId: string;
 }
 
 export interface HistorySessionsParams {

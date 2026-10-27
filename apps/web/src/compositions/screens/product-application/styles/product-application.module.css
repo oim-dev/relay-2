@@ -1,0 +1,9 @@
+.root {
+  display: grid;
+  gap: 2rem;
+  min-width: 0;
+}
+
+.description {
+  min-width: 0;
+}

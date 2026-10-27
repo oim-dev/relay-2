@@ -6,12 +6,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "taskViews": { "$ref": "#/definitions/HttpResponse_TaskViewPage_527ac6df7721" },
+        "taskCandidates": { "$ref": "#/definitions/HttpResponse_TaskCandidatePage_7308b40bf161" },
         "projectStatus": { "$ref": "#/definitions/HttpResponse_HttpProjectStatus_d97befac9cba" },
         "projectCheck": { "$ref": "#/definitions/HttpResponse_HttpProjectCheck_3b7a9cd592ca" },
         "documentSections": { "$ref": "#/definitions/HttpResponse_DocumentSections_1c50169679fd" },
         "documentLinks": { "$ref": "#/definitions/HttpResponse_DocumentLinks_c0216001bef9" },
         "applicationParticipation": {
-          "$ref": "#/definitions/HttpResponse_structure_1232816848_1868_2138_1232816848_1795_2139_1232816848_1288_4541_1232816848_0_9901_bee6ae0d9d13"
+          "$ref": "#/definitions/HttpResponse_structure_1232816848_2441_2711_1232816848_2368_2712_1232816848_1639_5366_1232816848_0_11578_79bfc6b6554b"
         },
         "taskProgress": { "$ref": "#/definitions/HttpResponse_TaskProgress_496cd19b5a37" },
         "taskComments": {
@@ -37,6 +39,12 @@
         "releaseProgress": { "$ref": "#/definitions/HttpResponse_ReleaseProgress_69a6fdbafd88" },
         "releasePlans": { "$ref": "#/definitions/HttpResponse_ReleasePlans_6f14ae2f14a2" },
         "historySessions": { "$ref": "#/definitions/HttpHistorySessionsResponse" },
+        "historyTimeline": {
+          "$ref": "#/definitions/HttpResponse_HistoryTimelinePage_b6f0099d9bf1"
+        },
+        "relationNeighborhood": {
+          "$ref": "#/definitions/HttpResponse_RelationNeighborhood_f0722d91e28e"
+        },
         "historySession": { "$ref": "#/definitions/HttpResponse_HistorySession_b7415fd33dde" },
         "historyContext": { "$ref": "#/definitions/HttpResponse_HistoryContext_4e2592bf4242" },
         "historyTree": { "$ref": "#/definitions/HttpHistorySessionsResponse" },
@@ -94,6 +102,7 @@
         "historyIntents",
         "historySession",
         "historySessions",
+        "historyTimeline",
         "historyTree",
         "overview",
         "planProgress",
@@ -104,9 +113,11 @@
         "projectEvent",
         "projectStatus",
         "receipt",
+        "relationNeighborhood",
         "releasePlans",
         "releaseProgress",
         "search",
+        "taskCandidates",
         "taskChildren",
         "taskComment",
         "taskComments",
@@ -115,9 +126,299 @@
         "taskDependencies",
         "taskMemberships",
         "taskProgress",
-        "taskRelated"
+        "taskRelated",
+        "taskViews"
       ],
       "description": "Именованные схемы генератора OpenAPI. Корень доступен без Runtime, Core и открытия БД."
+    },
+    "HttpResponse_TaskViewPage_527ac6df7721": {
+      "anyOf": [
+        { "$ref": "#/definitions/HttpSuccessResponse_TaskViewPage_d394e3db4540" },
+        {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean", "const": false },
+            "error": { "$ref": "#/definitions/HttpError" }
+          },
+          "required": ["ok", "error"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators."
+    },
+    "HttpSuccessResponse_TaskViewPage_d394e3db4540": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean", "const": true },
+        "data": { "$ref": "#/definitions/TaskViewPage" },
+        "meta": { "$ref": "#/definitions/HttpMeta" }
+      },
+      "required": ["ok", "data"],
+      "additionalProperties": false,
+      "description": "Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа."
+    },
+    "TaskViewPage": {
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/definitions/TaskView" } },
+        "total": { "type": "number" },
+        "counts": { "$ref": "#/definitions/TaskViewCounts" },
+        "generation": { "type": "number" },
+        "nextOffset": { "type": ["number", "null"] }
+      },
+      "required": ["items", "total", "counts", "generation", "nextOffset"],
+      "additionalProperties": false,
+      "description": "Ограниченная страница, сводка и поколение одного снимка проекта."
+    },
+    "TaskView": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "key": { "type": "string" },
+        "revision": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "title": { "type": "string" },
+        "boardId": { "type": "string" },
+        "boardSlug": { "type": "string" },
+        "column": { "$ref": "#/definitions/TaskColumn" },
+        "parentId": { "type": ["string", "null"] },
+        "dependencies": { "type": "array", "items": { "type": "string" } },
+        "related": { "type": "array", "items": { "type": "string" } },
+        "targets": { "type": "array", "items": { "$ref": "#/definitions/TaskViewTarget" } },
+        "acceptance": {
+          "type": "object",
+          "properties": { "total": { "type": "number" }, "completed": { "type": "number" } },
+          "required": ["total", "completed"],
+          "additionalProperties": false
+        },
+        "progress": { "$ref": "#/definitions/TaskProgress" }
+      },
+      "required": [
+        "acceptance",
+        "boardId",
+        "boardSlug",
+        "column",
+        "createdAt",
+        "createdBy",
+        "dependencies",
+        "id",
+        "key",
+        "parentId",
+        "progress",
+        "related",
+        "revision",
+        "targets",
+        "title",
+        "updatedAt",
+        "updatedBy"
+      ],
+      "additionalProperties": false,
+      "description": "Компактная карточка задачи без описания, текстов критериев и журнала комментариев. Все ссылки, прогресс и реквизиты доски относятся к одному снимку страницы."
+    },
+    "TaskColumn": {
+      "type": "string",
+      "enum": ["inbox", "ready", "in-progress", "review", "done", "cancelled"],
+      "description": "Колонка задачи из общего перечня TASK_COLUMNS."
+    },
+    "TaskViewTarget": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["feature", "scenario", "implementation"] },
+        "id": { "type": "string" }
+      },
+      "required": ["kind", "id"],
+      "additionalProperties": false,
+      "description": "Идентичность цели задачи, разрешённая в текущем снимке."
+    },
+    "TaskProgress": {
+      "type": "object",
+      "properties": {
+        "completed": { "type": "boolean" },
+        "canComplete": { "type": "boolean" },
+        "blockers": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["completed", "canComplete", "blockers"],
+      "additionalProperties": false,
+      "description": "Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core."
+    },
+    "TaskViewCounts": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "number" },
+        "completed": { "type": "number" },
+        "allCompleted": { "type": "boolean" },
+        "targetedCompleted": { "type": "number" },
+        "targetedTotal": { "type": "number" },
+        "blocked": { "type": "number" },
+        "columns": { "$ref": "#/definitions/Readonly_Record_TaskColumn_number_3fa6b582caa2" }
+      },
+      "required": [
+        "total",
+        "completed",
+        "allCompleted",
+        "targetedCompleted",
+        "targetedTotal",
+        "blocked",
+        "columns"
+      ],
+      "additionalProperties": false,
+      "description": "Сводка всего выбранного набора задач, а не готовность продукта или приложения."
+    },
+    "Readonly_Record_TaskColumn_number_3fa6b582caa2": {
+      "type": "object",
+      "properties": {
+        "inbox": { "type": "number" },
+        "ready": { "type": "number" },
+        "in-progress": { "type": "number" },
+        "review": { "type": "number" },
+        "done": { "type": "number" },
+        "cancelled": { "type": "number" }
+      },
+      "required": ["inbox", "ready", "in-progress", "review", "done", "cancelled"],
+      "additionalProperties": false
+    },
+    "HttpMeta": {
+      "type": "object",
+      "properties": {
+        "versions": {
+          "$ref": "#/definitions/Readonly_Record_string_CommandEntityVersions_69557b54d572"
+        },
+        "generation": { "type": "number" }
+      },
+      "additionalProperties": false,
+      "description": "Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки."
+    },
+    "Readonly_Record_string_CommandEntityVersions_69557b54d572": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/definitions/CommandEntityVersions" }
+    },
+    "CommandEntityVersions": {
+      "type": "object",
+      "properties": {
+        "recordVersion": { "type": "string" },
+        "aggregateVersion": { "type": "string" }
+      },
+      "required": ["recordVersion", "aggregateVersion"],
+      "additionalProperties": false,
+      "description": "Переносимые версии загруженного владельца, отдельные от локального CAS и data."
+    },
+    "HttpError": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "details": { "$ref": "#/definitions/Readonly_Record_string_unknown_82dff58d4ffe" }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "description": "Машинная диагностика HTTP без стека и процессного exit code."
+    },
+    "Readonly_Record_string_unknown_82dff58d4ffe": { "type": "object", "additionalProperties": {} },
+    "HttpResponse_TaskCandidatePage_7308b40bf161": {
+      "anyOf": [
+        { "$ref": "#/definitions/HttpSuccessResponse_TaskCandidatePage_8492464a4c3d" },
+        {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean", "const": false },
+            "error": { "$ref": "#/definitions/HttpError" }
+          },
+          "required": ["ok", "error"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators."
+    },
+    "HttpSuccessResponse_TaskCandidatePage_8492464a4c3d": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean", "const": true },
+        "data": { "$ref": "#/definitions/TaskCandidatePage" },
+        "meta": { "$ref": "#/definitions/HttpMeta" }
+      },
+      "required": ["ok", "data"],
+      "additionalProperties": false,
+      "description": "Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа."
+    },
+    "TaskCandidatePage": {
+      "type": "object",
+      "properties": {
+        "total": { "type": "number" },
+        "counts": { "$ref": "#/definitions/TaskViewCounts" },
+        "generation": { "type": "number" },
+        "nextOffset": { "type": ["number", "null"] },
+        "items": { "type": "array", "items": { "$ref": "#/definitions/TaskCandidate" } }
+      },
+      "required": ["counts", "generation", "items", "nextOffset", "total"],
+      "additionalProperties": false,
+      "description": "Страница кандидатов с итогами после проверки доступности и до окна."
+    },
+    "TaskCandidate": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "key": { "type": "string" },
+        "revision": { "type": "number" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "updatedBy": { "type": "string" },
+        "title": { "type": "string" },
+        "boardId": { "type": "string" },
+        "boardSlug": { "type": "string" },
+        "column": { "$ref": "#/definitions/TaskColumn" },
+        "parentId": { "type": ["string", "null"] },
+        "dependencies": { "type": "array", "items": { "type": "string" } },
+        "related": { "type": "array", "items": { "type": "string" } },
+        "targets": { "type": "array", "items": { "$ref": "#/definitions/TaskViewTarget" } },
+        "acceptance": {
+          "type": "object",
+          "properties": { "total": { "type": "number" }, "completed": { "type": "number" } },
+          "required": ["total", "completed"],
+          "additionalProperties": false
+        },
+        "progress": { "$ref": "#/definitions/TaskProgress" },
+        "assignment": {
+          "anyOf": [{ "$ref": "#/definitions/TaskViewAssignment" }, { "type": "null" }]
+        }
+      },
+      "required": [
+        "acceptance",
+        "assignment",
+        "boardId",
+        "boardSlug",
+        "column",
+        "createdAt",
+        "createdBy",
+        "dependencies",
+        "id",
+        "key",
+        "parentId",
+        "progress",
+        "related",
+        "revision",
+        "targets",
+        "title",
+        "updatedAt",
+        "updatedBy"
+      ],
+      "additionalProperties": false,
+      "description": "Кандидат с текущим включением; null означает отсутствие открытого плана."
+    },
+    "TaskViewAssignment": {
+      "type": "object",
+      "properties": {
+        "planId": { "type": "string" },
+        "planKey": { "type": "string" },
+        "stageId": { "type": "string" },
+        "stageTitle": { "type": "string" }
+      },
+      "required": ["planId", "planKey", "stageId", "stageTitle"],
+      "additionalProperties": false,
+      "description": "Проверенное текущее включение задачи в незакрытый план."
     },
     "HttpResponse_HttpProjectStatus_d97befac9cba": {
       "anyOf": [
@@ -158,43 +459,6 @@
       "additionalProperties": false,
       "description": "Текущий технический status Core; размер основного SQLite файла не включает WAL/SHM."
     },
-    "HttpMeta": {
-      "type": "object",
-      "properties": {
-        "versions": {
-          "$ref": "#/definitions/Readonly_Record_string_CommandEntityVersions_69557b54d572"
-        },
-        "generation": { "type": "number" }
-      },
-      "additionalProperties": false,
-      "description": "Metadata чтения; версии принадлежат тому же anchor, что возвращённые карточки."
-    },
-    "Readonly_Record_string_CommandEntityVersions_69557b54d572": {
-      "type": "object",
-      "additionalProperties": { "$ref": "#/definitions/CommandEntityVersions" }
-    },
-    "CommandEntityVersions": {
-      "type": "object",
-      "properties": {
-        "recordVersion": { "type": "string" },
-        "aggregateVersion": { "type": "string" }
-      },
-      "required": ["recordVersion", "aggregateVersion"],
-      "additionalProperties": false,
-      "description": "Переносимые версии загруженного владельца, отдельные от локального CAS и data."
-    },
-    "HttpError": {
-      "type": "object",
-      "properties": {
-        "code": { "type": "string" },
-        "message": { "type": "string" },
-        "details": { "$ref": "#/definitions/Readonly_Record_string_unknown_82dff58d4ffe" }
-      },
-      "required": ["code", "message"],
-      "additionalProperties": false,
-      "description": "Машинная диагностика HTTP без стека и процессного exit code."
-    },
-    "Readonly_Record_string_unknown_82dff58d4ffe": { "type": "object", "additionalProperties": {} },
     "HttpResponse_HttpProjectCheck_3b7a9cd592ca": {
       "anyOf": [
         { "$ref": "#/definitions/HttpSuccessResponse_HttpProjectCheck_965ac799060a" },
@@ -351,10 +615,10 @@
       "additionalProperties": false,
       "description": "Разрешённый адрес цели отношения документа без загрузки её содержания."
     },
-    "HttpResponse_structure_1232816848_1868_2138_1232816848_1795_2139_1232816848_1288_4541_1232816848_0_9901_bee6ae0d9d13": {
+    "HttpResponse_structure_1232816848_2441_2711_1232816848_2368_2712_1232816848_1639_5366_1232816848_0_11578_79bfc6b6554b": {
       "anyOf": [
         {
-          "$ref": "#/definitions/HttpSuccessResponse_structure_1232816848_1868_2138_1232816848_1795_2139_1232816848_1288_4541_1232816848_0_9901_5f2a3dfc0a62"
+          "$ref": "#/definitions/HttpSuccessResponse_structure_1232816848_2441_2711_1232816848_2368_2712_1232816848_1639_5366_1232816848_0_11578_217b64fbcc39"
         },
         {
           "type": "object",
@@ -368,7 +632,7 @@
       ],
       "description": "Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators."
     },
-    "HttpSuccessResponse_structure_1232816848_1868_2138_1232816848_1795_2139_1232816848_1288_4541_1232816848_0_9901_5f2a3dfc0a62": {
+    "HttpSuccessResponse_structure_1232816848_2441_2711_1232816848_2368_2712_1232816848_1639_5366_1232816848_0_11578_217b64fbcc39": {
       "type": "object",
       "properties": {
         "ok": { "type": "boolean", "const": true },
@@ -506,17 +770,6 @@
       "required": ["ok", "data"],
       "additionalProperties": false,
       "description": "Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа."
-    },
-    "TaskProgress": {
-      "type": "object",
-      "properties": {
-        "completed": { "type": "boolean" },
-        "canComplete": { "type": "boolean" },
-        "blockers": { "type": "array", "items": { "type": "string" } }
-      },
-      "required": ["completed", "canComplete", "blockers"],
-      "additionalProperties": false,
-      "description": "Вычисленная готовность задачи по собственным критериям, детям и зависимостям. Отменённая задача не считается выполненной; детали правила принадлежат графу Core."
     },
     "HttpResponse_HttpTaskCollection_TaskComment_4eab1914d675": {
       "anyOf": [
@@ -785,11 +1038,6 @@
       ],
       "additionalProperties": false,
       "description": "Сохраняет закрытую схему данных совместимой с сырым JSON-контрактом EntityRecord. Производный объектный тип, в отличие от интерфейса с declaration merging, присваивается Record<string, unknown> без открытой индексной сигнатуры. Поля и варианты объединений выводятся из схемы, их изменяемость сохраняется."
-    },
-    "TaskColumn": {
-      "type": "string",
-      "enum": ["inbox", "ready", "in-progress", "review", "done", "cancelled"],
-      "description": "Колонка задачи из общего перечня TASK_COLUMNS."
     },
     "HttpTaskChildrenResponse": {
       "anyOf": [
@@ -1352,6 +1600,414 @@
       "additionalProperties": false,
       "description": "Сведения о пользователе, от имени которого действует исполнитель. Эти сведения не заменяют actor при проверке владения рабочей сессией."
     },
+    "HttpResponse_HistoryTimelinePage_b6f0099d9bf1": {
+      "anyOf": [
+        { "$ref": "#/definitions/HttpSuccessResponse_HistoryTimelinePage_8096b1d0cebc" },
+        {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean", "const": false },
+            "error": { "$ref": "#/definitions/HttpError" }
+          },
+          "required": ["ok", "error"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators."
+    },
+    "HttpSuccessResponse_HistoryTimelinePage_8096b1d0cebc": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean", "const": true },
+        "data": { "$ref": "#/definitions/HistoryTimelinePage" },
+        "meta": { "$ref": "#/definitions/HttpMeta" }
+      },
+      "required": ["ok", "data"],
+      "additionalProperties": false,
+      "description": "Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа."
+    },
+    "HistoryTimelinePage": {
+      "type": "object",
+      "properties": {
+        "items": { "type": "array", "items": { "$ref": "#/definitions/HistoryTimelinePoint" } },
+        "openEnds": { "type": "array", "items": { "$ref": "#/definitions/HistoryTimelinePoint" } },
+        "totalOpenEnds": { "type": "number" },
+        "branches": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/Omit_HistoryTimelineSession_runs_b4eb5ba0ef7f" }
+        },
+        "runs": { "type": "array", "items": { "$ref": "#/definitions/HistoryTimelineRun" } },
+        "edges": { "type": "array", "items": { "$ref": "#/definitions/HistoryTimelineEdge" } },
+        "boundaryNodes": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/HistoryTimelineBoundary" }
+        },
+        "total": { "type": "number" },
+        "nextOffset": { "type": ["number", "null"] },
+        "generation": { "type": "number" }
+      },
+      "required": [
+        "items",
+        "openEnds",
+        "totalOpenEnds",
+        "branches",
+        "runs",
+        "edges",
+        "boundaryNodes",
+        "total",
+        "nextOffset",
+        "generation"
+      ],
+      "additionalProperties": false,
+      "description": "Окно одного снимка. openEnds имеет отдельный компактный порядок: старые незакрытые работы не исчезают из-за их времени вне items. Его окно использует тот же offset/limit; totalOpenEnds <= total, поэтому обычное продолжение дочитывает оба состава. Branches содержит только владельцев/авторов концов и цепочки предков: O(limit * depth)."
+    },
+    "HistoryTimelinePoint": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "const": "checkpoint" },
+            "checkpointId": { "type": "string" },
+            "checkpointKind": { "$ref": "#/definitions/HistoryCheckpointKind" },
+            "runId": { "type": "string" },
+            "runSessionId": { "type": "string" },
+            "intentState": {
+              "type": ["string", "null"],
+              "enum": ["open", "completed", "cancelled", null]
+            },
+            "id": { "type": "string" },
+            "sessionId": { "type": "string" },
+            "sequence": { "type": "number" },
+            "at": { "type": "string" },
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "predecessorRunId": { "type": ["string", "null"] }
+          },
+          "required": [
+            "at",
+            "checkpointId",
+            "checkpointKind",
+            "id",
+            "intentState",
+            "kind",
+            "predecessorRunId",
+            "runId",
+            "runSessionId",
+            "sequence",
+            "sessionId",
+            "summary",
+            "title"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["session-created", "session-closed", "run-started", "run-ended"]
+            },
+            "runId": { "type": ["string", "null"] },
+            "runSessionId": { "type": ["string", "null"] },
+            "checkpointId": { "type": "null" },
+            "checkpointKind": { "type": "null" },
+            "intentState": { "type": "null" },
+            "id": { "type": "string" },
+            "sessionId": { "type": "string" },
+            "sequence": { "type": "number" },
+            "at": { "type": "string" },
+            "title": { "type": "string" },
+            "summary": { "type": "string" },
+            "predecessorRunId": { "type": ["string", "null"] }
+          },
+          "required": [
+            "at",
+            "checkpointId",
+            "checkpointKind",
+            "id",
+            "intentState",
+            "kind",
+            "predecessorRunId",
+            "runId",
+            "runSessionId",
+            "sequence",
+            "sessionId",
+            "summary",
+            "title"
+          ]
+        }
+      ],
+      "description": "Материал и сохранённые границы lifecycle различаются дискриминатором."
+    },
+    "HistoryCheckpointKind": {
+      "type": "string",
+      "enum": ["intent", "progress", "result", "cancel"],
+      "description": "Вид неизменяемого материала истории из historyCheckpointKinds."
+    },
+    "Omit_HistoryTimelineSession_runs_b4eb5ba0ef7f": {
+      "$ref": "#/definitions/Pick_HistoryTimelineSession_Exclude_title_status_currentRunId_parentSessionId_originCheckpointId_createdByRunId_closedAt_runs_id_key_revision_createdAt_runs_908499a99a98"
+    },
+    "Pick_HistoryTimelineSession_Exclude_title_status_currentRunId_parentSessionId_originCheckpointId_createdByRunId_closedAt_runs_id_key_revision_createdAt_runs_908499a99a98": {
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "status": { "$ref": "#/definitions/HistorySessionStatus" },
+        "currentRunId": { "type": ["string", "null"] },
+        "parentSessionId": { "type": ["string", "null"] },
+        "originCheckpointId": { "type": ["string", "null"] },
+        "createdByRunId": { "type": ["string", "null"] },
+        "closedAt": { "type": ["string", "null"] },
+        "id": { "type": "string" },
+        "key": { "type": "string" },
+        "revision": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": [
+        "title",
+        "status",
+        "currentRunId",
+        "parentSessionId",
+        "originCheckpointId",
+        "createdByRunId",
+        "closedAt",
+        "id",
+        "key",
+        "revision",
+        "createdAt"
+      ],
+      "additionalProperties": false
+    },
+    "HistoryTimelineRun": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sessionId": { "type": "string" },
+        "id": { "type": "string" },
+        "key": { "type": "string" },
+        "actor": { "type": "string" },
+        "state": {
+          "type": "string",
+          "enum": ["active", "paused", "transferred", "completed", "cancelled"]
+        },
+        "operator": { "anyOf": [{ "$ref": "#/definitions/HistoryOperator" }, { "type": "null" }] },
+        "client": { "type": ["string", "null"] },
+        "sourceSessionId": { "type": ["string", "null"] },
+        "predecessorRunId": { "type": ["string", "null"] },
+        "startedAt": { "type": "string" },
+        "endedAt": { "type": ["string", "null"] }
+      },
+      "required": [
+        "actor",
+        "client",
+        "endedAt",
+        "id",
+        "key",
+        "operator",
+        "predecessorRunId",
+        "sessionId",
+        "sourceSessionId",
+        "startedAt",
+        "state"
+      ],
+      "description": "Сохранённая атрибуция участия без полных причин подключения и окончания."
+    },
+    "HistoryTimelineEdge": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "sequence" },
+            "from": { "type": "string" },
+            "to": { "type": "string" }
+          },
+          "required": ["kind", "from", "to"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "fork" },
+            "fromSessionId": { "type": "string" },
+            "to": { "type": "string" }
+          },
+          "required": ["kind", "fromSessionId", "to"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "branch-end" },
+            "from": { "type": "string" },
+            "toSessionId": { "type": "string" }
+          },
+          "required": ["kind", "from", "toSessionId"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "root-start" },
+            "from": { "type": "null" },
+            "to": { "type": "string" }
+          },
+          "required": ["kind", "from", "to"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string", "const": "root-end" },
+            "from": { "type": "string" },
+            "to": { "type": "null" }
+          },
+          "required": ["kind", "from", "to"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Рёбра хронологии и происхождения; координаты и layout не входят в Core."
+    },
+    "HistoryTimelineBoundary": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "sequence": { "type": "number" },
+        "at": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["checkpoint", "session-created", "session-closed", "run-started", "run-ended"]
+        },
+        "side": { "type": "string", "enum": ["before", "after"] }
+      },
+      "required": ["at", "id", "kind", "sequence", "sessionId", "side"],
+      "additionalProperties": false,
+      "description": "Невидимый конец хронологического ребра без полного содержания точки."
+    },
+    "HttpResponse_RelationNeighborhood_f0722d91e28e": {
+      "anyOf": [
+        { "$ref": "#/definitions/HttpSuccessResponse_RelationNeighborhood_67a0c92e21a7" },
+        {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean", "const": false },
+            "error": { "$ref": "#/definitions/HttpError" }
+          },
+          "required": ["ok", "error"],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Общая оболочка результата; сохраняет обе ветви для клиентов и внутренних validators."
+    },
+    "HttpSuccessResponse_RelationNeighborhood_67a0c92e21a7": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean", "const": true },
+        "data": { "$ref": "#/definitions/RelationNeighborhood" },
+        "meta": { "$ref": "#/definitions/HttpMeta" }
+      },
+      "required": ["ok", "data"],
+      "additionalProperties": false,
+      "description": "Успешная оболочка JSON для HTTP 200; не содержит ветви предметного или транспортного отказа."
+    },
+    "RelationNeighborhood": {
+      "type": "object",
+      "properties": {
+        "root": { "anyOf": [{ "$ref": "#/definitions/RelationReference" }, { "type": "null" }] },
+        "nodes": { "type": "array", "items": { "$ref": "#/definitions/RelationViewNode" } },
+        "edges": { "type": "array", "items": { "$ref": "#/definitions/RelationViewEdge" } },
+        "endpoints": { "type": "array", "items": { "$ref": "#/definitions/RelationViewNode" } },
+        "paths": { "type": "array", "items": { "$ref": "#/definitions/RelationViewPath" } },
+        "totalNodes": { "type": "number" },
+        "totalEdges": { "type": "number" },
+        "nextOffset": { "type": ["number", "null"] },
+        "boundary": { "type": "array", "items": { "$ref": "#/definitions/RelationReference" } },
+        "depthLimited": { "type": "boolean" },
+        "generation": { "type": "number" }
+      },
+      "required": [
+        "root",
+        "nodes",
+        "edges",
+        "endpoints",
+        "paths",
+        "totalNodes",
+        "totalEdges",
+        "nextOffset",
+        "boundary",
+        "depthLimited",
+        "generation"
+      ],
+      "additionalProperties": false,
+      "description": "Узлы/рёбра одного snapshot; endpoints не более двух на ребро. Полный проход metadata O(N+E) пока необходим для входящих связей, но не передаёт тела."
+    },
+    "RelationReference": {
+      "$ref": "#/definitions/Pick_EntityIdentity_id_kind_bbe505214477",
+      "description": "Постоянный адрес существующего отношения, не произвольный вид графового узла."
+    },
+    "Pick_EntityIdentity_id_kind_bbe505214477": {
+      "type": "object",
+      "properties": { "id": { "type": "string" }, "kind": { "$ref": "#/definitions/EntityKind" } },
+      "required": ["id", "kind"],
+      "additionalProperties": false
+    },
+    "EntityKind": {
+      "type": "string",
+      "enum": [
+        "project",
+        "product",
+        "feature",
+        "scenario",
+        "application",
+        "implementation",
+        "board",
+        "task",
+        "document",
+        "work-plan",
+        "release",
+        "work-session",
+        "work-checkpoint"
+      ],
+      "description": "Вид локальной сущности, выведенный из единого перечня ENTITY_KINDS."
+    },
+    "RelationViewNode": {
+      "type": "object",
+      "properties": {
+        "ref": { "$ref": "#/definitions/RelationReference" },
+        "key": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string" },
+        "revision": { "type": "number" }
+      },
+      "required": ["ref", "key", "title", "status", "revision"],
+      "additionalProperties": false,
+      "description": "Компактная карточка узла без полного содержания."
+    },
+    "RelationViewEdge": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "from": { "$ref": "#/definitions/RelationReference" },
+        "to": { "$ref": "#/definitions/RelationReference" },
+        "description": { "type": "string" },
+        "revision": { "type": "number" }
+      },
+      "required": ["id", "type", "from", "to", "description", "revision"],
+      "additionalProperties": false,
+      "description": "Представление реально сохранённого структурированного поля Core. Отдельная сущность-ребро и её авторство/время не выдумываются."
+    },
+    "RelationViewPath": {
+      "type": "object",
+      "properties": {
+        "target": { "$ref": "#/definitions/RelationReference" },
+        "nodes": { "type": "array", "items": { "$ref": "#/definitions/RelationReference" } },
+        "edges": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["target", "nodes", "edges"],
+      "additionalProperties": false,
+      "description": "Один кратчайший путь в выбранном направлении."
+    },
     "HttpResponse_HistorySession_b7415fd33dde": {
       "anyOf": [
         { "$ref": "#/definitions/HttpSuccessResponse_HistorySession_5f71b64b93dc" },
@@ -1488,11 +2144,6 @@
       "additionalProperties": false,
       "description": "Сохраняет закрытую схему данных совместимой с сырым JSON-контрактом EntityRecord. Производный объектный тип, в отличие от интерфейса с declaration merging, присваивается Record<string, unknown> без открытой индексной сигнатуры. Поля и варианты объединений выводятся из схемы, их изменяемость сохраняется."
     },
-    "HistoryCheckpointKind": {
-      "type": "string",
-      "enum": ["intent", "progress", "result", "cancel"],
-      "description": "Вид неизменяемого материала истории из historyCheckpointKinds."
-    },
     "HistoryReference": {
       "type": "object",
       "properties": {
@@ -1504,25 +2155,6 @@
       "required": ["id", "kind", "key", "title"],
       "additionalProperties": false,
       "description": "Снимок адреса и названия цели на момент записи материала истории. Последующее переименование цели не изменяет этот снимок."
-    },
-    "EntityKind": {
-      "type": "string",
-      "enum": [
-        "project",
-        "product",
-        "feature",
-        "scenario",
-        "application",
-        "implementation",
-        "board",
-        "task",
-        "document",
-        "work-plan",
-        "release",
-        "work-session",
-        "work-checkpoint"
-      ],
-      "description": "Вид локальной сущности, выведенный из единого перечня ENTITY_KINDS."
     },
     "HttpHistoryCheckpointsResponse": {
       "anyOf": [

@@ -116,9 +116,7 @@ export function checkOpenHistoryIntent(
     invalidHistoryInput(historyInputMessages.intentRequired);
   }
   const closed = checkpoints.some(
-    (entry) =>
-      entry.data.intentId === intent.id &&
-      (entry.data.kind === "result" || entry.data.kind === "cancel"),
+    (entry) => entry.data.intentId === intent.id && historyIntentOutcome(entry.data.kind) !== null,
   );
   if (closed) {
     historyConflict(historyStateMessages.closedIntent);
@@ -221,8 +219,23 @@ export function historySubtree(
 export function openHistoryIntents(checkpoints: readonly HistoryCheckpoint[]): HistoryCheckpoint[] {
   const closed = new Set(
     checkpoints
-      .filter((entry) => entry.data.kind === "result" || entry.data.kind === "cancel")
+      .filter((entry) => historyIntentOutcome(entry.data.kind) !== null)
       .map((entry) => entry.data.intentId),
   );
   return checkpoints.filter((entry) => entry.data.kind === "intent" && !closed.has(entry.id));
+}
+
+/**
+ * Единственная семантика закрывающего материала для проверок и read-проекций истории.
+ */
+export function historyIntentOutcome(
+  kind: HistoryCheckpoint["data"]["kind"],
+): "completed" | "cancelled" | null {
+  if (kind === "result") {
+    return "completed";
+  }
+  if (kind === "cancel") {
+    return "cancelled";
+  }
+  return null;
 }

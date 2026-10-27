@@ -1,0 +1,54 @@
+.root {
+  position: relative;
+  height: 100%;
+  padding: 12px 14px;
+  background: var(--tasks-surface);
+  border: 1px solid var(--tasks-selected-border);
+  border-radius: var(--mantine-radius-md);
+  color: var(--tasks-ink);
+  box-shadow: var(--tasks-card-shadow);
+
+  &._origin {
+    border: 2px solid var(--mantine-color-blue-6);
+  }
+
+  &._selected {
+    outline: 3px solid var(--mantine-color-teal-6);
+    outline-offset: 3px;
+    background: var(--tasks-selected);
+  }
+
+  &._dimmed {
+    filter: grayscale(1);
+  }
+}
+
+.additional {
+  color: light-dark(var(--mantine-color-blue-9), var(--mantine-color-blue-3));
+}
+
+.key {
+  margin-top: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.title {
+  line-height: 1.35;
+  margin-top: 3px;
+}
+
+.footer {
+  position: absolute;
+  bottom: 9px;
+  left: 14px;
+  right: 14px;
+}
+
+.port {
+  width: 5px;
+  height: 5px;
+  border: 0;
+  background: var(--tasks-soft);
+}

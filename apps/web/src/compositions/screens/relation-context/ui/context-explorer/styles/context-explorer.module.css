@@ -1,0 +1,66 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--mantine-spacing-sm);
+  min-width: 0;
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--mantine-spacing-md);
+}
+
+.identity {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.boundaries {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--mantine-spacing-xs);
+  color: var(--tasks-muted);
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-md);
+  overflow: hidden;
+  background: var(--tasks-surface);
+
+  @media (--xl) {
+    grid-template-columns: minmax(0, 1fr) 300px;
+  }
+}
+
+.main {
+  position: relative;
+  min-width: 0;
+  height: max(470px, calc(100dvh - 470px));
+  overflow: auto;
+}
+
+.diagram {
+  position: absolute;
+  inset: 0;
+
+  &[data-hidden="true"] {
+    /* Узлы React Flow задают visibility:visible; прозрачность изолирует всю отрисованную область. */
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+
+.inspector {
+  height: max(470px, calc(100dvh - 470px));
+  border-left: 1px solid var(--tasks-border);
+  overflow-y: auto;
+  min-width: 0;
+}

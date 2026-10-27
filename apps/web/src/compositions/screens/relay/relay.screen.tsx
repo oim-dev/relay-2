@@ -1,96 +1,153 @@
-import type { ReactElement } from "react";
-import { Navigate, Outlet, useParams } from "react-router-dom";
-import {
-  Alert,
-  Badge,
-  Button,
-  Container,
-  Group,
-  SimpleGrid,
-  Stack,
-  Text,
-  Title,
-} from "@mantine/core";
-import { ProjectScope, useWorkspace, errorMessage } from "domains/project";
-import { serverKey } from "infra/relay-api";
+import { useEffect } from "react";
+import { Outlet, useLocation, useMatch, useNavigate } from "react-router-dom";
+import { Badge, Button, Group, Select, Text } from "@mantine/core";
+import { useWorkspace, resolveWorkspaceProject } from "domains/workspace";
+import { ProjectScope } from "domains/project";
 import { StatePanel } from "ui/state-panel";
 import { MarkdownLinkProvider } from "ui/markdown-link";
+import { PageBreadcrumbs } from "compositions/widgets/page-breadcrumbs";
 import { RelayMarkdownLink } from "./ui/relay-markdown-link/relay-markdown-link";
-import { relayMessages as m } from "./relay.messages";
-import { ProjectChoice } from "./ui/project-choice/project-choice";
+import styles from "./styles/relay.module.css";
 
 /**
- * Открывает постоянный ID проекта и сохраняет все регистрации workspace,
- * включая недоступные; смена ID размонтирует запросы и формы прежнего проекта.
+ * Открывает один проект или связывает workspace с выбором проекта в URL.
  *
  * Используется для:
- *  - выбора независимого проекта без потери недоступных регистраций
+ *  - переключения независимых досок и восстановления прямых ссылок
  */
-export function RelayScreen(): ReactElement {
+export const RelayScreen = () => {
   const workspace = useWorkspace();
-  const { projectId } = useParams();
-  const loadingMessage = workspace.error ? errorMessage(workspace.error) : m.loading;
-  if (!workspace.data) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const match = useMatch("/projects/:project/*");
+  const selectedId = match?.params.project;
+  const workspaceData = workspace.data;
+  const projectItems = workspaceData?.projects ?? [];
+  const projectData = resolveWorkspaceProject(workspaceData, selectedId);
+  const canonicalAddress = projectData?.id;
+  const resolvedId = projectData?.id;
+  useEffect(() => {
+    if (resolvedId === undefined || selectedId === undefined || canonicalAddress === undefined)
+      return;
+    if (selectedId === canonicalAddress) return;
+    const suffix = location.pathname.replace(/^\/projects\/[^/]+/, "");
+    navigate(
+      `/projects/${encodeURIComponent(canonicalAddress)}${suffix}${location.search}${location.hash}`,
+      {
+        replace: true,
+        state: location.state,
+      },
+    );
+  }, [
+    resolvedId,
+    selectedId,
+    canonicalAddress,
+    location.pathname,
+    location.search,
+    location.hash,
+    location.state,
+    navigate,
+  ]);
+  const isWorkspace = workspaceData?.mode === "workspace";
+  const canOpenProject = projectData !== undefined && projectData.available;
+  const selectItems = [
+    ...new Map(
+      projectItems.map((project) => [
+        project.id,
+        {
+          value: project.id,
+          label: project.name,
+          disabled: !project.available,
+        },
+      ]),
+    ).values(),
+  ];
+  const defaultProject = workspaceData?.defaultProject;
+  useEffect(() => {
+    if (workspaceData?.mode === "local" && defaultProject && selectedId === undefined) {
+      navigate(
+        `/projects/${encodeURIComponent(defaultProject)}${location.pathname}${location.search}${location.hash}`,
+        { replace: true, state: location.state },
+      );
+    }
+  }, [
+    workspaceData?.mode,
+    defaultProject,
+    selectedId,
+    navigate,
+    location.pathname,
+    location.search,
+    location.hash,
+    location.state,
+  ]);
+
+  if (workspaceData === undefined) {
     return (
-      <StatePanel
-        title={m.connecting}
-        isLoading={workspace.isLoading}
-        description={loadingMessage}
-        action={<Button onClick={() => void workspace.mutate()}>{m.retry}</Button>}
-      />
+      <main>
+        <PageBreadcrumbs
+          items={[
+            { id: "relay", label: "Relay", href: "/" },
+            { id: "connection", label: "Подключение" },
+          ]}
+        />
+        <StatePanel
+          title="Подключение к Relay"
+          description="Запустите relay-server и проверьте подключение."
+          isLoading={workspace.isLoading}
+          action={<Button onClick={() => void workspace.mutate()}>Повторить</Button>}
+        />
+      </main>
     );
   }
-  const context = workspace.data;
-  const selected = context.projects.find(
-    (project) => project.id === projectId && project.available,
-  );
-  if (selected?.id) {
-    return (
-      <ProjectScope
-        key={`${serverKey}:${selected.id}`}
-        projectId={selected.id}
-        actor={context.actor}
-        serverKey={serverKey}
-      >
-        <MarkdownLinkProvider component={RelayMarkdownLink}>
-          <Outlet />
-        </MarkdownLinkProvider>
-      </ProjectScope>
-    );
-  }
-  const onlyProject = context.projects[0];
-  if (!projectId && context.mode === "project" && onlyProject?.available && onlyProject.id) {
-    return <Navigate to={`/projects/${encodeURIComponent(onlyProject.id)}`} replace />;
-  }
+
+  const stateTitle = selectedId === undefined ? "Выберите проект" : "Проект недоступен";
+  const stateDescription =
+    projectData?.error ??
+    "Проекты добавляются командой relay workspace project add <имя> <каталог>.";
   return (
-    <Container size="lg" py="xl">
-      <Stack gap="xl">
-        <Group justify="space-between">
-          <Title order={1}>Relay</Title>
-          <Badge>{context.mode}</Badge>
-        </Group>
-        <div>
-          <Title order={2}>{m.select}</Title>
-          <Text c="dimmed">{m.description}</Text>
-        </div>
-        {projectId && (
-          <Alert color="orange" title={m.unavailable}>
-            {m.selectAnother}
-          </Alert>
-        )}
-        <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
-          {context.projects.map((project, index) => (
-            <ProjectChoice key={`${project.id}:${project.name}:${index}`} project={project} />
-          ))}
-        </SimpleGrid>
-        <Button
-          variant="default"
-          onClick={() => void workspace.mutate()}
-          loading={workspace.isValidating}
+    <div className={styles.root}>
+      {isWorkspace && !canOpenProject && (
+        <Group
+          component="nav"
+          aria-label="Проекты Relay"
+          className={styles.selector}
+          justify="space-between"
         >
-          {m.refresh}
-        </Button>
-      </Stack>
-    </Container>
+          <Group>
+            <Text fw={700}>Relay</Text>
+            <Badge variant="light">workspace</Badge>
+          </Group>
+          <Select
+            aria-label="Выбрать проект"
+            placeholder="Выберите проект"
+            data={selectItems}
+            value={selectedId ?? null}
+            searchable
+            allowDeselect={false}
+            onChange={(projectId) => {
+              if (projectId !== null) navigate(`/projects/${encodeURIComponent(projectId)}/`);
+            }}
+          />
+        </Group>
+      )}
+      {canOpenProject && (
+        <ProjectScope key={projectData.id} projectId={projectData.id}>
+          <MarkdownLinkProvider component={RelayMarkdownLink}>
+            <Outlet />
+          </MarkdownLinkProvider>
+        </ProjectScope>
+      )}
+      {!canOpenProject && (
+        <main>
+          <PageBreadcrumbs
+            items={[
+              { id: "relay", label: "Relay", href: "/" },
+              { id: "selection", label: stateTitle },
+            ]}
+          />
+          <StatePanel title={stateTitle} description={stateDescription} />
+        </main>
+      )}
+    </div>
   );
-}
+};

@@ -1,8 +1,18 @@
 {
-  "extends": "@relay/typescript-config/browser.json",
   "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
     "jsx": "react-jsx",
-    "types": ["vite/client", "node", "react", "react-dom"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["vite/client", "node"],
     "paths": {
       "app/*": ["./src/app/*"],
       "compositions/*": ["./src/compositions/*"],
@@ -12,5 +22,6 @@
       "shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "*.ts"],
+  "exclude": [".templates"]
 }

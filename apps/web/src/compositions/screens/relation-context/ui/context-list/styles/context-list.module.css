@@ -1,0 +1,30 @@
+.root {
+  padding: var(--mantine-spacing-md);
+}
+
+.list {
+  padding: 0;
+  margin: var(--mantine-spacing-sm) 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  width: 100%;
+  padding: var(--mantine-spacing-sm);
+  border-bottom: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-sm);
+  overflow-wrap: anywhere;
+
+  &:hover,
+  &._selected {
+    background: var(--tasks-selected);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--tasks-focus-ring);
+    outline-offset: -2px;
+  }
+}

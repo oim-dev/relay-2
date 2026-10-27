@@ -1,0 +1,113 @@
+.root {
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-surface);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--tasks-border);
+  background: var(--tasks-subtle);
+}
+
+.planLink {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--tasks-ink);
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.stage {
+  padding: 1.25rem;
+}
+
+.stageTitle {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+  margin: 0 0 1rem;
+}
+
+.stageLabel {
+  color: var(--tasks-soft);
+  font-size: 0.5625rem;
+  font-weight: 550;
+  letter-spacing: 0.1em;
+}
+
+.stageLink {
+  color: var(--tasks-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.tasks {
+  display: grid;
+  gap: 1.5rem;
+  padding: 0 0 0 1rem;
+  margin: 0;
+  border-left: 2px solid var(--tasks-border);
+  list-style: none;
+}
+
+.task {
+  min-width: 0;
+}
+
+.taskHeading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.taskLink {
+  color: var(--tasks-ink);
+  font-size: 0.8125rem;
+  font-weight: 550;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.result {
+  margin: 0.5rem 0;
+  color: var(--tasks-muted);
+  font-size: 0.8125rem;
+  line-height: 1.65;
+}
+
+.details {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--tasks-soft);
+  font-size: 0.6875rem;
+  text-decoration: none;
+
+  &:hover {
+    color: var(--tasks-ink);
+    text-decoration: underline;
+  }
+}

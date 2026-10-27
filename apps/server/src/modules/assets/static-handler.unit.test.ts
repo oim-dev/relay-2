@@ -72,6 +72,9 @@ describe("Byte-static и ограниченный SPA fallback", () => {
     "/public/%2findex.html",
     "/public/%",
     "/public/%00",
+    "/projects/id/entities/%00",
+    "/projects/id/entities/%",
+    "/projects/id/product/features/F-1/extra",
   ])("%s не превращается в HTML", async (path) => {
     expect(
       await handler(new Request(`http://localhost${path}`, { headers: { Accept: "text/html" } })),
@@ -83,6 +86,16 @@ describe("Byte-static и ограниченный SPA fallback", () => {
     "/projects/id/documents",
     "/projects/id/tasks/TASK-1",
     "/projects/id/history/sessions/SESSION-1",
+    "/projects/id/boards/product/TASK-1",
+    "/projects/id/product/passport/edit",
+    "/projects/id/product/features/F-1/scenarios/S-1/edit",
+    "/projects/id/product/applications/A-1/implementations/I-1",
+    "/projects/id/documents/DOC-1/edit",
+    "/projects/id/work-history?point=CP-1",
+    "/projects/id/relations/context",
+    "/projects/id/settings",
+    "/projects/id/entities/document%3Akey%2Fpart",
+    "/projects/id/product/features/FEATURE%3Apart%2Fname",
   ])("%s отдаёт shell только для navigation", async (path) => {
     const response = await handler(
       new Request(`http://localhost${path}`, {

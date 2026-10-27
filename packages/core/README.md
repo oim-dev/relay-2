@@ -87,6 +87,16 @@ Storage mutation без именованной ленты model 2 не счит�
 Сценарии вызова описаны в [руководстве CLI](../../docs/CLI.md#применить-связанный-пакет);
 правила мутаций остаются у предметных сервисов.
 
+Для визуализации без полных текстов доступны синхронные
+`readHistoryTimeline(db, {offset, limit, generation?})` и
+`readRelationNeighborhood(db, {ref?, depth?, direction?, offset, limit, generation?})`.
+Окна и их границы принадлежат одному snapshot; продолжение требует исходного поколения.
+Они не ограничивают размер проекта, но пока сканируют узкие metadata для хронологии и
+входящих связей: размер страницы ограничивает ответ, а не всю работу SQL.
+Подробные формы и стоимость описаны в контрактах
+[истории](../contracts/src/history/history-timeline.types.ts) и
+[соседства](../contracts/src/queries/relation-neighborhood.types.ts).
+
 `CommandExecutor.execute(command, options)` выполняет одну именованную операцию из
 `BATCH_OPERATIONS` тем же async-исполнителем, что точечные сервисы и `BatchService`.
 Для одиночной команды ключ квитанции необязателен. Метод

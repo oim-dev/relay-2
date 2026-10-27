@@ -17,6 +17,9 @@ import {
   type HistoryRun,
   type HistorySession,
   type HistorySessionData,
+  type HistoryTimelineRun,
+  type HistoryTimelineSession,
+  type HistoryTimelineCheckpoint,
 } from "@relay/contracts";
 import type { HistoryTextOptions } from "./history-input.types";
 import { historyDataMessages } from "./history-messages";
@@ -25,7 +28,7 @@ import { HISTORY_TITLE_RULES, historyTextViolation } from "./history-text";
 /**
  * Проверяет форму записи и внутреннюю согласованность участия, не разрешая ссылки в БД.
  */
-class HistoryDecoder {
+export class HistoryDecoder {
   /* Исходная запись для декодирования и адресной диагностики; не изменяется. */
   private readonly record: Readonly<EntityRecord>;
 
@@ -169,11 +172,26 @@ class HistoryDecoder {
   run(value: unknown, field: string): HistoryRun {
     const input = this.object(value, field);
     const run: HistoryRun = {
+      ...this.runHeader(value, field),
+      reason: this.nullableText(input.reason, `${field}.reason`),
+      endReason: this.nullableText(input.endReason, `${field}.endReason`),
+    };
+    if (run.state === "active" ? run.endReason !== null : run.endReason === null) {
+      this.corrupt(`${field}.state/endedAt/endReason`);
+    }
+    return run;
+  }
+
+  /**
+   * Декодирует только выбранную атрибуцию участия; не подставляет отсутствующие Markdown-причины.
+   */
+  runHeader(value: unknown, field: string): Omit<HistoryTimelineRun, "sessionId"> {
+    const input = this.object(value, field);
+    const run: Omit<HistoryTimelineRun, "sessionId"> = {
       id: this.text(input.id, `${field}.id`, { singleLine: true }),
       key: this.text(input.key, `${field}.key`, { singleLine: true }),
       actor: this.actor(input.actor, `${field}.actor`),
       state: this.enumeration(input.state, historyRunStates, `${field}.state`),
-      reason: this.nullableText(input.reason, `${field}.reason`),
       operator: this.operator(input.operator, `${field}.operator`),
       client: this.nullableText(input.client, `${field}.client`, { singleLine: true }),
       sourceSessionId: this.nullableText(input.sourceSessionId, `${field}.sourceSessionId`, {
@@ -184,16 +202,11 @@ class HistoryDecoder {
       }),
       startedAt: this.timestamp(input.startedAt, `${field}.startedAt`),
       endedAt: input.endedAt === null ? null : this.timestamp(input.endedAt, `${field}.endedAt`),
-      endReason: this.nullableText(input.endReason, `${field}.endReason`),
     };
     if (run.key !== `RUN-${run.id}`) {
       this.corrupt(`${field}.key`);
     }
-    if (
-      run.state === "active"
-        ? run.endedAt !== null || run.endReason !== null
-        : run.endedAt === null || run.endReason === null
-    ) {
+    if (run.state === "active" ? run.endedAt !== null : run.endedAt === null) {
       this.corrupt(`${field}.state/endedAt/endReason`);
     }
     return run;
@@ -249,7 +262,12 @@ class HistoryDecoder {
   /**
    * Проверяет единственную последовательную цепочку участия и соответствие последнего run статусу.
    */
-  private checkSessionRuns(data: Readonly<HistorySessionData>): void {
+  private checkSessionRuns(
+    data: Pick<HistorySessionData, "status" | "currentRunId" | "parentSessionId"> & {
+      /* Для цепочки достаточно заголовков; полное чтение дополнительно проверяет причины. */
+      readonly runs: readonly Omit<HistoryRun, "reason" | "endReason">[];
+    },
+  ): void {
     this.unique(
       data.runs.map((run) => run.id),
       "runs.id",
@@ -290,6 +308,57 @@ class HistoryDecoder {
   }
 
   /**
+   * Проверяет компактные поля сессии теми же правилами цепочки участия, что полное чтение.
+   */
+  timelineSession(): HistoryTimelineSession {
+    const input = this.record.data;
+    const session: HistoryTimelineSession = {
+      id: this.record.id,
+      key: this.record.key,
+      revision: this.record.revision,
+      createdAt: this.timestamp(this.record.createdAt, "createdAt"),
+      title: this.text(input.title, "title", HISTORY_TITLE_RULES),
+      status: this.enumeration(input.status, historySessionStatuses, "status"),
+      currentRunId: this.nullableText(input.currentRunId, "currentRunId", { singleLine: true }),
+      parentSessionId: this.nullableText(input.parentSessionId, "parentSessionId", {
+        singleLine: true,
+      }),
+      originCheckpointId: this.nullableText(input.originCheckpointId, "originCheckpointId", {
+        singleLine: true,
+      }),
+      createdByRunId: this.nullableText(input.createdByRunId, "createdByRunId", {
+        singleLine: true,
+      }),
+      closedAt: input.closedAt === null ? null : this.timestamp(input.closedAt, "closedAt"),
+      runs: this.array(input.runs, "runs", (value, field) => ({
+        ...this.runHeader(value, field),
+        sessionId: this.record.id,
+      })),
+    };
+    this.checkSessionRuns(session);
+    if (
+      (session.status === "completed" || session.status === "cancelled") !==
+      (session.closedAt !== null)
+    ) {
+      this.corrupt("status/closedAt");
+    }
+    this.checkOrigin(session);
+    return session;
+  }
+
+  /**
+   * Проверяет неделимую тройку происхождения в полной и компактной карточках.
+   */
+  private checkOrigin(
+    data: Pick<HistoryTimelineSession, "parentSessionId" | "originCheckpointId" | "createdByRunId">,
+  ): void {
+    const origin = [data.parentSessionId, data.originCheckpointId, data.createdByRunId];
+    if (origin.some((value) => value === null) && origin.some((value) => value !== null)) {
+      this.corrupt("parentSessionId/originCheckpointId/createdByRunId");
+    }
+  }
+
+  /**
    * Проверяет обязательность итога закрытия и неделимость тройки происхождения ребёнка.
    */
   private checkSessionClosure(data: Readonly<HistorySessionData>): void {
@@ -301,10 +370,7 @@ class HistoryDecoder {
     ) {
       this.corrupt("status/closedAt/result");
     }
-    const origin = [data.parentSessionId, data.originCheckpointId, data.createdByRunId];
-    if (origin.some((value) => value === null) && origin.some((value) => value !== null)) {
-      this.corrupt("parentSessionId/originCheckpointId/createdByRunId");
-    }
+    this.checkOrigin(data);
   }
 
   /**
@@ -313,16 +379,8 @@ class HistoryDecoder {
   checkpointData(): HistoryCheckpointData {
     const input = this.object(this.record.data, "data");
     const data: HistoryCheckpointData = {
-      kind: this.enumeration(input.kind, historyCheckpointKinds, "kind"),
-      sessionId: this.text(input.sessionId, "sessionId", { singleLine: true }),
-      runId: this.text(input.runId, "runId", { singleLine: true }),
-      actor: this.actor(input.actor, "actor"),
-      intentId: this.nullableText(input.intentId, "intentId", { singleLine: true }),
-      sequence: this.positiveInteger(input.sequence, "sequence"),
-      sessionRevision: this.positiveInteger(input.sessionRevision, "sessionRevision"),
-      title: this.text(input.title, "title", HISTORY_TITLE_RULES),
+      ...this.checkpointHeader(),
       body: this.text(input.body, "body"),
-      summary: this.nullableText(input.summary, "summary"),
       done: this.nullableText(input.done, "done"),
       remaining: this.nullableText(input.remaining, "remaining"),
       nextStep: this.nullableText(input.nextStep, "nextStep"),
@@ -341,11 +399,30 @@ class HistoryDecoder {
       "references.id",
     );
     this.unique(data.acceptedSessionIds, "acceptedSessionIds");
-    if ((data.kind === "intent") !== (data.intentId === null)) {
-      this.corrupt("kind/intentId");
-    }
     if (data.kind === "intent" && data.acceptedSessionIds.length > 0) {
       this.corrupt("acceptedSessionIds");
+    }
+    return data;
+  }
+
+  /**
+   * Общий декодер компактных полей материала без чтения его полного текста.
+   */
+  checkpointHeader(): Omit<HistoryTimelineCheckpoint, "id" | "key" | "createdAt"> {
+    const input = this.record.data;
+    const data = {
+      kind: this.enumeration(input.kind, historyCheckpointKinds, "kind"),
+      sessionId: this.text(input.sessionId, "sessionId", { singleLine: true }),
+      runId: this.text(input.runId, "runId", { singleLine: true }),
+      actor: this.actor(input.actor, "actor"),
+      intentId: this.nullableText(input.intentId, "intentId", { singleLine: true }),
+      sequence: this.positiveInteger(input.sequence, "sequence"),
+      sessionRevision: this.positiveInteger(input.sessionRevision, "sessionRevision"),
+      title: this.text(input.title, "title", HISTORY_TITLE_RULES),
+      summary: this.nullableText(input.summary, "summary"),
+    };
+    if ((data.kind === "intent") !== (data.intentId === null)) {
+      this.corrupt("kind/intentId");
     }
     if (data.sessionRevision < 2 || this.record.revision !== 1) {
       this.corrupt("revision/sessionRevision");

@@ -1,0 +1,54 @@
+.root {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  min-width: 0;
+  padding-block: 0.55rem;
+  padding-inline-end: 0.35rem;
+  border-radius: var(--mantine-radius-sm);
+
+  &:hover {
+    background: var(--tasks-subtle);
+  }
+  &._current {
+    background: var(--tasks-selected);
+  }
+}
+
+.arrowSlot {
+  width: 1rem;
+  min-height: 1.25rem;
+  flex-shrink: 0;
+}
+.chevron {
+  &._expanded {
+    transform: rotate(90deg);
+  }
+}
+.checkbox {
+  flex-shrink: 0;
+  padding-top: 2px;
+}
+.label {
+  display: grid;
+  gap: 0.3rem;
+  flex: 1;
+  min-width: 0;
+}
+.name {
+  color: var(--tasks-ink);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  &._feature {
+    font-weight: 600;
+  }
+}
+.meta {
+  color: var(--tasks-muted);
+  font-size: 0.625rem;
+}
+.missing {
+  color: var(--tasks-warning-ink);
+  font-size: 0.625rem;
+}

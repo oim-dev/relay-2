@@ -1,0 +1,14 @@
+.root {
+  padding: var(--mantine-spacing-md);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-default);
+  min-width: 0;
+}
+
+.fields {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}

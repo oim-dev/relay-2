@@ -36,6 +36,7 @@ import {
   readOutboxDigests,
   readOutboxWindow,
 } from "../replication/replication-outbox";
+import { graphSourceRecords } from "../entities/graph-sources";
 import type {
   ReplicationOutboxRequest,
   ReplicationOutboxWindow,
@@ -628,6 +629,13 @@ export class ProjectDatabase implements ReplicationStore {
       );
       return records;
     });
+  }
+
+  /**
+   * Выбирает metadata истории/связей без тел; согласованным снимком владеет Core-сценарий.
+   */
+  listGraphSources(view: "history" | "relations"): EntityRecord[] {
+    return this.withOpenConnection(() => graphSourceRecords(this.connection, view));
   }
 
   /**

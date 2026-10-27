@@ -1,0 +1,31 @@
+.root {
+  display: grid;
+  gap: var(--mantine-spacing-xs);
+  min-width: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.relation {
+  width: 100%;
+  padding: 8px;
+  border-radius: var(--mantine-radius-sm);
+  overflow-wrap: anywhere;
+
+  &:hover {
+    background: var(--tasks-subtle);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--mantine-color-blue-6);
+    outline-offset: 1px;
+  }
+}
+
+.identifier {
+  margin-top: 3px;
+}

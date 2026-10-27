@@ -12,7 +12,7 @@ import {
   type TaskRecord,
 } from "@relay/contracts";
 import { TASK_CRITERION_TEXT_RULES } from "./task-constants";
-import type { StoredTask } from "./task-data.types";
+import type { StoredTask, TaskViewRecord } from "./task-data.types";
 import type { TaskGraphNode } from "./task-graph.types";
 import type { TaskCriterionContent } from "./task-input.types";
 import { taskMessages } from "./task-messages";
@@ -172,6 +172,34 @@ export function taskGraphNode(task: StoredTask): TaskGraphNode {
     acceptanceCriteria: array(data.acceptanceCriteria, task).map((entry) => ({
       completed: boolean(object(entry, task).completed, task),
     })),
+  };
+}
+
+/**
+ * Декодирует metadata задачи и присоединяет проверенные отметки её графа того же snapshot.
+ * Отсутствие описания/журнала означает выбранную узкую проекцию, а не пустое содержание.
+ */
+export function taskViewRecord(task: EntityRecord, graph: TaskGraphNode): TaskViewRecord {
+  if (task.kind !== "task" || task.id !== graph.id) {
+    corrupt(task);
+  }
+  const data = object(task.data, task);
+  if (!isTaskTitle(data.title)) {
+    corrupt(task);
+  }
+  return {
+    ...task,
+    kind: "task",
+    data: {
+      boardId: text(data.boardId, task),
+      title: data.title,
+      column: column(data.column, task),
+      parentId: data.parentId === null ? null : text(data.parentId, task),
+      dependencies: references(data.dependencies, task),
+      related: references(data.related, task),
+      targets: references(data.targets, task),
+      acceptanceCriteria: graph.acceptanceCriteria,
+    },
   };
 }
 

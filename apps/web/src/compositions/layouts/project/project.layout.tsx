@@ -1,86 +1,196 @@
-import { useState, type ReactElement } from "react";
+import { useEffectEvent, useLayoutEffect, useState } from "react";
 import { Link, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { ActionIcon, Anchor, Drawer, Group, Select, Text, Tooltip } from "@mantine/core";
-import { ClipboardList, Layers3, Menu, Moon, Sun } from "lucide-react";
 import {
-  useProject,
-  useProjectEvents,
-  useWorkspace,
-  projectSelectionOptions,
-  projectSelectionValue,
+  ActionIcon,
+  Button,
+  Code,
+  CopyButton,
+  Drawer,
+  Group,
+  Modal,
+  Select,
+  Stack,
+  Text,
+  Tooltip,
+} from "@mantine/core";
+import { ClipboardList, Layers3, Menu, Moon, Settings, Sun, CloudUpload } from "lucide-react";
+import {
+  useGetProject,
+  useProjectId,
+  useProjectBasePath,
+  useProjectConnection,
+  useProjectSynchronization,
+  useRequestProjectSynchronization,
+  ProjectSynchronizationError,
 } from "domains/project";
+import { useWorkspace } from "domains/workspace";
 import { useThemeColorScheme } from "ui/themes";
-import { GitSync } from "compositions/widgets/git-sync";
+import { ProjectBreadcrumbs } from "compositions/widgets/page-breadcrumbs";
+import { isDefined } from "shared/value-predicates";
 import { ProjectNavigation } from "./ui/project-navigation";
-import { projectMessages as m } from "./project.messages";
+import { WriteRecovery } from "./ui/write-recovery/write-recovery";
 import styles from "./styles/project.module.css";
 
 /**
- * Сохраняет навигацию оригинального Web, отдельные индикаторы SSE/Git и область
- * выбранного проекта. Смена URL размонтирует форму, сохраняя её отдельный draft.
+ * Организует постоянную навигацию и рабочую область одного проекта.
  *
  * Используется для:
- *  - выбора проекта по постоянному ID с отображением всех доступных workspace-алиасов
- *  - размещения навигации, рабочей области и состояния обмена
+ *  - переходов между планированием, исполнением и сопровождением
+ *  - выбора проекта без собственного продуктового состояния workspace
  */
-export function ProjectLayout(): ReactElement {
-  const { projectId } = useProject();
+export const ProjectLayout = () => {
+  const projectId = useProjectId();
+  const project = useGetProject();
   const workspace = useWorkspace();
-  const connection = useProjectEvents();
-  const navigate = useNavigate();
+  const connection = useProjectConnection();
+  const synchronization = useProjectSynchronization();
+  const requestSynchronization = useRequestProjectSynchronization();
+  const [isSyncRequested, setSyncRequested] = useState(false);
+  const [syncRequestError, setSyncRequestError] = useState<string | null>(null);
   const location = useLocation();
-  const [navigationOpen, setNavigationOpen] = useState(false);
+  const navigate = useNavigate();
+  const [isNavigationOpen, setNavigationOpen] = useState(false);
   const { colorScheme, setColorScheme } = useThemeColorScheme();
-  const projectItems = projectSelectionOptions(workspace.data?.projects ?? []);
-  const selectItems = projectItems.map(({ value, label, disabled }) => ({
-    value,
-    label,
-    disabled,
-  }));
-  const current = projectItems.find((item) => item.projectId === projectId);
-  const projectName = current?.label ?? m.project;
-  const base = `/projects/${encodeURIComponent(projectId)}`;
-  const themeDark = colorScheme === "dark";
-  const ThemeIcon = themeDark ? Sun : Moon;
+  const base = useProjectBasePath();
+  const currentProject = workspace.data?.projects.find((item) => item.id === projectId);
+  const projectName = project.data?.name ?? currentProject?.name ?? "Проект";
+  const projectItems = [
+    ...new Map(
+      (workspace.data?.projects ?? []).map((item) => [
+        item.id,
+        {
+          value: item.id,
+          label: item.name,
+          disabled: !item.available,
+        },
+      ]),
+    ).values(),
+  ];
+  const isWorkspace = workspace.data?.mode === "workspace";
+  const isDark = colorScheme === "dark";
+  const ThemeIcon = isDark ? Sun : Moon;
+  const nextTheme = isDark ? "light" : "dark";
+  const state = connection.data?.state ?? "connecting";
+  const connectionLabel = {
+    connected: "Подключено к серверу",
+    connecting: "Соединяемся",
+    reconnecting: "Переподключаемся",
+    disconnected: "Нет соединения",
+    "storage-error": "Ошибка хранилища",
+  }[state];
+  const isSettingsPage = location.pathname === `${base}/settings`;
+  const settingsVariant = isSettingsPage ? "light" : "subtle";
+  const settingsCurrent = isSettingsPage ? "page" : undefined;
+  const isBlocked = connection.data?.blocked ?? false;
+  const syncAction = connection.data?.code === "SYNC_CONFLICT" ? "conflicts" : "status";
+  const syncCommand = `relay git-sync ${syncAction}`;
+  const syncData = synchronization.data;
+  const hasSyncStatus = syncData?.isGit === true || synchronization.error !== undefined;
+  const syncState = syncData?.state ?? "unknown";
+  const deliveryLabel = {
+    local: "База локальная · origin не настроен",
+    synced: "База синхронизирована",
+    pending: "Есть изменения для отправки",
+    syncing: "База синхронизируется в фоне",
+    offline: "Работаем локально · доставка не завершена",
+    conflict: "Работаем локально · конфликт синхронизации",
+    unknown: "Синхронизация ещё не подтверждена",
+  }[syncState];
+  const requestLabels = {
+    queued: "Запрос синхронизации в очереди",
+    running: "Запрос синхронизации выполняется",
+    unknown: "Исход запроса синхронизации неизвестен",
+    failed: "Запрос синхронизации завершился ошибкой",
+    completed: deliveryLabel,
+  };
+  const syncLabel = syncData?.requestState ? requestLabels[syncData.requestState] : deliveryLabel;
+  const syncQueue = syncData?.queuedCommits ?? null;
+  const syncQueueLabel =
+    syncQueue === null
+      ? "Число изменений пока неизвестно"
+      : `Изменений без подтверждения: ${syncQueue}`;
+  const hasUncommittedChanges = syncData !== undefined && syncData.hasUncommittedChanges !== false;
+  const syncLastSuccess = syncData?.lastSuccessAt ?? "ещё не подтверждена";
+  const syncError =
+    syncData?.requestError ??
+    (syncData?.requestState === "completed" ? null : syncRequestError) ??
+    synchronization.error?.message ??
+    syncData?.error;
+  const hasSyncError = isDefined(syncError);
+  const canRequestSync = isDefined(syncData?.origin) || isDefined(syncData?.requestId);
+  const requestIdentityLost = syncData?.requestState === "unknown" && syncData.requestId === null;
+  const syncActionLabel =
+    syncData?.requestState === "queued" ||
+    syncData?.requestState === "running" ||
+    syncData?.requestState === "unknown"
+      ? "Проверить запрос"
+      : "Синхронизировать";
+  const hasSyncConflict = syncState === "conflict";
+  const conflictCommand = "relay git-sync conflicts";
+  const handleSyncRequest = async () => {
+    setSyncRequested(true);
+    setSyncRequestError(null);
+    try {
+      await requestSynchronization();
+    } catch (error) {
+      setSyncRequestError(
+        error instanceof ProjectSynchronizationError
+          ? error.message
+          : "Не удалось обработать ответ синхронизации. Обновите статус перед новой попыткой.",
+      );
+    } finally {
+      setSyncRequested(false);
+    }
+  };
+  const handleBlockedKey = useEffectEvent((event: KeyboardEvent) => {
+    if (!isBlocked || event.key === "Tab") return;
+    // Mantine слушает Escape в capture-фазе window: обработчик внутри dialog
+    // вызывается слишком поздно и не защищает форму в нижнем модальном окне.
+    event.stopImmediatePropagation();
+    if (event.key === "Escape") event.preventDefault();
+  });
+  useLayoutEffect(() => {
+    const listener = (event: KeyboardEvent) => handleBlockedKey(event);
+    window.addEventListener("keydown", listener, true);
+    return () => window.removeEventListener("keydown", listener, true);
+  }, []);
   return (
     <div className={styles.root}>
-      <a className={styles.skipLink} href="#project-content">
-        {m.skip}
-      </a>
+      <WriteRecovery key={projectId} projectId={projectId} projectName={projectName} />
       <header className={styles.header}>
         <Group gap="sm" wrap="nowrap" className={styles.identity}>
           <ActionIcon
             className={styles.menuToggle}
             variant="subtle"
             color="gray"
-            aria-label={m.openNavigation}
-            aria-expanded={navigationOpen}
+            aria-label="Открыть навигацию"
+            aria-expanded={isNavigationOpen}
             aria-haspopup="dialog"
             onClick={() => setNavigationOpen(true)}
           >
-            <Menu size={20} />
+            <Menu size={20} aria-hidden="true" />
           </ActionIcon>
-          <Layers3 size={22} className={styles.brandIcon} aria-hidden="true" />
-          <Anchor component={Link} to="/" className={styles.brand}>
-            Relay
-          </Anchor>
+          <Layers3 size={22} className={styles.brandIcon} />
+          <span className={styles.brand}>Relay</span>
           <span className={styles.divider}>/</span>
-          <Text className={styles.projectName} fw={600} size="sm" lineClamp={1} title={projectName}>
+          <Text
+            className={styles.projectName}
+            data-workspace={isWorkspace}
+            fw={600}
+            size="sm"
+            lineClamp={1}
+          >
             {projectName}
           </Text>
-          {workspace.data?.mode === "workspace" && (
+          {isWorkspace && (
             <Select
-              aria-label={m.selectProject}
+              aria-label="Выбрать проект"
               size="xs"
-              data={selectItems}
-              value={projectSelectionValue(projectId)}
+              data={projectItems}
+              value={projectId}
               allowDeselect={false}
-              searchable
-              onChange={(value) => {
-                const selected = projectItems.find((item) => item.value === value);
-                if (selected !== undefined && !selected.disabled && selected.projectId !== null) {
-                  navigate(`/projects/${encodeURIComponent(selected.projectId)}`);
-                }
+              onChange={(id) => {
+                if (id !== null) navigate(`/projects/${encodeURIComponent(id)}/`);
               }}
               className={styles.selector}
               comboboxProps={{ width: 260, position: "bottom-start" }}
@@ -88,51 +198,146 @@ export function ProjectLayout(): ReactElement {
           )}
         </Group>
         <Group gap="sm" wrap="nowrap" className={styles.actions}>
-          <Tooltip label={m.connection[connection]}>
-            <span className={styles.connection} data-state={connection} role="status">
+          <Tooltip label={connectionLabel}>
+            <span className={styles.connection} data-state={state} role="status">
               <span className={styles.dot} />
-              <span className={styles.connectionText}>{m.connection[connection]}</span>
+              <span className={styles.connectionText}>{connectionLabel}</span>
             </span>
           </Tooltip>
           <ActionIcon
             variant="subtle"
             color="gray"
-            aria-label={m.theme}
-            onClick={() => setColorScheme(themeDark ? "light" : "dark")}
+            aria-label="Переключить цветовую тему"
+            onClick={() => setColorScheme(nextTheme)}
           >
             <ThemeIcon size={17} />
           </ActionIcon>
+          <Tooltip label="Настройки проекта">
+            <ActionIcon
+              component={Link}
+              to={`${base}/settings`}
+              variant={settingsVariant}
+              color="gray"
+              aria-label="Настройки проекта"
+              aria-current={settingsCurrent}
+            >
+              <Settings size={18} aria-hidden="true" />
+            </ActionIcon>
+          </Tooltip>
         </Group>
       </header>
       <div className={styles.workspace}>
         <aside className={styles.sidebar}>
-          <div className={styles.sectionLabel}>{m.project}</div>
+          <div className={styles.sectionLabel}>ПРОЕКТ</div>
           <ProjectNavigation basePath={base} />
           <div className={styles.sidebarFooter}>
             <ClipboardList size={16} />
             <Text size="xs" c="dimmed">
-              {m.memory}
+              Общий контекст.
+              <br />
+              Осмысленный следующий шаг.
             </Text>
           </div>
         </aside>
-        <main id="project-content" className={styles.content}>
-          <GitSync />
-          <div className={styles.page}>
-            <Outlet key={location.pathname} />
-          </div>
+        <main className={styles.content}>
+          <ProjectBreadcrumbs />
+          {hasSyncStatus && (
+            <details className={styles.synchronization} data-state={syncState}>
+              <summary aria-label="Синхронизация базы">
+                <CloudUpload size={16} aria-hidden="true" />
+                <span role="status">{syncLabel}</span>
+                <span className={styles.syncQueue}>{syncQueueLabel}</span>
+              </summary>
+              <Stack gap="xs" className={styles.syncDetails}>
+                <Text size="sm">
+                  Чтение и запись работают с локальной базой без ожидания Git. Очередь показана по
+                  последнему проверенному состоянию origin.
+                </Text>
+                {hasUncommittedChanges && (
+                  <Text size="sm">
+                    {syncData?.hasUncommittedChanges === null
+                      ? "Количество неэкспортированных изменений пока неизвестно."
+                      : "Есть ещё не экспортированные изменения; они уже сохранены в локальной базе."}
+                  </Text>
+                )}
+                <Text size="xs">Последняя успешная синхронизация: {syncLastSuccess}</Text>
+                {hasSyncError && (
+                  <Text size="sm" className={styles.syncError}>
+                    {syncError}
+                  </Text>
+                )}
+                {hasSyncConflict && (
+                  <Code block className={styles.syncCommand}>
+                    {conflictCommand}
+                  </Code>
+                )}
+                {canRequestSync && (
+                  <Group>
+                    <Button
+                      size="xs"
+                      variant="default"
+                      loading={isSyncRequested}
+                      disabled={requestIdentityLost}
+                      onClick={() => void handleSyncRequest()}
+                    >
+                      {syncActionLabel}
+                    </Button>
+                  </Group>
+                )}
+              </Stack>
+            </details>
+          )}
+          <Outlet />
         </main>
       </div>
       <Drawer
-        opened={navigationOpen}
+        opened={isNavigationOpen}
         onClose={() => setNavigationOpen(false)}
         position="left"
         size="min(20rem, calc(100vw - 2rem))"
-        title={m.navigation}
-        closeButtonProps={{ "aria-label": m.closeNavigation }}
+        title="Разделы проекта"
+        closeButtonProps={{ "aria-label": "Закрыть навигацию" }}
         classNames={{ content: styles.drawer, header: styles.drawerHeader }}
       >
         <ProjectNavigation basePath={base} onNavigate={() => setNavigationOpen(false)} />
       </Drawer>
+      <Modal.Root
+        opened={isBlocked}
+        onClose={() => {}}
+        closeOnClickOutside={false}
+        closeOnEscape={false}
+        zIndex={1000}
+        centered
+      >
+        <Modal.Overlay />
+        <Modal.Content>
+          <Modal.Header role="presentation">
+            <Modal.Title>Работа с базой приостановлена</Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <Stack gap="md">
+              <Text>{connection.data?.message}</Text>
+              <Text size="sm">
+                Выполните команду на стороне Server и разрешите конфликт. Открытая форма остаётся на
+                странице; после разблокировки проверьте актуальные данные перед сохранением.
+              </Text>
+              <Code block className={styles.syncCommand}>
+                {syncCommand}
+              </Code>
+              <CopyButton value={syncCommand}>
+                {({ copied, copy }) => {
+                  const label = copied ? "Команда скопирована" : "Скопировать команду";
+                  return (
+                    <Button data-autofocus onClick={copy}>
+                      {label}
+                    </Button>
+                  );
+                }}
+              </CopyButton>
+            </Stack>
+          </Modal.Body>
+        </Modal.Content>
+      </Modal.Root>
     </div>
   );
-}
+};

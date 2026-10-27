@@ -1,0 +1,44 @@
+.root {
+  height: 100%;
+  min-height: 470px;
+  min-width: 0;
+  background: var(--tasks-canvas);
+  --xy-background-color: var(--tasks-canvas);
+  --xy-node-boxshadow-selected: none;
+  /* Библиотека задаёт серый текст ссылки; тёмная подложка обеспечивает контраст в обеих темах. */
+  --xy-attribution-background-color: var(--mantine-color-dark-8);
+}
+
+.panel {
+  border-radius: var(--mantine-radius-sm);
+  box-shadow: var(--tasks-card-shadow);
+}
+
+.notice {
+  padding: var(--mantine-spacing-xs);
+  border-radius: var(--mantine-radius-sm);
+  background: var(--tasks-surface);
+  color: var(--tasks-muted);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  max-width: calc(100% - 32px);
+  gap: var(--mantine-spacing-md);
+  padding: 7px 10px;
+  border-radius: var(--mantine-radius-sm);
+  background: var(--tasks-surface);
+  color: var(--tasks-muted);
+  font-size: 10px;
+}
+
+.origin {
+  border-left: 3px solid var(--mantine-color-blue-6);
+  padding-left: 6px;
+}
+
+.selected {
+  border-left: 3px solid var(--mantine-color-teal-6);
+  padding-left: 6px;
+}

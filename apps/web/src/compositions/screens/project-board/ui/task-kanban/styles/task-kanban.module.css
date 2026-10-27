@@ -1,0 +1,23 @@
+.root {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 2px 2px 14px;
+  flex: 1;
+  scrollbar-width: thin;
+  overscroll-behavior-x: contain;
+}
+.overlay {
+  cursor: grabbing;
+}
+.saving {
+  position: fixed;
+  bottom: 16px;
+  right: 20px;
+  z-index: 40;
+  padding: 8px 12px;
+  background: var(--tasks-surface);
+  border: 1px solid var(--tasks-border);
+  border-radius: 8px;
+}

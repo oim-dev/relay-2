@@ -16,7 +16,9 @@ export async function withServer(
 ): Promise<void> {
   const parent = resolve(
     import.meta.dir,
-    "../../../../.artifacts/2026-10-25/server-web/nest-server/fixtures",
+    "../../../../.artifacts",
+    new Date().toISOString().slice(0, 10),
+    "server-web/nest-server/fixtures",
   );
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, "http-"));

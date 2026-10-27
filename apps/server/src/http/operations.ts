@@ -25,6 +25,8 @@ export const HTTP_OPERATIONS = {
     path: "/api/v2/projects/{projectId}/applications/{ref}/participation",
   },
   taskProgress: { method: "GET", path: "/api/v2/projects/{projectId}/tasks/{ref}/progress" },
+  taskViews: { method: "GET", path: "/api/v2/projects/{projectId}/task-views" },
+  taskCandidates: { method: "GET", path: "/api/v2/projects/{projectId}/task-candidates" },
   taskComments: { method: "GET", path: "/api/v2/projects/{projectId}/tasks/{ref}/comments" },
   taskComment: { method: "GET", path: "/api/v2/projects/{projectId}/tasks/{ref}/comments/{id}" },
   taskCriteria: { method: "GET", path: "/api/v2/projects/{projectId}/tasks/{ref}/criteria" },
@@ -46,6 +48,11 @@ export const HTTP_OPERATIONS = {
   releaseProgress: { method: "GET", path: "/api/v2/projects/{projectId}/releases/{ref}/progress" },
   releasePlans: { method: "GET", path: "/api/v2/projects/{projectId}/releases/{ref}/plans" },
   historySessions: { method: "GET", path: "/api/v2/projects/{projectId}/history/sessions" },
+  historyTimeline: { method: "GET", path: "/api/v2/projects/{projectId}/history/timeline" },
+  relationNeighborhood: {
+    method: "GET",
+    path: "/api/v2/projects/{projectId}/relation-neighborhood",
+  },
   historySession: { method: "GET", path: "/api/v2/projects/{projectId}/history/sessions/{ref}" },
   historyContext: {
     method: "GET",

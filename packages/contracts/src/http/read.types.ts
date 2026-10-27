@@ -5,6 +5,12 @@ import type {
 } from "../knowledge/knowledge.types";
 import type { TaskComment, TaskCriterion, TaskProgress, TaskRecord } from "../tasks/tasks.types";
 import type {
+  TaskViewPage,
+  TaskViewQuery,
+  TaskCandidatePage,
+  TaskCandidateQuery,
+} from "../tasks/task-views.types";
+import type {
   PlanProgress,
   ReleaseProgress,
   PlanStages,
@@ -20,6 +26,14 @@ import type {
   HistorySessionStatus,
 } from "../history/history.types";
 import type { EntityReadResult } from "../queries/entity-read.types";
+import type {
+  HistoryTimelinePage,
+  HistoryTimelineRequest,
+} from "../history/history-timeline.types";
+import type {
+  RelationNeighborhood,
+  RelationNeighborhoodRequest,
+} from "../queries/relation-neighborhood.types";
 import type { GitSyncControlOutcome } from "../replication/git-sync-control.types";
 import type {
   GitSyncConflictList,
@@ -45,6 +59,10 @@ export interface HttpTaskCollection<T> {
  * Результаты именованных GET-проекций реального API; никакого стирания kind/data.
  */
 export interface HttpReadResults {
+  /* Компактная страница и сводка выбранных текущих задач одного snapshot. */
+  readonly taskViews: TaskViewPage;
+  /* Ограниченная страница задач для выбора состава плана. */
+  readonly taskCandidates: TaskCandidatePage;
   /* Техническое состояние без загрузки содержания проекта. */
   readonly projectStatus: HttpProjectStatus;
   /* Явная полная диагностика целостности Core. */
@@ -94,6 +112,10 @@ export interface HttpReadResults {
   readonly releasePlans: ReleasePlans;
   /* Сессии в порядке Core. */
   readonly historySessions: readonly HistorySession[];
+  /* Компактная хронология, незакрытые концы и границы одного generation. */
+  readonly historyTimeline: HistoryTimelinePage;
+  /* Окно реальных структурированных отношений без полных карточек. */
+  readonly relationNeighborhood: RelationNeighborhood;
   /* Карточка сессии. */
   readonly historySession: HistorySession;
   /* Согласованный контекст сессии. */
@@ -148,6 +170,26 @@ export interface HttpStageParameters extends HttpReferenceParameters {
  * Параметры именованных проекций. Массивы query кодируются повторяющимися ключами.
  */
 export interface HttpReadParameters {
+  /* Окно истории; без query используется начало всего проекта. */
+  readonly historyTimeline: {
+    /* Параметры окна; отсутствие выбирает начало проекта. */
+    readonly query?: HistoryTimelineRequest;
+  };
+  /* Ограниченное соседство либо окно metadata всего проекта. */
+  readonly relationNeighborhood: {
+    /* Параметры соседства; отсутствие выбирает начало общего каталога. */
+    readonly query?: RelationNeighborhoodRequest;
+  };
+  /* Фильтры и исходное поколение компактной страницы задач. */
+  readonly taskViews: {
+    /* Текущие фильтры задач и исходное поколение продолжения. */
+    readonly query: TaskViewQuery;
+  };
+  /* Выбор состава плана с фильтрацией доступности до окна. */
+  readonly taskCandidates: {
+    /* Фильтры задач и адрес редактируемого этапа, без новой семантики записи. */
+    readonly query: TaskCandidateQuery;
+  };
   /* Технический status выбранного проекта не принимает фильтры. */
   readonly projectStatus: Record<string, never>;
   /* Проверка целостности относится ко всему выбранному проекту. */

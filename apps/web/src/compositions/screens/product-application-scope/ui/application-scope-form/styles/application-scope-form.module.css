@@ -1,0 +1,56 @@
+.root {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.workspace {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+
+  @media (--lg) {
+    grid-template-columns: minmax(17rem, 0.8fr) minmax(0, 1.35fr);
+  }
+}
+
+.selectionPane {
+  min-width: 0;
+  &._hiddenOnMobile {
+    display: none;
+    @media (--lg) {
+      display: block;
+    }
+  }
+}
+
+.editorPane {
+  min-width: 0;
+  scroll-margin-top: 5rem;
+  &._hiddenOnMobile {
+    display: none;
+    @media (--lg) {
+      display: block;
+    }
+  }
+}
+
+.footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-chrome);
+  box-shadow: var(--tasks-card-shadow);
+}

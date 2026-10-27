@@ -1,0 +1,37 @@
+.root {
+  display: block;
+  min-width: 0;
+  max-width: 16rem;
+  padding: 6px 8px;
+  overflow: hidden;
+  border-radius: var(--mantine-radius-sm);
+  color: var(--tasks-muted);
+  font-size: var(--mantine-font-size-xs);
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  &:hover {
+    background: var(--tasks-subtle);
+    color: var(--tasks-ink);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--tasks-focus-ring);
+    outline-offset: -2px;
+  }
+
+  &._current {
+    flex-shrink: 0;
+    max-width: min(28rem, 60%);
+    color: var(--tasks-ink);
+    background: var(--tasks-subtle);
+    font-weight: 600;
+  }
+}
+
+.menuItem {
+  min-height: 36px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

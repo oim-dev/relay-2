@@ -1,0 +1,138 @@
+.root {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.4rem 0.75rem 0.4rem 0;
+  border-radius: var(--mantine-radius-sm);
+
+  &._feature {
+    margin-top: 0.5rem;
+    padding-block: 0.75rem 0.5rem;
+  }
+
+  &._feature._expanded::after {
+    content: "";
+    position: absolute;
+    top: 2.125rem;
+    bottom: 0;
+    left: 2.5625rem;
+    border-left: 1px solid var(--tasks-border);
+    pointer-events: none;
+  }
+
+  &._scenario {
+    padding-left: 3.75rem;
+
+    &::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 2.5625rem;
+      border-left: 1px solid var(--tasks-border);
+      pointer-events: none;
+    }
+
+    &::after {
+      content: "";
+      position: absolute;
+      top: 1.125rem;
+      left: 2.5625rem;
+      width: 0.8125rem;
+      border-top: 1px solid var(--tasks-border);
+      pointer-events: none;
+    }
+  }
+
+  &._scenario._last::before {
+    bottom: auto;
+    height: 1.125rem;
+  }
+
+  &:hover {
+    background: var(--tasks-subtle);
+  }
+}
+
+.toggleSlot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.5rem;
+  min-height: 1.5rem;
+}
+
+.chevron {
+  &._expanded {
+    transform: rotate(90deg);
+  }
+}
+
+.content {
+  flex: 1;
+  min-width: 0;
+}
+
+.headline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+  min-height: 1.5rem;
+  padding-top: 0.15rem;
+}
+
+.title {
+  min-width: 0;
+  max-width: calc(100% - 1.625rem);
+  color: var(--tasks-ink);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+
+  &._feature {
+    font-weight: 600;
+  }
+
+  &:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--tasks-focus-ring);
+    outline-offset: 3px;
+    border-radius: 2px;
+  }
+}
+
+.count {
+  width: 100%;
+  padding-left: 1.625rem;
+  color: var(--tasks-muted);
+  font-size: 0.6875rem;
+  line-height: 1.8;
+
+  @media (--md) {
+    width: auto;
+    margin-left: auto;
+    padding-left: 0.5rem;
+  }
+}
+
+.summary {
+  margin: 0.35rem 0 0 1.625rem;
+  color: var(--tasks-muted);
+  font-size: 0.75rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.source {
+  flex-shrink: 0;
+  margin-top: 0.125rem;
+}

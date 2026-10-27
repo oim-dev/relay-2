@@ -1,9 +1,11 @@
 import { Controller, Inject, Param } from "@nestjs/common";
 import { ApiTags } from "@nestjs/swagger";
-import { PlanningService, TasksService } from "@relay/core";
+import { PlanningService, TasksService, TaskViewsService } from "@relay/core";
 import type { HttpApiSchemas } from "@relay/contracts";
 import { Operation } from "../../http/operation";
 import { ProjectsService } from "../projects/projects.service";
+import { QueryInput } from "../../http/query";
+import { taskViewQuery } from "./task-view-query";
 
 /**
  * Предметные проекции задач, критериев и независимого журнала; каждый состав читается snapshot.
@@ -18,6 +20,34 @@ export class TasksController {
     /* Проверенная область и владелец snapshots задач. */
     @Inject(ProjectsService) private readonly projects: ProjectsService,
   ) {}
+
+  /**
+   * Читает компактное окно и сводку задач с одним графом и поколением Core.
+   */
+  @Operation("taskViews")
+  async views(
+    @Param("projectId") projectId: string,
+    @QueryInput() query: URLSearchParams,
+  ): Promise<HttpApiSchemas["taskViews"]> {
+    return this.projects.run(projectId, (db) => ({
+      ok: true,
+      data: new TaskViewsService(db).page(taskViewQuery(query)),
+    }));
+  }
+
+  /**
+   * Отбирает доступные включения до окна без каталожного HTTP N+1.
+   */
+  @Operation("taskCandidates")
+  async candidates(
+    @Param("projectId") projectId: string,
+    @QueryInput() query: URLSearchParams,
+  ): Promise<HttpApiSchemas["taskCandidates"]> {
+    return this.projects.run(projectId, (db) => ({
+      ok: true,
+      data: new TaskViewsService(db).candidates(taskViewQuery(query)),
+    }));
+  }
 
   /**
    * Вычисляет текущую готовность по графу обязательств Core.

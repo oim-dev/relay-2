@@ -1,0 +1,41 @@
+.root {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 3rem;
+  padding-inline: var(--tasks-page-gutter);
+  border-bottom: 1px solid var(--tasks-border);
+  background: var(--tasks-chrome);
+
+  &._embedded {
+    padding-inline: 0;
+    margin-bottom: var(--mantine-spacing-md);
+    background: transparent;
+  }
+}
+
+.trail {
+  flex: 1;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+
+.crumb {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.separator {
+  flex: 0 0 auto;
+  color: var(--tasks-soft);
+}
+
+.overflow {
+  flex: 0 0 auto;
+}
+
+.dropdown {
+  max-width: calc(100vw - 2rem);
+  max-height: min(28rem, 70dvh);
+  overflow-y: auto;
+}

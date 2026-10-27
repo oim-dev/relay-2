@@ -1,11 +1,9 @@
 import {
   ActionIcon,
   Autocomplete,
-  Badge,
   Button,
   createTheme,
   defaultVariantColorsResolver,
-  Drawer,
   Input,
   InputBase,
   Modal,
@@ -19,7 +17,6 @@ import {
 } from "@mantine/core";
 import type { CSSVariablesResolver } from "@mantine/core";
 import progressClasses from "../styles/progress.module.css";
-import { themeMessages } from "./theme.messages";
 
 /**
  * Согласует поверхности Mantine с графитовой палитрой и контрастом нейтральных действий.
@@ -144,13 +141,6 @@ export const theme = createTheme({
     ],
   },
   components: {
-    Badge: Badge.extend({ defaultProps: { variant: "light" } }),
-    Drawer: Drawer.extend({
-      defaultProps: {
-        closeButtonProps: { "aria-label": themeMessages.close },
-        attributes: { header: { role: "presentation" } },
-      },
-    }),
     Button: Button.extend({ defaultProps: { size: "sm", fw: 550 } }),
     ActionIcon: ActionIcon.extend({ defaultProps: { size: 32, variant: "subtle", color: "gray" } }),
     Input: Input.extend({ defaultProps: { size: "sm" } }),
@@ -172,8 +162,6 @@ export const theme = createTheme({
     Tooltip: Tooltip.extend({ defaultProps: { withArrow: true, openDelay: 400 } }),
     Modal: Modal.extend({
       defaultProps: {
-        closeButtonProps: { "aria-label": themeMessages.close },
-        attributes: { header: { role: "presentation" } },
         centered: true,
         radius: "lg",
         overlayProps: { backgroundOpacity: 0.3, blur: 2 },

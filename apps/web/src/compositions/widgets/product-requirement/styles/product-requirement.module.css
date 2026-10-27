@@ -1,0 +1,53 @@
+.root {
+  display: grid;
+  gap: var(--mantine-spacing-lg);
+  min-width: 0;
+  align-items: start;
+
+  @media (--xl) {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+
+.navigation {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--mantine-spacing-md) var(--mantine-spacing-xl);
+  padding-bottom: var(--mantine-spacing-md);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.content {
+  display: grid;
+  gap: var(--mantine-spacing-lg);
+  min-width: 0;
+}
+
+.sidebar {
+  display: grid;
+  gap: var(--mantine-spacing-md);
+  min-width: 0;
+}
+
+.document {
+  min-width: 0;
+  scroll-margin-top: 5rem;
+  padding: var(--mantine-spacing-md);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-body);
+  overflow-wrap: anywhere;
+
+  @media (--md) {
+    padding: var(--mantine-spacing-xl);
+  }
+}
+
+.context {
+  padding: var(--mantine-spacing-lg);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--mantine-color-default);
+  overflow-wrap: anywhere;
+}

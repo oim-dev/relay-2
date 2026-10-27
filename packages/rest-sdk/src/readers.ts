@@ -19,6 +19,26 @@ export function createRelayReaders(api: RelayGeneratedApi): RelayReaders {
       ),
     taskProgress: (projectId, parameters) =>
       successfulResponse(api.taskProgress(reference(projectId, parameters.ref, "task"))),
+    taskViews: (projectId, parameters) => {
+      const { refs, ...query } = parameters.query;
+      return successfulResponse(
+        api.taskViews({
+          ...query,
+          ...(refs === undefined ? {} : { refs: [...refs] }),
+          ...project(projectId),
+        }),
+      );
+    },
+    taskCandidates: (projectId, parameters) => {
+      const { refs, ...query } = parameters.query;
+      return successfulResponse(
+        api.taskCandidates({
+          ...query,
+          ...(refs === undefined ? {} : { refs: [...refs] }),
+          ...project(projectId),
+        }),
+      );
+    },
     taskComments: (projectId, parameters) =>
       successfulResponse(api.taskComments(reference(projectId, parameters.ref, "task"))),
     taskComment: (projectId, parameters) =>
@@ -69,6 +89,10 @@ export function createRelayReaders(api: RelayGeneratedApi): RelayReaders {
       successfulResponse(api.releasePlans(reference(projectId, parameters.ref, "release"))),
     historySessions: (projectId, parameters) =>
       successfulResponse(api.historySessions({ ...parameters.query, ...project(projectId) })),
+    historyTimeline: (projectId, parameters) =>
+      successfulResponse(api.historyTimeline({ ...parameters.query, ...project(projectId) })),
+    relationNeighborhood: (projectId, parameters) =>
+      successfulResponse(api.relationNeighborhood({ ...parameters.query, ...project(projectId) })),
     historySession: (projectId, parameters) =>
       successfulResponse(api.historySession(reference(projectId, parameters.ref, "work-session"))),
     historyContext: (projectId, parameters) =>

@@ -1,0 +1,53 @@
+.root {
+  min-width: 0;
+  /* Якорь оставляет заголовок ниже закреплённой шапки проекта высотой 4rem. */
+  scroll-margin-top: 5rem;
+
+  &._expanded {
+    overflow: hidden;
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-md);
+    background: var(--mantine-color-body);
+  }
+}
+
+.header {
+  display: grid;
+  gap: var(--mantine-spacing-xs);
+  padding: var(--mantine-spacing-lg);
+  background: var(--mantine-color-default);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--mantine-spacing-sm);
+  padding: var(--mantine-spacing-sm) var(--mantine-spacing-lg);
+  border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.taskLink {
+  flex: 1 1 220px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px var(--mantine-spacing-xs);
+  color: var(--mantine-color-text);
+  min-width: 0;
+  overflow-wrap: anywhere;
+
+  & > span:first-child {
+    grid-column: 1 / -1;
+  }
+
+  &:hover {
+    color: var(--mantine-primary-color-filled);
+  }
+}
+
+.empty {
+  display: grid;
+  gap: var(--mantine-spacing-xs);
+  padding: var(--mantine-spacing-xl);
+}

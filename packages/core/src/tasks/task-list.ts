@@ -1,4 +1,6 @@
-import type { TaskRecord } from "@relay/contracts";
+import type { TaskViewRecord } from "./task-data.types";
+import { RelayError } from "@relay/contracts";
+import { taskViewMessages } from "./task-views.messages";
 import { taskGraphNode } from "./task-data";
 import { TaskGraph } from "./task-graph";
 import type { TaskSelection } from "./task-list.types";
@@ -8,7 +10,7 @@ export type { TaskSelection } from "./task-list.types";
 /**
  * Проверяет фильтры сохранённого содержания без вычисления прогресса и без изменения записи.
  */
-function matchesTaskSelection(record: TaskRecord, selection: TaskSelection): boolean {
+function matchesTaskSelection(record: TaskViewRecord, selection: TaskSelection): boolean {
   const data = record.data;
   if (selection.boardId !== undefined && data.boardId !== selection.boardId) {
     return false;
@@ -28,7 +30,12 @@ function matchesTaskSelection(record: TaskRecord, selection: TaskSelection): boo
     return false;
   }
   const searchValues = [record.id, record.key, data.title];
-  if (selection.searchIn === "all") {
+  if (selection.searchIn === "all" && selection.query !== "" && data.description === undefined) {
+    throw new RelayError("INTERNAL_ERROR", taskViewMessages.missingSearchBody, 1, {
+      id: record.id,
+    });
+  }
+  if (selection.searchIn === "all" && data.description !== undefined) {
     searchValues.push(data.description);
   }
   if (
@@ -44,13 +51,17 @@ function matchesTaskSelection(record: TaskRecord, selection: TaskSelection): boo
  * Фильтрует полный набор одного снимка, сохраняя порядок входных записей.
  * Один граф строится только для readiness; невыполненные собственные критерии не блокируют старт.
  * Пагинация результата ограничивает выдачу, но не объём этого расчёта и исходного чтения.
+ * suppliedGraph должен относиться к тому же снимку; составной reader передаёт его для переиспользования.
  */
-export function selectTaskRecords(
-  records: readonly TaskRecord[],
+export function selectTaskRecords<T extends TaskViewRecord>(
+  records: readonly T[],
   selection: TaskSelection,
-): TaskRecord[] {
+  suppliedGraph?: TaskGraph,
+): T[] {
   const graph =
-    selection.readiness === undefined ? undefined : new TaskGraph(records.map(taskGraphNode));
+    selection.readiness === undefined
+      ? undefined
+      : (suppliedGraph ?? new TaskGraph(records.map(taskGraphNode)));
   return records.filter((record) => {
     if (!matchesTaskSelection(record, selection)) {
       return false;

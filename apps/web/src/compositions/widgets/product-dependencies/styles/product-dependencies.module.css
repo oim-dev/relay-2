@@ -1,0 +1,8 @@
+.root {
+  min-width: 0;
+  scroll-margin-top: 5rem;
+  padding: var(--mantine-spacing-lg);
+  border: 1px solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-md);
+  overflow-wrap: anywhere;
+}

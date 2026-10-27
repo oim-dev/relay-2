@@ -64,3 +64,16 @@ export {
 export { HTTP_COMMAND_INPUT_SCHEMAS, HTTP_COMMAND_EXAMPLES } from "./http/command-schema";
 export type { CommandJsonSchema } from "./http/command-schema.types";
 export { ENTITY_PAGE_SIZE, ENTITY_PAGE_SORTS } from "./pagination/pagination.constants";
+export type {
+  TaskView,
+  TaskViewTarget,
+  TaskViewCounts,
+  TaskViewPage,
+  TaskViewQuery,
+  TaskViewAssignment,
+  TaskCandidate,
+  TaskCandidateQuery,
+  TaskCandidatePage,
+} from "./tasks/task-views.types";
+export type * from "./history/history-timeline.types";
+export type * from "./queries/relation-neighborhood.types";

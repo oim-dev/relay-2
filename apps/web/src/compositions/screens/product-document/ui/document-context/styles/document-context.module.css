@@ -1,0 +1,48 @@
+.root {
+  min-width: 0;
+  padding: 1.25rem;
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-lg);
+  background: var(--tasks-surface);
+  align-self: start;
+  scroll-margin-top: 5rem;
+  &:focus {
+    outline: none;
+  }
+  @media (--lg) {
+    border: 0;
+    border-left: 1px solid var(--tasks-border);
+    border-radius: 0;
+    background: transparent;
+    padding: 0 0 0 1.5rem;
+  }
+}
+.properties {
+  padding-bottom: 1.5rem;
+}
+.sectionLink {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: 0.8125rem;
+}
+.outline {
+  border-top: 1px solid var(--tasks-border);
+  padding-top: 1.5rem;
+  margin-top: 1.5rem;
+}
+.title {
+  margin: 0 0 0.85rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+.outlineLink {
+  display: block;
+  padding-block: 0.35rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  &[data-nested="true"] {
+    padding-left: 0.75rem;
+  }
+}

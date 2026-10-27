@@ -212,8 +212,9 @@ Restore публикует подготовленную БД и привязку
 - **[`apps/server` → `relay-server`](../apps/server/README.md)** — REST API `/api/v2` на NestJS и Fastify под Bun,
   SSE, обслуживание проекта/workspace и раздача встроенного Web. HTTP-реализация принадлежит приложению; отдельный
   `server-runtime` в согласованную структуру не входит.
-- **[`apps/web`](../apps/web/README.md)** — интерфейс человека на React, Mantine, SWR и React Router,
-  поставляемый как статические ресурсы Vite внутри Server.
+- **[`apps/web`](../apps/web/README.md)** — интерфейс человека с исходными экранами
+  первой версии на React, Mantine, SWR и React Router, адаптированный к текущим Contracts.
+  Поставляется как статические ресурсы Vite внутри Server.
 - **[`packages/rest-sdk`](../packages/rest-sdk/README.md)** — браузерный Fetch/EventSource-клиент для Web
   и HTTP-потребителей. HTTP-клиент и операции генерируются из OpenAPI; публичная адаптация
   сохраняет предметные типы Contracts и структурированные ошибки.

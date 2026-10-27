@@ -9,6 +9,7 @@ export type { ApplicationParticipation } from "./knowledge/knowledge.types";
 export { PlanningService } from "./planning/planning";
 export { QueryService } from "./queries/queries";
 export { TasksService } from "./tasks/tasks";
+export { TaskViewsService } from "./tasks/task-views";
 export { BatchService, CommandExecutor, executeCommands } from "./batch/batch";
 export { readVersionedEntity } from "./commands/command-versioned-read";
 export { BATCH_OPERATIONS } from "./batch/batch-catalog";
@@ -27,3 +28,5 @@ export {
   validateReplicationHistory,
 } from "./replication/replication-format";
 export type { ValidatedReplicationHistory } from "./replication/replication-history-proof";
+export { readHistoryTimeline } from "./history/history-timeline";
+export { readRelationNeighborhood } from "./queries/relation-neighborhood";

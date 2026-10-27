@@ -4,27 +4,29 @@ import {
   Files,
   Flag,
   Rocket,
+  Network,
+  Server,
   Sparkles,
   History,
-  LayoutDashboard,
-  ChartNoAxesCombined,
-  Workflow,
-  Boxes,
 } from "lucide-react";
 
-/**
- * Доступные разделы текущих Contracts/Core в порядке рабочего сценария.
- */
-export const NAVIGATION = [
-  { path: "", label: "Обзор", Icon: ChartNoAxesCombined },
-  { path: "knowledge/product", label: "Паспорт продукта", Icon: FileText },
-  { path: "knowledge/feature", label: "Возможности", Icon: Sparkles },
-  { path: "knowledge/scenario", label: "Сценарии", Icon: Workflow },
-  { path: "knowledge/application", label: "Приложения", Icon: AppWindow },
-  { path: "knowledge/implementation", label: "Реализации", Icon: Boxes },
-  { path: "board", label: "Доски и задачи", Icon: LayoutDashboard },
+/** Подразделы продукта в порядке знакомства с ним. */
+export const PRODUCT_NAVIGATION = [
+  { path: "passport", label: "Паспорт", Icon: FileText },
+  { path: "features", label: "Возможности", Icon: Sparkles },
+  { path: "applications", label: "Приложения", Icon: AppWindow },
+];
+
+/** Рабочие разделы проекта после продуктового контекста. */
+export const PROJECT_NAVIGATION = [
   { path: "plans", label: "Планы", Icon: Flag },
   { path: "releases", label: "Релизы", Icon: Rocket },
+];
+
+/** Общие материалы и сопровождение проекта после разделителя. */
+export const PROJECT_RESOURCES_NAVIGATION = [
   { path: "documents", label: "Библиотека знаний", Icon: Files },
-  { path: "history", label: "История работы", Icon: History },
-] as const;
+  { path: "infrastructure", label: "Инфраструктура", Icon: Server },
+  { path: "relations", label: "Связи проекта", Icon: Network },
+  { path: "work-history", label: "История", Icon: History },
+];

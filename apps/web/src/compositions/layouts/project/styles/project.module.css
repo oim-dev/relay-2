@@ -151,26 +151,6 @@
   min-width: 0;
 }
 
-.page {
-  padding: 1rem;
-  overflow-wrap: anywhere;
-  @media (--md) {
-    padding: 1.5rem;
-  }
-}
-
-.skipLink {
-  position: fixed;
-  top: -5rem;
-  left: 1rem;
-  z-index: 100;
-  padding: 1rem;
-  background: var(--tasks-surface);
-  &:focus {
-    top: 0;
-  }
-}
-
 .syncCommand {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

@@ -384,6 +384,32 @@ JSON 413 для обычного и потокового body без запис�
 [организации наборов](../../tests/README.md#браузерные-сценарии-web).
 HTTP-утверждения не означают автоматизированного покрытия поведения React-форм.
 
+### Web
+
+[Граница записи](../../apps/web/src/domains/relay-data/write-commands.unit.test.ts)
+проверяет исходный snapshot команды до первого await, совместный параллельный submit,
+потерю ответа до/после записи, восстановление receipt, неизменность actor/key/guards
+и запрет замены незавершённого запроса другим вводом. Подмена находится на Fetch-границе
+настоящего REST SDK; тест не заменяет проверку сохранённого результата Core.
+
+[Память вкладки](../../apps/web/src/infra/browser-storage/tab-storage.unit.test.ts)
+и [черновики](../../apps/web/src/infra/browser-storage/session-storage.unit.test.ts)
+защищают изоляцию и отсутствие восстановления прежнего persistence без frozen операции.
+[SSE](../../apps/web/src/infra/workspace-events/event-data.unit.test.ts)
+проверяет принадлежность события проекту, его вид и generation.
+
+[Команды продукта](../../apps/web/src/domains/product/helpers/product-commands.unit.test.ts)
+и [разделы библиотеки](../../apps/web/src/domains/documents/helpers/library-section-commands.unit.test.ts)
+проверяют владельцев CAS и цепочки локальных ревизий batch.
+[История](../../apps/web/src/domains/work-history/mappers/history-view.unit.test.ts)
+проверяет преобразование текущих предметных данных в визуальную модель.
+[Связи](../../apps/web/src/domains/relations/mappers/relation-view.unit.test.ts)
+сохраняют ревизию владельца при отзыве документа и не добавляют вымышленные реквизиты ребра.
+
+Эти проверки исполняются через Bun и не рендерят React. Внешний вид, фокус, возвраты,
+перетаскивание, сохранение draft при навигации и работа поставляемых assets принимаются
+отдельно по [руководству Web](../../apps/web/docs/DEVELOPMENT.md#проверки-изменения).
+
 ## Git-транспорт и постоянный обмен
 
 [Snapshot codec](../../apps/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip

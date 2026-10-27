@@ -1,0 +1,11 @@
+.root {
+  min-width: 0;
+  padding: var(--mantine-spacing-md);
+  border: 1px solid var(--tasks-border);
+  border-radius: var(--mantine-radius-md);
+  background: var(--tasks-selected);
+}
+
+.collapsed {
+  min-height: 38px;
+}
