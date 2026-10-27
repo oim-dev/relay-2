@@ -50,11 +50,11 @@ export function findConfig(cwd: string, workspaceOnly: boolean): string | undefi
 }
 
 /**
- * Разрешает каталог, сохраняя порядок symlink и последующих `..` в цели файловой ссылки.
+ * Разрешает каталог Linux, сохраняя порядок symlink и последующих `..` в цели файловой ссылки.
  * Обычный путь требует один realpath; родитель выбирается уже от физического каталога.
  */
 function physicalDirectory(path: string): string {
-  const segments = path.split(process.platform === "win32" ? /[/\\]/u : "/");
+  const segments = path.split("/");
   if (!segments.includes("..")) {
     return realpathSync(path);
   }
@@ -65,11 +65,15 @@ function physicalDirectory(path: string): string {
 
 /**
  * Разрешает физическое имя существующего конфига для публикации и общего mutex.
- * Атомарная замена inode файла не меняет это имя: realpath применяется только к каталогу,
- * конечные symlink раскрываются через readlink. Каталоги и ссылки не заменяются этим вызовом.
+ * В Linux realpath применяется только к каталогу, конечные symlink раскрываются через readlink:
+ * замена inode не подставляет имя удалённого файла. Остальные ОС сохраняют полный realpath,
+ * включая канонизацию коротких имён Windows. Каталоги и ссылки этот вызов не заменяет.
  * Цикл ссылок возвращает файловую ошибку ELOOP; остальные отказы ФС передаются вызывающему.
  */
 export function physicalConfigPath(path: string): string {
+  if (process.platform !== "linux") {
+    return realpathSync(path);
+  }
   const links = new Set<string>();
   let current = path;
   for (;;) {

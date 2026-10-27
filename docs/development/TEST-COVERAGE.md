@@ -37,6 +37,9 @@
 [Физический путь workspace](../../packages/project-runtime/tests/integration/workspace-path.integration.test.ts)
 сохраняет имя публикации и mutex при замене inode во время Linux realpath, включая имя
 с буквальным ` (deleted)`; цепочки файловых и каталоговых symlink ведут к тому же реестру.
+[Короткое имя Windows](../../packages/project-runtime/tests/integration/workspace-windows-path.integration.test.ts)
+проверяет единый mutex для длинного имени и настоящего алиаса `GetShortPathNameW`;
+на томах без файловых алиасов 8.3 этот отдельный случай явно пропускается.
 Регистрации хранят пути каталогов с обязательным `relay.config.json`; выбор из вложенного
 каталога не использует родительский workspace. [Проверки конфигурации](../../packages/project-runtime/tests/integration/config.integration.test.ts)
 защищают разрешение относительных каталогов через symlink workspace и чтение актуальных
