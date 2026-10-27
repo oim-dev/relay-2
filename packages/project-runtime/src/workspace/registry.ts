@@ -11,6 +11,7 @@ import {
   explicitConfig,
   findConfig,
   initializationPath,
+  physicalConfigPath,
   projectConfigName,
   validateOptions,
 } from "../configuration/paths";
@@ -46,7 +47,7 @@ function readSelectedWorkspace(options: RuntimeOptions): WorkspaceSnapshot {
     );
   }
   const config = readWorkspace(path);
-  return { configPath: realpathSync(path), config };
+  return { configPath: physicalConfigPath(path), config };
 }
 
 /**

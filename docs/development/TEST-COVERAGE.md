@@ -34,6 +34,9 @@
 
 Отдельные проверки [публикации workspace](../../packages/project-runtime/tests/integration/workspace.integration.test.ts)
 подтверждают целый прежний JSON до атомарной замены и сохранность реестра при отказе публикации.
+[Физический путь workspace](../../packages/project-runtime/tests/integration/workspace-path.integration.test.ts)
+сохраняет имя публикации и mutex при замене inode во время Linux realpath, включая имя
+с буквальным ` (deleted)`; цепочки файловых и каталоговых symlink ведут к тому же реестру.
 Регистрации хранят пути каталогов с обязательным `relay.config.json`; выбор из вложенного
 каталога не использует родительский workspace. [Проверки конфигурации](../../packages/project-runtime/tests/integration/config.integration.test.ts)
 защищают разрешение относительных каталогов через symlink workspace и чтение актуальных
