@@ -10,11 +10,10 @@
     },
   jobs:
     {
-      cli_quality:
-        { name: CLI / Quality, uses: ./.github/workflows/quality.yml, with: { component: cli } },
+      cli_quality: { name: CLI, uses: ./.github/workflows/quality.yml, with: { component: cli } },
       cli_test_unit_linux_x64:
         {
-          name: CLI / unit / linux-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -23,11 +22,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       cli_test_unit_windows_x64:
         {
-          name: CLI / unit / windows-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -36,11 +36,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       cli_test_unit_macos_arm64:
         {
-          name: CLI / unit / macos-arm64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -49,11 +50,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       cli_test_integration_linux_x64:
         {
-          name: CLI / integration / linux-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -62,11 +64,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       cli_test_integration_windows_x64:
         {
-          name: CLI / integration / windows-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -75,11 +78,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       cli_test_integration_macos_arm64:
         {
-          name: CLI / integration / macos-arm64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -88,11 +92,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       cli_test_process_linux_x64:
         {
-          name: CLI / process / linux-x64,
+          name: CLI,
           needs: [cli_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -102,11 +107,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-process,
+              display-name: Процессные тесты · Linux x64,
             },
         },
       cli_test_process_windows_x64:
         {
-          name: CLI / process / windows-x64,
+          name: CLI,
           needs: [cli_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -116,11 +122,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-process,
+              display-name: Процессные тесты · Windows x64,
             },
         },
       cli_test_process_macos_arm64:
         {
-          name: CLI / process / macos-arm64,
+          name: CLI,
           needs: [cli_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -130,11 +137,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-process,
+              display-name: Процессные тесты · macOS ARM64,
             },
         },
       cli_test_e2e_linux_x64:
         {
-          name: CLI / e2e / linux-x64,
+          name: CLI,
           needs: [cli_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -144,11 +152,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-e2e,
+              display-name: Сквозные тесты CLI · Linux x64,
             },
         },
       cli_test_e2e_windows_x64:
         {
-          name: CLI / e2e / windows-x64,
+          name: CLI,
           needs: [cli_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -158,11 +167,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-e2e,
+              display-name: Сквозные тесты CLI · Windows x64,
             },
         },
       cli_test_e2e_macos_arm64:
         {
-          name: CLI / e2e / macos-arm64,
+          name: CLI,
           needs: [cli_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -172,17 +182,14 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-e2e,
+              display-name: Сквозные тесты CLI · macOS ARM64,
             },
         },
       contracts_quality:
-        {
-          name: Contracts / Quality,
-          uses: ./.github/workflows/quality.yml,
-          with: { component: contracts },
-        },
+        { name: Contracts, uses: ./.github/workflows/quality.yml, with: { component: contracts } },
       contracts_test_unit_linux_x64:
         {
-          name: Contracts / unit / linux-x64,
+          name: Contracts,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -191,11 +198,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       contracts_test_unit_windows_x64:
         {
-          name: Contracts / unit / windows-x64,
+          name: Contracts,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -204,11 +212,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       contracts_test_unit_macos_arm64:
         {
-          name: Contracts / unit / macos-arm64,
+          name: Contracts,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -217,13 +226,14 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       core_quality:
-        { name: Core / Quality, uses: ./.github/workflows/quality.yml, with: { component: core } },
+        { name: Core, uses: ./.github/workflows/quality.yml, with: { component: core } },
       core_test_unit_linux_x64:
         {
-          name: Core / unit / linux-x64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -232,11 +242,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       core_test_unit_windows_x64:
         {
-          name: Core / unit / windows-x64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -245,11 +256,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       core_test_unit_macos_arm64:
         {
-          name: Core / unit / macos-arm64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -258,11 +270,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       core_test_integration_linux_x64:
         {
-          name: Core / integration / linux-x64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -271,11 +284,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       core_test_integration_windows_x64:
         {
-          name: Core / integration / windows-x64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -284,11 +298,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       core_test_integration_macos_arm64:
         {
-          name: Core / integration / macos-arm64,
+          name: Core,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -297,17 +312,14 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       git_sync_quality:
-        {
-          name: Git Sync / Quality,
-          uses: ./.github/workflows/quality.yml,
-          with: { component: git-sync },
-        },
+        { name: Git Sync, uses: ./.github/workflows/quality.yml, with: { component: git-sync } },
       git_sync_test_unit_linux_x64:
         {
-          name: Git Sync / unit / linux-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -316,11 +328,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       git_sync_test_unit_windows_x64:
         {
-          name: Git Sync / unit / windows-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -329,11 +342,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       git_sync_test_unit_macos_arm64:
         {
-          name: Git Sync / unit / macos-arm64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -342,11 +356,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       git_sync_test_integration_linux_x64:
         {
-          name: Git Sync / integration / linux-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -355,11 +370,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       git_sync_test_integration_windows_x64:
         {
-          name: Git Sync / integration / windows-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -368,11 +384,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       git_sync_test_integration_macos_arm64:
         {
-          name: Git Sync / integration / macos-arm64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -381,11 +398,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       git_sync_test_process_linux_x64:
         {
-          name: Git Sync / process / linux-x64,
+          name: Git Sync,
           needs: [git_sync_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -395,11 +413,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-process,
+              display-name: Процессные тесты · Linux x64,
             },
         },
       git_sync_test_process_windows_x64:
         {
-          name: Git Sync / process / windows-x64,
+          name: Git Sync,
           needs: [git_sync_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -409,11 +428,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-process,
+              display-name: Процессные тесты · Windows x64,
             },
         },
       git_sync_test_process_macos_arm64:
         {
-          name: Git Sync / process / macos-arm64,
+          name: Git Sync,
           needs: [git_sync_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -423,17 +443,18 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-process,
+              display-name: Процессные тесты · macOS ARM64,
             },
         },
       project_runtime_quality:
         {
-          name: Project Runtime / Quality,
+          name: Project Runtime,
           uses: ./.github/workflows/quality.yml,
           with: { component: project-runtime },
         },
       project_runtime_test_unit_linux_x64:
         {
-          name: Project Runtime / unit / linux-x64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -442,11 +463,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       project_runtime_test_unit_windows_x64:
         {
-          name: Project Runtime / unit / windows-x64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -455,11 +477,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       project_runtime_test_unit_macos_arm64:
         {
-          name: Project Runtime / unit / macos-arm64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -468,11 +491,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       project_runtime_test_integration_linux_x64:
         {
-          name: Project Runtime / integration / linux-x64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -481,11 +505,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       project_runtime_test_integration_windows_x64:
         {
-          name: Project Runtime / integration / windows-x64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -494,11 +519,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       project_runtime_test_integration_macos_arm64:
         {
-          name: Project Runtime / integration / macos-arm64,
+          name: Project Runtime,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -507,18 +533,19 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       rest_sdk_quality:
         {
-          name: REST SDK / Quality,
+          name: REST SDK,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/quality.yml,
           with: { component: rest-sdk },
         },
       rest_sdk_test_unit_linux_x64:
         {
-          name: REST SDK / unit / linux-x64,
+          name: REST SDK,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -528,11 +555,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       rest_sdk_test_unit_windows_x64:
         {
-          name: REST SDK / unit / windows-x64,
+          name: REST SDK,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -542,11 +570,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       rest_sdk_test_unit_macos_arm64:
         {
-          name: REST SDK / unit / macos-arm64,
+          name: REST SDK,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -556,18 +585,19 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       server_quality:
         {
-          name: Server / Quality,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/quality.yml,
           with: { component: server },
         },
       server_test_unit_linux_x64:
         {
-          name: Server / unit / linux-x64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -577,11 +607,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       server_test_unit_windows_x64:
         {
-          name: Server / unit / windows-x64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -591,11 +622,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       server_test_unit_macos_arm64:
         {
-          name: Server / unit / macos-arm64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -605,11 +637,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       server_test_integration_linux_x64:
         {
-          name: Server / integration / linux-x64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -619,11 +652,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       server_test_integration_windows_x64:
         {
-          name: Server / integration / windows-x64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -633,11 +667,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       server_test_integration_macos_arm64:
         {
-          name: Server / integration / macos-arm64,
+          name: Server,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -647,11 +682,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       server_test_process_linux_x64:
         {
-          name: Server / process / linux-x64,
+          name: Server,
           needs: [rest_sdk_build_portable, web_build_portable, server_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -661,11 +697,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-process,
+              display-name: Процессные тесты · Linux x64,
             },
         },
       server_test_process_windows_x64:
         {
-          name: Server / process / windows-x64,
+          name: Server,
           needs: [rest_sdk_build_portable, web_build_portable, server_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -675,11 +712,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-process,
+              display-name: Процессные тесты · Windows x64,
             },
         },
       server_test_process_macos_arm64:
         {
-          name: Server / process / macos-arm64,
+          name: Server,
           needs: [rest_sdk_build_portable, web_build_portable, server_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
@@ -689,17 +727,14 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-process,
+              display-name: Процессные тесты · macOS ARM64,
             },
         },
       storage_quality:
-        {
-          name: Storage / Quality,
-          uses: ./.github/workflows/quality.yml,
-          with: { component: storage },
-        },
+        { name: Storage, uses: ./.github/workflows/quality.yml, with: { component: storage } },
       storage_test_unit_linux_x64:
         {
-          name: Storage / unit / linux-x64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -708,11 +743,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       storage_test_unit_windows_x64:
         {
-          name: Storage / unit / windows-x64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -721,11 +757,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       storage_test_unit_macos_arm64:
         {
-          name: Storage / unit / macos-arm64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -734,11 +771,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       storage_test_integration_linux_x64:
         {
-          name: Storage / integration / linux-x64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -747,11 +785,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Linux x64,
             },
         },
       storage_test_integration_windows_x64:
         {
-          name: Storage / integration / windows-x64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -760,11 +799,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · Windows x64,
             },
         },
       storage_test_integration_macos_arm64:
         {
-          name: Storage / integration / macos-arm64,
+          name: Storage,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -773,18 +813,19 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-integration,
+              display-name: Интеграционные тесты · macOS ARM64,
             },
         },
       web_quality:
         {
-          name: Web / Quality,
+          name: Web,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/quality.yml,
           with: { component: web },
         },
       web_test_unit_linux_x64:
         {
-          name: Web / unit / linux-x64,
+          name: Web,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -794,11 +835,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Linux x64,
             },
         },
       web_test_unit_windows_x64:
         {
-          name: Web / unit / windows-x64,
+          name: Web,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -808,11 +850,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-unit,
+              display-name: Модульные тесты · Windows x64,
             },
         },
       web_test_unit_macos_arm64:
         {
-          name: Web / unit / macos-arm64,
+          name: Web,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -822,11 +865,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-unit,
+              display-name: Модульные тесты · macOS ARM64,
             },
         },
       rest_sdk_build_portable:
         {
-          name: REST SDK / build / portable,
+          name: REST SDK,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -835,11 +879,12 @@
               target: portable,
               runner: ubuntu-24.04,
               artifact-key: build,
+              display-name: Сборка · Все ОС,
             },
         },
       web_build_portable:
         {
-          name: Web / build / portable,
+          name: Web,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -849,11 +894,12 @@
               target: portable,
               runner: ubuntu-24.04,
               artifact-key: build,
+              display-name: Сборка · Все ОС,
             },
         },
       cli_build_linux_x64:
         {
-          name: CLI / build / linux-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -862,11 +908,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: build,
+              display-name: Сборка · Linux x64,
             },
         },
       cli_build_windows_x64:
         {
-          name: CLI / build / windows-x64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -875,11 +922,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: build,
+              display-name: Сборка · Windows x64,
             },
         },
       cli_build_macos_arm64:
         {
-          name: CLI / build / macos-arm64,
+          name: CLI,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -888,11 +936,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: build,
+              display-name: Сборка · macOS ARM64,
             },
         },
       server_build_linux_x64:
         {
-          name: Server / build / linux-x64,
+          name: Server,
           needs: [web_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -902,11 +951,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: build,
+              display-name: Сборка · Linux x64,
             },
         },
       server_build_windows_x64:
         {
-          name: Server / build / windows-x64,
+          name: Server,
           needs: [web_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -916,11 +966,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: build,
+              display-name: Сборка · Windows x64,
             },
         },
       server_build_macos_arm64:
         {
-          name: Server / build / macos-arm64,
+          name: Server,
           needs: [web_build_portable],
           uses: ./.github/workflows/task.yml,
           with:
@@ -930,11 +981,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: build,
+              display-name: Сборка · macOS ARM64,
             },
         },
       git_sync_build_linux_x64:
         {
-          name: Git Sync / build / linux-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -943,11 +995,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: build,
+              display-name: Сборка · Linux x64,
             },
         },
       git_sync_build_windows_x64:
         {
-          name: Git Sync / build / windows-x64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -956,11 +1009,12 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: build,
+              display-name: Сборка · Windows x64,
             },
         },
       git_sync_build_macos_arm64:
         {
-          name: Git Sync / build / macos-arm64,
+          name: Git Sync,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -969,11 +1023,12 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: build,
+              display-name: Сборка · macOS ARM64,
             },
         },
       repository_format_check:
         {
-          name: Repository / format:check / linux-x64,
+          name: Repository,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -982,11 +1037,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: format-check,
+              display-name: Форматирование · Linux x64,
             },
         },
       repository_verify_configuration:
         {
-          name: Repository / verify:configuration / linux-x64,
+          name: Repository,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -995,11 +1051,12 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: verify-configuration,
+              display-name: Согласованность check и CI · Linux x64,
             },
         },
       repository_test_unit_repo:
         {
-          name: Repository / unit:repo / linux-x64,
+          name: Repository,
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -1008,18 +1065,19 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-unit-repo,
+              display-name: Тесты инфраструктуры · Linux x64,
             },
         },
       repository_quality:
         {
-          name: Repository / Quality,
+          name: Repository,
           needs: [rest_sdk_build_portable],
           uses: ./.github/workflows/quality.yml,
           with: { component: repository },
         },
       product_e2e_linux_x64:
         {
-          name: Repository / e2e:product / linux-x64,
+          name: Repository,
           needs:
             [
               rest_sdk_build_portable,
@@ -1035,22 +1093,24 @@
               target: linux-x64,
               runner: ubuntu-24.04,
               artifact-key: test-e2e-product,
+              display-name: Сквозные тесты продукта · Linux x64,
             },
         },
       native_services_linux_x64:
         {
-          name: Native services / linux-x64,
+          name: Native services,
           needs: [cli_build_linux_x64, git_sync_build_linux_x64],
           uses: ./.github/workflows/native-services.yml,
           with:
             {
               target: linux-x64,
               runner: "${{ vars.RELAY_NATIVE_LINUX_RUNNER || 'ubuntu-24.04' }}",
+              display-name: Нативные службы · Linux x64,
             },
         },
       product_e2e_windows_x64:
         {
-          name: Repository / e2e:product / windows-x64,
+          name: Repository,
           needs:
             [
               rest_sdk_build_portable,
@@ -1066,22 +1126,24 @@
               target: windows-x64,
               runner: windows-2025,
               artifact-key: test-e2e-product,
+              display-name: Сквозные тесты продукта · Windows x64,
             },
         },
       native_services_windows_x64:
         {
-          name: Native services / windows-x64,
+          name: Native services,
           needs: [cli_build_windows_x64, git_sync_build_windows_x64],
           uses: ./.github/workflows/native-services.yml,
           with:
             {
               target: windows-x64,
               runner: "${{ vars.RELAY_NATIVE_WINDOWS_RUNNER || 'windows-2025' }}",
+              display-name: Нативные службы · Windows x64,
             },
         },
       product_e2e_macos_arm64:
         {
-          name: Repository / e2e:product / macos-arm64,
+          name: Repository,
           needs:
             [
               rest_sdk_build_portable,
@@ -1097,15 +1159,20 @@
               target: macos-arm64,
               runner: macos-15,
               artifact-key: test-e2e-product,
+              display-name: Сквозные тесты продукта · macOS ARM64,
             },
         },
       native_services_macos_arm64:
         {
-          name: Native services / macos-arm64,
+          name: Native services,
           needs: [cli_build_macos_arm64, git_sync_build_macos_arm64],
           uses: ./.github/workflows/native-services.yml,
           with:
-            { target: macos-arm64, runner: "${{ vars.RELAY_NATIVE_MACOS_RUNNER || 'macos-15' }}" },
+            {
+              target: macos-arm64,
+              runner: "${{ vars.RELAY_NATIVE_MACOS_RUNNER || 'macos-15' }}",
+              display-name: Нативные службы · macOS ARM64,
+            },
         },
       result:
         {

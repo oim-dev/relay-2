@@ -17,9 +17,12 @@ on:
       artifact-key:
         type: string
         required: true
+      display-name:
+        type: string
+        required: true
 jobs:
   execute:
-    name: Выполнение
+    name: ${{ inputs.display-name }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
     defaults:
@@ -37,7 +40,7 @@ jobs:
           task: ${{ inputs.task }}
           target: ${{ inputs.target }}
           directory: ${{ steps.setup.outputs.artifacts }}/downloads
-      - name: Выполнить проверку или сборку
+      - name: ${{ inputs.display-name }}
         id: task
         env:
           COMPONENT: ${{ inputs.component }}

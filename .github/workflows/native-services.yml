@@ -8,6 +8,10 @@ on:
       runner:
         type: string
         required: true
+      display-name:
+        type: string
+        required: false
+        default: ""
   workflow_dispatch:
     inputs:
       target:
@@ -27,7 +31,7 @@ permissions:
   actions: read
 jobs:
   native:
-    name: Native services / ${{ inputs.target }}
+    name: ${{ inputs.display-name || format('Нативные службы · {0}', inputs.target) }}
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 15
     defaults:

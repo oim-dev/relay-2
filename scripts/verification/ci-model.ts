@@ -42,7 +42,7 @@ function taskJob(component: string, task: string, target: CiTarget, portable = f
   const targetId = portable ? "portable" : target.id;
   const needs = artifactNeeds(component, task, targetId);
   return {
-    name: ciMessages.taskName(component, task, targetId),
+    name: ciMessages.componentName(component),
     ...(needs.length > 0 ? { needs } : {}),
     uses: "./.github/workflows/task.yml",
     with: {
@@ -51,6 +51,7 @@ function taskJob(component: string, task: string, target: CiTarget, portable = f
       target: targetId,
       runner: target.runner,
       "artifact-key": task.replaceAll(":", "-"),
+      "display-name": ciMessages.taskName(task, targetId),
     },
   };
 }
@@ -69,7 +70,7 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
     if (component.scripts.typecheck) {
       const needs = artifactNeeds(component.id, "typecheck", linux.id);
       jobs[jobId(component.id, "quality")] = {
-        name: ciMessages.qualityName(component.id),
+        name: ciMessages.componentName(component.id),
         ...(needs.length > 0 ? { needs } : {}),
         uses: "./.github/workflows/quality.yml",
         with: { component: component.id },
@@ -98,7 +99,7 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
     jobs[jobId("repository", task)] = taskJob("repository", task, linux);
   }
   jobs.repository_quality = {
-    name: ciMessages.qualityName("repository"),
+    name: ciMessages.componentName("repository"),
     needs: [artifactJob("sdk", linux.id)],
     uses: "./.github/workflows/quality.yml",
     with: { component: "repository" },
@@ -107,12 +108,13 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
     jobs[jobId("product", "e2e", target.id)] = taskJob("repository", "test:e2e:product", target);
     const runnerVariable = { linux: "LINUX", darwin: "MACOS", win32: "WINDOWS" }[target.platform];
     jobs[jobId("native_services", target.id)] = {
-      name: ciMessages.nativeName(target.id),
+      name: ciMessages.nativeGroup,
       needs: artifactNeeds("project-runtime", "test:native-service", target.id),
       uses: "./.github/workflows/native-services.yml",
       with: {
         target: target.id,
         runner: `\${{ vars.RELAY_NATIVE_${runnerVariable}_RUNNER || '${target.runner}' }}`,
+        "display-name": ciMessages.nativeName(target.id),
       },
     };
   }
