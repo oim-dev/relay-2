@@ -42,7 +42,7 @@ function taskJob(component: string, task: string, target: CiTarget, portable = f
   const targetId = portable ? "portable" : target.id;
   const needs = artifactNeeds(component, task, targetId);
   return {
-    name: ciMessages.componentName(component),
+    name: ciMessages.targetGroup(targetId),
     ...(needs.length > 0 ? { needs } : {}),
     uses: "./.github/workflows/task.yml",
     with: {
@@ -51,7 +51,7 @@ function taskJob(component: string, task: string, target: CiTarget, portable = f
       target: targetId,
       runner: target.runner,
       "artifact-key": task.replaceAll(":", "-"),
-      "display-name": ciMessages.taskName(task, targetId),
+      "display-name": ciMessages.taskName(component, task),
     },
   };
 }
@@ -70,10 +70,13 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
     if (component.scripts.typecheck) {
       const needs = artifactNeeds(component.id, "typecheck", linux.id);
       jobs[jobId(component.id, "quality")] = {
-        name: ciMessages.componentName(component.id),
+        name: ciMessages.commonGroup,
         ...(needs.length > 0 ? { needs } : {}),
         uses: "./.github/workflows/quality.yml",
-        with: { component: component.id },
+        with: {
+          component: component.id,
+          "display-name": ciMessages.taskName(component.id, "quality"),
+        },
       };
     }
     for (const task of componentTestTasks) {
@@ -96,25 +99,31 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
     }
   }
   for (const task of ["format:check", "verify:configuration", "test:unit:repo"]) {
-    jobs[jobId("repository", task)] = taskJob("repository", task, linux);
+    jobs[jobId("repository", task)] = {
+      ...taskJob("repository", task, linux),
+      name: ciMessages.commonGroup,
+    };
   }
   jobs.repository_quality = {
-    name: ciMessages.componentName("repository"),
+    name: ciMessages.commonGroup,
     needs: [artifactJob("sdk", linux.id)],
     uses: "./.github/workflows/quality.yml",
-    with: { component: "repository" },
+    with: {
+      component: "repository",
+      "display-name": ciMessages.taskName("repository", "quality"),
+    },
   };
   for (const target of targets) {
     jobs[jobId("product", "e2e", target.id)] = taskJob("repository", "test:e2e:product", target);
     const runnerVariable = { linux: "LINUX", darwin: "MACOS", win32: "WINDOWS" }[target.platform];
     jobs[jobId("native_services", target.id)] = {
-      name: ciMessages.nativeGroup,
+      name: ciMessages.targetGroup(target.id),
       needs: artifactNeeds("project-runtime", "test:native-service", target.id),
       uses: "./.github/workflows/native-services.yml",
       with: {
         target: target.id,
         runner: `\${{ vars.RELAY_NATIVE_${runnerVariable}_RUNNER || '${target.runner}' }}`,
-        "display-name": ciMessages.nativeName(target.id),
+        "display-name": ciMessages.taskName("project-runtime", "test:native-service"),
       },
     };
   }

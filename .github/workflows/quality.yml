@@ -5,9 +5,12 @@ on:
       component:
         type: string
         required: true
+      display-name:
+        type: string
+        required: true
 jobs:
   quality:
-    name: Lint и типы · Linux x64
+    name: ${{ inputs.display-name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:

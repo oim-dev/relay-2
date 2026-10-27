@@ -18,6 +18,7 @@ export const ciComponentLabels: Readonly<Record<string, string>> = {
  * Читаемые операции в раскрытой группе GitHub Actions.
  */
 const ciTaskLabels: Readonly<Record<string, string>> = {
+  quality: "Lint и типы",
   build: "Сборка",
   "test:unit": "Модульные тесты",
   "test:integration": "Интеграционные тесты",
@@ -27,6 +28,7 @@ const ciTaskLabels: Readonly<Record<string, string>> = {
   "test:unit:repo": "Тесты инфраструктуры",
   "format:check": "Форматирование",
   "verify:configuration": "Согласованность check и CI",
+  "test:native-service": "Нативные службы",
 };
 
 /**
@@ -36,7 +38,6 @@ const ciTargetLabels: Readonly<Record<string, string>> = {
   "linux-x64": "Linux x64",
   "windows-x64": "Windows x64",
   "macos-arm64": "macOS ARM64",
-  portable: "Все ОС",
 };
 
 /**
@@ -44,6 +45,7 @@ const ciTargetLabels: Readonly<Record<string, string>> = {
  */
 export const ciMessages = {
   workflowName: "CI",
+  commonGroup: "Общие",
   resultJob: "Result",
   resultStep: "Проверить все обязательные результаты",
   resultColumns: ["Job", "Результат"],
@@ -53,23 +55,18 @@ export const ciMessages = {
   taskArguments: "Не заданы component/task/target",
   consumerArguments: "Не заданы параметры потребителя артефактов CI",
   generatedHeader: "# Генерируется bun run ci:generate из scripts/verification/ci-model.ts.\n",
-  nativeGroup: "Native services",
 
   /**
-   * Называет группу компонента в боковой панели GitHub Actions.
+   * Называет группу ОС в боковой панели; переносимые сборки относятся к общим задачам.
    */
-  componentName: (component: string): string => ciComponentLabels[component] ?? component,
+  targetGroup: (target: string): string =>
+    target === "portable" ? ciMessages.commonGroup : (ciTargetLabels[target] ?? target),
 
   /**
-   * Называет раскрытый leaf job: GitHub отображает именно имя из reusable workflow.
+   * Называет компонент и этап внутри группы: GitHub отображает имя job из reusable workflow.
    */
-  taskName: (task: string, target: string): string =>
-    `${ciTaskLabels[task] ?? task} · ${ciTargetLabels[target] ?? target}`,
-
-  /**
-   * Называет отдельную приёмку настоящего менеджера служб.
-   */
-  nativeName: (target: string): string => `Нативные службы · ${ciTargetLabels[target] ?? target}`,
+  taskName: (component: string, task: string): string =>
+    `${ciComponentLabels[component] ?? component} · ${ciTaskLabels[task] ?? task}`,
 
   /**
    * Объясняет отказ передать незарегистрированную задачу исполнителю.

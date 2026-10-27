@@ -44,7 +44,7 @@ export interface CiTarget {
  * Описанный job GitHub Actions; leaf-команды принадлежат package scripts.
  */
 export interface CiJob {
-  /* Видимое имя компонента, операции и target. */
+  /* Видимое имя группы ОС, общих задач либо итогового job. */
   readonly name: string;
   /* Идентификаторы необходимых производителей артефактов. */
   readonly needs?: readonly string[];
