@@ -31,7 +31,7 @@ export const repositoryTasks = [
 export const targets: readonly CiTarget[] = [
   { id: "linux-x64", runner: "ubuntu-24.04", platform: "linux", arch: "x64" },
   { id: "windows-x64", runner: "windows-2025", platform: "win32", arch: "x64" },
-  { id: "macos-arm64", runner: "macos-15", platform: "darwin", arch: "arm64" },
+  { id: "macos-arm64", runner: "macos-latest", platform: "darwin", arch: "arm64" },
 ];
 
 export const artifacts: readonly BuildArtifact[] = [
