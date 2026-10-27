@@ -1,4 +1,4 @@
-import type { ServicePlatform } from "../git-sync/service.types";
+import type { NativePlatform } from "../native/platform.types";
 import type { ServerLaunch } from "./server.types";
 
 /**
@@ -6,7 +6,7 @@ import type { ServerLaunch } from "./server.types";
  */
 export interface ServerServiceInput {
   /* Целевая платформа; не зависит от хоста теста. */
-  readonly platform: ServicePlatform;
+  readonly platform: NativePlatform;
   /* Совместимый абсолютный executable. */
   readonly binary: string;
   /* Проверенный манифест с cwd/config/home/actor. */

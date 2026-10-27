@@ -5,21 +5,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GuardedCommandError, runGuardedCommand } from "@relay/project-runtime";
 import { encodeFrame, createRequest } from "./guardian-helpers/wire";
-import {
-  observe,
-  ready,
-  running,
-  startOwner,
-  withGuardianFixture,
-} from "./guardian-helpers/fixture";
+import { observe, ready, startOwner, withGuardianFixture } from "./guardian-helpers/fixture";
 import type { TreeReady } from "./guardian-helpers/fixture.types";
 import { withOwnerObservation } from "./guardian-helpers/owner-observation";
+import { running } from "./native/process-observation";
+import { processIdentity } from "./native/linux/owner-observation";
+import { killFixtureProcessGroup } from "./native/process-group";
 
 const brokenEntry = fileURLToPath(new URL("./guardian-helpers/broken-entry.ts", import.meta.url));
 const sourceEntry = fileURLToPath(new URL("./guardian-helpers/entry.ts", import.meta.url));
-const linuxProcfsEntry = fileURLToPath(
-  new URL("./guardian-helpers/linux-procfs-entry.ts", import.meta.url),
-);
+const linuxProcfsEntry = fileURLToPath(new URL("./native/linux/procfs-entry.ts", import.meta.url));
 
 /**
  * Подтверждает остановку всех известных PID до выхода теста и до аварийного finally fixture.
@@ -72,7 +67,7 @@ describe("Владение деревом защищённой команды", 
           await expectTreeStopped(tree);
         } finally {
           if (!stopped && anchor.pid) {
-            process.kill(-anchor.pid, "SIGKILL");
+            killFixtureProcessGroup(anchor.pid);
           }
           anchor.stdin?.destroy();
           await exited;
@@ -288,10 +283,7 @@ describe("Владение деревом защищённой команды", 
         try {
           await withOwnerObservation(root, owner, async (phase) => {
             const tree = await ready(root);
-            const anchorStat = readFileSync(`/proc/${tree.anchor}/stat`, "utf8");
-            const guardian = Number(
-              anchorStat.slice(anchorStat.lastIndexOf(")") + 2).split(" ")[1],
-            );
+            const guardian = processIdentity(tree.anchor).parent;
             expect(Object.values(tree).every(running)).toBe(true);
             writeFileSync(join(root, "procfs-arm.json"), JSON.stringify(tree));
 

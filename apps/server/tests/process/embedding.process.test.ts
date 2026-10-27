@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { initializeProject } from "@relay/project-runtime";
+import { initializeProject, nativeExecutableName } from "@relay/project-runtime";
 import { compileServer } from "../../scripts/compile-server";
 import { startChild, stopChild } from "./process-fixture";
 
@@ -34,16 +34,14 @@ describe("Полнота standalone embedding", () => {
   test("полный Nest binary после удаления build inputs сохраняет lazy/worker/fonts/public и одинаковые basenames", async () => {
     const parent = resolve(
       import.meta.dir,
-      "../../../../.artifacts/2026-10-25/server-web/nest-server/embedding",
+      "../../../../.artifacts",
+      new Date().toISOString().slice(0, 10),
+      "server-web/nest-server/embedding",
     );
     await mkdir(parent, { recursive: true });
     const directory = await mkdtemp(join(parent, "files-"));
     const input = join(directory, "vite-output");
-    const output = join(
-      directory,
-      "output",
-      process.platform === "win32" ? "relay-server.exe" : "relay-server",
-    );
+    const output = join(directory, "output", nativeExecutableName("relay-server"));
     try {
       for (const file of files) {
         await mkdir(dirname(join(input, file.path)), { recursive: true });
@@ -53,10 +51,7 @@ describe("Полнота standalone embedding", () => {
       expect(urls).toHaveLength(files.length);
       const detached = join(directory, "detached");
       await mkdir(detached);
-      const binary = join(
-        detached,
-        process.platform === "win32" ? "relay-server.exe" : "relay-server",
-      );
+      const binary = join(detached, nativeExecutableName("relay-server"));
       await rename(output, binary);
       await chmod(binary, 0o755);
       await rm(input, { recursive: true });

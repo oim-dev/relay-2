@@ -269,6 +269,12 @@ targetRevision, пустой membership predicate и raw scope с клиентс
 
 ## Процессы, службы и восстановление Runtime
 
+[Выбор платформы](../../packages/project-runtime/src/native/platform.unit.test.ts)
+отвергает неизвестные имена без POSIX fallback.
+[Executable и PATH](../../packages/project-runtime/src/native/executable/select.unit.test.ts)
+проверяют суффикс бинарника, регистр ключа PATH, разделители и сохранение пробелов/Unicode
+для трёх адаптеров. Это чистые проверки правил, не запуск native loader другой ОС.
+
 [Процессный клиент](../../packages/project-runtime/tests/integration/git-sync-process.integration.test.ts)
 проверяет stdin-envelope и согласованность ответа с exit code, строгий UTF-8,
 большие одновременные потоки, несовместимый override бинарника и discovery с пробелами/
@@ -289,6 +295,8 @@ quiesce/readback Disabled до End, единый монотонный stop budge
 после частичного отказа без unsafe rollback. Это не установка службы
 на пользовательском хосте. [Windows XML](../../packages/project-runtime/tests/integration/git-sync-service-format.integration.test.ts)
 дополняет генерацию нативным разбором формата на Windows.
+[Файловый формат службы](../../packages/project-runtime/src/native/user-service/files.unit.test.ts)
+проверяет реальные байты UTF-8/UTF-16LE и BOM независимо от наличия системного менеджера.
 
 [Native lifecycle](../../packages/project-runtime/tests/native/service.native.test.ts)
 защищает enable/re-enable, новый instance после самостоятельного restart native manager,
@@ -456,6 +464,10 @@ IDs/digests, receipt/comment, поздний pending, локальные вер�
 [SSH-профиль](../../apps/git-sync/tests/integration/ssh-profile.integration.test.ts)
 проверяет foreground-настройки стандартного клиента с сохранением identity/proxy,
 точный custom `core.sshCommand` и отсутствие записи maintenance overrides в config.
+[Платформенный Git-синтаксис](../../apps/git-sync/src/transport/native/select.unit.test.ts)
+различает drive/UNC-пути Windows и scp remote, проверяет точное sh-кодирование
+собственных argv с backslash, Unicode и апострофом. Чистые OS-варианты дополняют
+реальный Git/SSH, не подменяя его исполнение на целевой платформе.
 [Guardian компонента](../../apps/git-sync/tests/process/guardian.process.test.ts)
 проверяет обычный exit, output budget, deadline, отмену и смерть владельца до cleanup
 fixture. На Linux/Windows отдельные случаи используют subreaper/Job Object;
@@ -661,20 +673,21 @@ asset. Несовместимый launch не публикует ready; EOF pare
 Слияние глобальных и локальных enum, скрытые поля и перекрытие аргумента защищены
 [модульно](../../apps/cli/src/app/completion-candidates.unit.test.ts).
 
-[Сквозной набор](../../tests/e2e/local-workflow.e2e.test.ts) запускает новый бинарник
-на каждом шаге четырёх маршрутов:
+[Локальный сквозной набор CLI](../../apps/cli/tests/e2e/local-workflow.e2e.test.ts) запускает
+новый бинарник на каждом шаге четырёх маршрутов без Git и Server:
 
 1. Документ: полный Markdown, чтение между процессами и защита прочитанной ревизией.
 2. Workspace: независимые проекты, явный выбор и сохранение базы после удаления регистрации.
 3. Задача с критерием: выполнение, завершённый план и фиксация релиза.
 4. История: сохранённое намерение и явный результат участия.
 
-[Пакетная декомпозиция](../../tests/e2e/batch-workflow.e2e.test.ts) соединяет проверку
+[Пакетная декомпозиция CLI](../../apps/cli/tests/e2e/batch-workflow.e2e.test.ts) соединяет проверку
 JSON-файла, применение через stdin, локальные ссылки фичи/сценария/задачи, публикацию
 нового документа с архивированием прежнего, полное и краткое групповое чтение.
 Отдельные запуски восстанавливают квитанцию и повторяют исходный пакет с тем же ключом.
 
-Новые пользовательские маршруты Git Sync разделены по наблюдаемой гарантии:
+Корневой продуктовый E2E не повторяет эти пять локальных маршрутов. Его межприложенческие
+маршруты Git Sync разделены по наблюдаемой гарантии:
 
 - [Обмен и restore](../../tests/e2e/git-sync-workflow.e2e.test.ts) сохраняет две записи
   с первоначально одинаковым ключом, ID-связи и независимые поля через реальные бинарники.

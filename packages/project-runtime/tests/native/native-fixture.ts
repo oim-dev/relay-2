@@ -16,6 +16,7 @@ import {
   createServiceConfiguration,
   gitSyncControlRelease,
   initializeProject,
+  nativeExecutableName,
   openProject,
   probeGitSyncSupervisor,
   type GitSyncClient,
@@ -23,6 +24,7 @@ import {
   type GitSyncServiceStatus,
   type GitSyncSupervisorStatus,
   type ProjectLocation,
+  type NativePlatform,
   type RuntimeOptions,
 } from "@relay/project-runtime";
 import manifest from "../../package.json";
@@ -30,16 +32,15 @@ import { failureDiagnostic, NativeCommands } from "./native-command";
 import {
   nativeEnvironment,
   preflightNativeSession,
-  readLinger,
   requireNativeServiceOptIn,
 } from "./native-environment";
-import { NativeManager } from "./native-manager";
+import { createNativeManager } from "./native-manager";
+import { readLinger } from "./linux/environment";
 import { captureNativeFailure } from "./native-failure-snapshot";
-import { crashWindowsSupervisor } from "./native-windows";
-import { withWindowsGracefulExit } from "./native-windows-exit";
+import { withWindowsGracefulExit } from "./windows/graceful-exit";
 import type {
   NativeConfiguration,
-  NativePlatform,
+  NativeManager,
   NativeSession,
   RunningSupervisor,
 } from "./native-service.types";
@@ -109,9 +110,8 @@ export class NativeServiceFixture {
     private readonly commands: NativeCommands,
   ) {
     this.data = join(directory, "fixture");
-    const suffix = platform === "win32" ? ".exe" : "";
     const folder = platform === "win32" ? "бинарник Relay Ω" : 'бинарник "Relay" Ω';
-    this.binary = join(this.data, folder, `relay-git-sync${suffix}`);
+    this.binary = join(this.data, folder, nativeExecutableName("relay-git-sync", platform));
     this.options = { cwd: join(this.data, "проект"), home: join(this.data, "дом Relay Ω") };
     const identity = session.userName ? { userName: session.userName } : {};
     this.config = createServiceConfiguration({
@@ -121,7 +121,7 @@ export class NativeServiceFixture {
       userHome: session.userHome,
       ...identity,
     });
-    this.manager = new NativeManager(commands, this.config, this.binary, session);
+    this.manager = createNativeManager(commands, this.config, this.binary, session);
     this.client = createGitSyncClient({
       cwd: this.options.cwd,
       env: { ...commands.env, RELAY_HOME: this.options.home, RELAY_GIT_SYNC_BIN: this.binary },
@@ -141,8 +141,11 @@ export class NativeServiceFixture {
   async prepare(): Promise<void> {
     expect(existsSync(this.config.path)).toBe(false);
     await this.manager.assertAbsent();
-    const suffix = this.platform === "win32" ? ".exe" : "";
-    const source = join(repository, "apps/git-sync/dist", `relay-git-sync${suffix}`);
+    const source = join(
+      repository,
+      "apps/git-sync/dist",
+      nativeExecutableName("relay-git-sync", this.platform),
+    );
     if (!existsSync(source)) {
       throw new Error("NATIVE_SERVICE_BUILD_REQUIRED: сначала выполните bun run build:cli");
     }
@@ -381,11 +384,7 @@ export class NativeServiceFixture {
       if (health.responsive && health.pid !== null) {
         this.save("fixture-emergency-kill", health);
         this.pids.add(health.pid);
-        if (this.platform === "win32") {
-          await crashWindowsSupervisor(this.commands, this.binary, health.pid);
-        } else {
-          process.kill(health.pid, "SIGKILL");
-        }
+        await this.manager.killSupervisor(health.pid);
       }
     } catch (error) {
       errors.push(error);

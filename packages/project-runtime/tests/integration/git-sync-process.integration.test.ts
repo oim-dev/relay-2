@@ -1,14 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   createGitSyncClient,
   decodeGitSyncResponse,
   runNativeProcess,
   discoverGitSyncBinary,
+  nativeExecutableName,
   type ProcessResult,
 } from "@relay/project-runtime";
 import { RuntimeFixture } from "./helpers/runtime-fixture";
+import { linuxProcessRunning } from "./helpers/native/linux/process-observation";
 
 const group = "git-sync-implementation/cli-runtime";
 const protocolScript = `
@@ -32,10 +34,7 @@ describe("Процессный протокол Runtime", () => {
     const fixture = new RuntimeFixture("git-sync-implementation/review-runtime");
     const binDirectory = join(fixture.root, "свой PATH");
     mkdirSync(binDirectory);
-    const binary = join(
-      binDirectory,
-      process.platform === "win32" ? "relay-git-sync.exe" : "relay-git-sync",
-    );
+    const binary = join(binDirectory, nativeExecutableName("relay-git-sync"));
     writeFileSync(binary, "fixture");
     chmodSync(binary, 0o700);
     const originalPath = process.env.PATH;
@@ -223,10 +222,7 @@ describe("Процессный протокол Runtime", () => {
     const fixture = new RuntimeFixture(group);
     const sibling = join(fixture.cwd, "Компоненты с пробелами");
     mkdirSync(sibling);
-    const binary = join(
-      sibling,
-      process.platform === "win32" ? "relay-git-sync.exe" : "relay-git-sync",
-    );
+    const binary = join(sibling, nativeExecutableName("relay-git-sync"));
     writeFileSync(binary, "fixture");
     chmodSync(binary, 0o700);
     try {
@@ -257,11 +253,8 @@ describe("Процессный протокол Runtime", () => {
     const syncDirectory = join(fixture.root, "apps/git-sync/dist");
     mkdirSync(cliDirectory, { recursive: true });
     mkdirSync(syncDirectory, { recursive: true });
-    const cli = join(cliDirectory, process.platform === "win32" ? "relay.exe" : "relay");
-    const binary = join(
-      syncDirectory,
-      process.platform === "win32" ? "relay-git-sync.exe" : "relay-git-sync",
-    );
+    const cli = join(cliDirectory, nativeExecutableName("relay"));
+    const binary = join(syncDirectory, nativeExecutableName("relay-git-sync"));
     writeFileSync(cli, "fixture");
     writeFileSync(binary, "fixture");
     chmodSync(cli, 0o700);
@@ -345,11 +338,8 @@ describe("Процессный протокол Runtime", () => {
           throw new Error("Не получена готовность дерева");
         }
         for (const pid of [ids.parent, ids.child]) {
-          const stat = resolve("/proc", String(pid), "stat");
           // Сиротский zombie уже не выполняется, его reap принадлежит init контейнера.
-          expect(
-            !existsSync(stat) || readFileSync(stat, "utf8").split(") ")[1]?.startsWith("Z "),
-          ).toBe(true);
+          expect(linuxProcessRunning(pid)).toBe(false);
         }
       } finally {
         await fixture.dispose();

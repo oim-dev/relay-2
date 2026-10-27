@@ -1,0 +1,78 @@
+name: Получить зависимости сборки
+description: Восстанавливает только объявленные результаты того же commit и target.
+inputs:
+  component:
+    required: true
+    description: Компонент-потребитель.
+  task:
+    required: true
+    description: Leaf-команда потребителя.
+  target:
+    required: true
+    description: ОС/архитектура либо portable.
+  directory:
+    required: true
+    description: Каталог загрузок внутри .artifacts текущей даты.
+  run-id:
+    required: false
+    default: ""
+    description: Проверенный run того же SHA; по умолчанию текущий.
+runs:
+  using: composite
+  steps:
+    - name: Определить необходимые результаты
+      id: plan
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        TASK: ${{ inputs.task }}
+        TARGET: ${{ inputs.target }}
+      run: bun scripts/ci/requirements.ts "$COMPONENT" "$TASK" "$TARGET"
+    - name: Получить SDK
+      if: ${{ fromJSON(steps.plan.outputs.artifacts).sdk != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ fromJSON(steps.plan.outputs.artifacts).sdk }}
+        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts).sdk }}
+        run-id: ${{ inputs.run-id || github.run_id }}
+        github-token: ${{ github.token }}
+    - name: Получить Web
+      if: ${{ fromJSON(steps.plan.outputs.artifacts).web != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ fromJSON(steps.plan.outputs.artifacts).web }}
+        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts).web }}
+        run-id: ${{ inputs.run-id || github.run_id }}
+        github-token: ${{ github.token }}
+    - name: Получить CLI
+      if: ${{ fromJSON(steps.plan.outputs.artifacts).cli != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ fromJSON(steps.plan.outputs.artifacts).cli }}
+        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts).cli }}
+        run-id: ${{ inputs.run-id || github.run_id }}
+        github-token: ${{ github.token }}
+    - name: Получить Git Sync
+      if: ${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] }}
+        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] }}
+        run-id: ${{ inputs.run-id || github.run_id }}
+        github-token: ${{ github.token }}
+    - name: Получить Server
+      if: ${{ fromJSON(steps.plan.outputs.artifacts).server != '' }}
+      uses: actions/download-artifact@v6
+      with:
+        name: ${{ fromJSON(steps.plan.outputs.artifacts).server }}
+        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts).server }}
+        run-id: ${{ inputs.run-id || github.run_id }}
+        github-token: ${{ github.token }}
+    - name: Проверить и распаковать результаты
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        TASK: ${{ inputs.task }}
+        TARGET: ${{ inputs.target }}
+        DOWNLOADS: ${{ inputs.directory }}
+      run: bun scripts/ci/artifacts.ts restore "$COMPONENT" "$TASK" "$TARGET" "$DOWNLOADS"

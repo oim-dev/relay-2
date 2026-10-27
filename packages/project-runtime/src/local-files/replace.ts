@@ -1,5 +1,4 @@
-import { renameSync } from "node:fs";
-import { replaceWithWindowsOpenReaders } from "./windows-replace";
+import { nativeFileReplacement } from "../native/file-replacement/select";
 
 /**
  * Синхронно публикует подготовленный локальный файл атомарной заменой имени назначения.
@@ -15,17 +14,5 @@ import { replaceWithWindowsOpenReaders } from "./windows-replace";
  * POSIX-совместимая native-операция, без unlink назначения и повторов по времени.
  */
 export function replaceLocalFile(temporaryPath: string, targetPath: string): void {
-  try {
-    renameSync(temporaryPath, targetPath);
-  } catch (error) {
-    if (
-      process.platform !== "win32" ||
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      error.code !== "EPERM"
-    ) {
-      throw error;
-    }
-    replaceWithWindowsOpenReaders(temporaryPath, targetPath);
-  }
+  nativeFileReplacement()(temporaryPath, targetPath);
 }

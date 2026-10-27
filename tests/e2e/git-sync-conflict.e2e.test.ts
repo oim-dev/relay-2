@@ -9,8 +9,8 @@ import {
   invokeRecord,
   invokeSuccess,
   workflowArtifactsDirectory,
-} from "./helpers/workflow-fixture";
-import type { ProcessResult } from "./helpers/workflow-fixture.types";
+} from "../../apps/cli/tests/e2e/helpers/workflow-fixture";
+import type { ProcessResult } from "../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
 
 const baseBody = "# Основание\n\nИсходное общее правило.\n";
 const remoteBody = "# Решение A\n\n  Удалённая редакция с отступом.\n";

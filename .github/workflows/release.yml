@@ -1,0 +1,109 @@
+name: Выпуск Relay
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  locate:
+    name: Найти проверенные сборки этого SHA
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run-id: ${{ steps.find.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - name: Сверить версии и найти успешный ci.yml с полным набором artifacts
+        id: find
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bun scripts/ci/release.ts find "$RELEASE_TAG"
+
+  verify:
+    name: Полный CI при отсутствии готового проверенного набора
+    needs: locate
+    if: ${{ needs.locate.outputs.run-id == '' }}
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Проверить передачу и опубликовать три нативные поставки
+    needs: [locate, verify]
+    # Skipped reusable CI допустим лишь при найденном успешном run того же SHA.
+    if: >-
+      ${{ !cancelled() && needs.locate.result == 'success' &&
+          ((needs.locate.outputs.run-id != '' && needs.verify.result == 'skipped') ||
+           (needs.locate.outputs.run-id == '' && needs.verify.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+      # Reusable workflow прикрепляет artifacts к run вызывающего release, не к отдельному CI run.
+      SOURCE_RUN_ID: ${{ needs.locate.outputs.run-id || github.run_id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+      - name: Подготовить изолированные каталоги передачи
+        id: directories
+        shell: bash
+        run: |
+          root=".artifacts/$(date -u +%F)/ci-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root"
+          echo "downloads=$root/downloads" >> "$GITHUB_OUTPUT"
+          echo "assets=$root/assets" >> "$GITHUB_OUTPUT"
+      - name: Повторно проверить run и получить точные ID бинарных artifacts
+        id: source
+        run: bun scripts/ci/release.ts select "$SOURCE_RUN_ID"
+      - uses: actions/download-artifact@v6
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          artifact-ids: ${{ steps.source.outputs.artifact-ids }}
+          merge-multiple: false
+          path: ${{ steps.directories.outputs.downloads }}
+      - name: Проверить metadata, hash, пути и версии; упаковать binaries и checksums
+        id: bundle
+        env:
+          DOWNLOADS: ${{ steps.directories.outputs.downloads }}
+          ASSETS: ${{ steps.directories.outputs.assets }}
+        run: bun scripts/ci/release.ts bundle "$RELEASE_TAG" "$DOWNLOADS" "$ASSETS"
+      - name: Опубликовать готовые поставки без пересборки
+        env:
+          RELEASE_ASSETS: ${{ steps.bundle.outputs.release-path }}
+        shell: bash
+        run: |
+          flags=()
+          version="${RELEASE_TAG%%+*}"
+          if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$RELEASE_TAG" "$RELEASE_ASSETS"/*.tar.gz "$RELEASE_ASSETS/SHA256SUMS" \
+            --verify-tag --target "$GITHUB_SHA" --title "$RELEASE_TAG" --generate-notes "${flags[@]}"

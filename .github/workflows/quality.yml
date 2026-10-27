@@ -1,0 +1,39 @@
+name: Качество компонента
+on:
+  workflow_call:
+    inputs:
+      component:
+        type: string
+        required: true
+jobs:
+  quality:
+    name: Lint и Types
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-relay
+        id: setup
+      - uses: ./.github/actions/restore-builds
+        id: restore
+        with:
+          component: ${{ inputs.component }}
+          task: ${{ inputs.component == 'repository' && 'typecheck:repo' || 'typecheck' }}
+          target: linux-x64
+          directory: ${{ steps.setup.outputs.artifacts }}/downloads
+      - name: Lint
+        env:
+          COMPONENT: ${{ inputs.component }}
+          TASK: ${{ inputs.component == 'repository' && 'lint:repo' || 'lint' }}
+        run: bun run ci:task "$COMPONENT" "$TASK" linux-x64
+      - name: Types
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' && steps.restore.outcome == 'success' }}
+        env:
+          COMPONENT: ${{ inputs.component }}
+          TASK: ${{ inputs.component == 'repository' && 'typecheck:repo' || 'typecheck' }}
+        run: bun run ci:task "$COMPONENT" "$TASK" linux-x64

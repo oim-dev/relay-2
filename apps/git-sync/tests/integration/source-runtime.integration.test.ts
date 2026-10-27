@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { nativeExecutableName } from "@relay/project-runtime";
 import { runProcess } from "../../src/transport/process";
 import type { ProcessResult } from "../../src/transport/process.types";
 import { withGitProcessRuntime } from "../../src/transport/process-runtime";
@@ -58,9 +59,7 @@ describe("Владение fresh source Git helper", () => {
         expect(result.exitCode).toBe(0);
         expect(result.stdout.toString()).toBe("Сохранённый результат");
         expect(observations).toHaveLength(1);
-        expect(observations[0]).toEqual([
-          join(directory, process.platform === "win32" ? "guardian.exe" : "guardian"),
-        ]);
+        expect(observations[0]).toEqual([join(directory, nativeExecutableName("guardian"))]);
         expect(existsSync(directory)).toBe(false);
         if (late === undefined) {
           throw new Error("Не сохранён async context владельца");

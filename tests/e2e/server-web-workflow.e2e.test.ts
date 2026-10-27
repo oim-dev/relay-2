@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { RelayApiError } from "@relay/rest-sdk";
 import { createGitSyncFixture } from "./helpers/git-sync-fixture";
 import { startWorkflowServer, WorkflowServerCleanupError } from "./helpers/server-fixture";
-import { invokeRecord, invokeSuccess } from "./helpers/workflow-fixture";
+import { invokeRecord, invokeSuccess } from "../../apps/cli/tests/e2e/helpers/workflow-fixture";
 import type { WorkflowServer } from "./helpers/server-fixture.types";
 
 describe("Совместная работа поставляемых Server, CLI и Git Sync", () => {

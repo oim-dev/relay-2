@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, copyFile, chmod } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createServerClient } from "@relay/project-runtime";
+import { createServerClient, nativeExecutableName } from "@relay/project-runtime";
 import { version } from "../../package.json";
 import type { ServerChild, ServerReady } from "./process-fixture.types";
 
@@ -29,21 +29,16 @@ export async function withBinary(
 ): Promise<void> {
   const root = resolve(
     import.meta.dir,
-    "../../../../.artifacts/2026-10-25/server-web/nest-server/process",
+    "../../../../.artifacts",
+    new Date().toISOString().slice(0, 10),
+    "server-web/nest-server/process",
   );
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, "binary-"));
-  const binary = join(
-    directory,
-    process.platform === "win32" ? "relay-server.exe" : "relay-server",
-  );
+  const binary = join(directory, nativeExecutableName("relay-server"));
   try {
     await copyFile(
-      resolve(
-        import.meta.dir,
-        "../../dist",
-        process.platform === "win32" ? "relay-server.exe" : "relay-server",
-      ),
+      resolve(import.meta.dir, "../../dist", nativeExecutableName("relay-server")),
       binary,
     );
     await chmod(binary, 0o755);

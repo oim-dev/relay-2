@@ -8,7 +8,8 @@
   },
   "scripts": {
     "typecheck": "bun --bun tsc --noEmit",
-    "test:unit": "bun test --pass-with-no-tests .unit.test.ts",
+    "lint": "bun --bun oxlint --deny-warnings .",
+    "test:unit": "bun test .unit.test.ts",
     "test:integration": "bun test .integration.test.ts"
   },
   "dependencies": {

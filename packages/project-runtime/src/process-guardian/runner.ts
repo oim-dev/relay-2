@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { nativeProcessLifetime } from "../native/process-lifetime/select";
 import { GuardedCommandError } from "./errors";
 import { spawnDiagnostic } from "./diagnostics";
 import { encodeFrame, FrameDecoder } from "./frame";
@@ -34,8 +35,7 @@ export function runGuardedCommand(options: GuardedCommandOptions): Promise<Guard
     }
     const child = spawn(executable, [...args, "--guarded-command"], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
-      detached: true,
-      windowsHide: true,
+      ...nativeProcessLifetime().guardianSpawn,
       serialization: "json",
     });
     if (!child.stdin || !child.stdout || !child.stderr) {

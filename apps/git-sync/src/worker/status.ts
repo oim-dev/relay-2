@@ -1,12 +1,13 @@
 import { join } from "node:path";
 import type { ReplicationStatus } from "@relay/contracts";
+import { nativeProcessTreeCapability } from "@relay/project-runtime";
 import { initialProgress, readProgress } from "../local/state";
 import { controlRequest, readEndpoint } from "../local/control";
 import { requestObject } from "../app/protocol";
 import type { SyncConfiguration, SyncProgress } from "../local/state.types";
 import type { ControlEndpoint } from "../local/control.types";
 import { COMPONENT_RELEASE } from "../local/control";
-import { processTreeCapability, readSshCapability } from "../transport/ssh-state";
+import { readSshCapability } from "../transport/ssh-state";
 
 /**
  * Формирует наблюдаемость worker по challenge-response, никогда не по наличию PID-файла.
@@ -135,7 +136,7 @@ export async function syncStatus(
     attemptId: producer.responsive ? progress.attemptId : null,
     git: progress.git,
     transport: {
-      processTree: processTreeCapability(),
+      processTree: nativeProcessTreeCapability(),
       detachedGitMaintenance: false,
       ssh: readSshCapability(join(directory, "repository")),
     },

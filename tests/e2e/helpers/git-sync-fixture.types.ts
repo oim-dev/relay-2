@@ -1,4 +1,4 @@
-import type { WorkflowEnvironment } from "./workflow-fixture.types";
+import type { WorkflowEnvironment } from "../../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
 
 /**
  * Независимая локальная копия проекта: отдельные HOME, RELAY_HOME и рабочий каталог.

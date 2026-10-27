@@ -9,7 +9,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -18,6 +17,7 @@ import { controlRequest, readEndpoint, responsive } from "../../src/local/contro
 import { runSupervisor } from "../../src/worker/supervisor";
 import { recordSupervisorFailure } from "../../src/worker/supervisor-failure";
 import { eventually } from "../process/process-fixture";
+import { createDirectoryLink } from "./helpers/native/directory-link";
 
 const SECRET = "SECRET /private/path?token=credential; capability=private-token";
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -226,7 +226,7 @@ describe("Ограниченная запись fatal-исхода supervisor", 
       writeFileSync(malformed, "{foreign malformed JSON");
       const oversizedBytes = Buffer.alloc(9000, "x");
       writeFileSync(oversized, oversizedBytes);
-      symlinkSync(foreign, link, process.platform === "win32" ? "junction" : "dir");
+      createDirectoryLink(foreign, link);
       const error = new RelayError("SUPERVISOR_TEST_FAILURE", SECRET, 4);
 
       // 13 свободных слотов, затем ещё один fatal-исход при полностью занятом namespace.
@@ -267,11 +267,7 @@ describe("Ограниченная запись fatal-исхода supervisor", 
     await withSupervisorHome((home) => {
       const foreign = join(home, "foreign");
       mkdirSync(foreign);
-      symlinkSync(
-        foreign,
-        join(home, "git-sync"),
-        process.platform === "win32" ? "junction" : "dir",
-      );
+      createDirectoryLink(foreign, join(home, "git-sync"));
       const error = new RelayError("SUPERVISOR_TEST_FAILURE", SECRET, 4);
 
       expect(() => recordSupervisorFailure(home, error)).not.toThrow();

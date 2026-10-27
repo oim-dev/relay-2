@@ -1,4 +1,9 @@
 export { initializeProject } from "./project/initialization";
+export { currentNativePlatform, parseNativePlatform } from "./native/platform";
+export type { NativePlatform } from "./native/platform.types";
+export { nativeExecutableName } from "./native/executable/select";
+export { nativeProcessTreeCapability } from "./native/process-lifetime/select";
+export type { ProcessTreeCapability } from "./native/process-lifetime/lifetime.types";
 export { replaceLocalFile } from "./local-files/replace";
 export { restoreProject } from "./project/restoration";
 export { openProject, resolveProject } from "./project/selection";

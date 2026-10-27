@@ -2,7 +2,11 @@ import { expect } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { initializeProject, type RuntimeOptions } from "@relay/project-runtime";
+import {
+  initializeProject,
+  nativeExecutableName,
+  type RuntimeOptions,
+} from "@relay/project-runtime";
 import { decodeResponse } from "../../src/app/protocol";
 import { withGitFixture } from "../integration/helpers/git-fixture";
 import type { ProcessFixture } from "./process-fixture.types";
@@ -59,7 +63,9 @@ export async function withProcessFixture(
   operation: (fixture: ProcessFixture) => Promise<void>,
 ): Promise<void> {
   await withGitFixture(async ({ root, remote }) => {
-    const binary = fileURLToPath(new URL("../../dist/relay-git-sync", import.meta.url));
+    const binary = fileURLToPath(
+      new URL(`../../dist/${nativeExecutableName("relay-git-sync")}`, import.meta.url),
+    );
     const contexts: RuntimeOptions[] = [];
     try {
       await operation({

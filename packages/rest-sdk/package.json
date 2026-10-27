@@ -11,9 +11,9 @@
     "generate:client": "node scripts/generate.ts && bun run build",
     "generate:check": "node scripts/generate.ts --check",
     "build": "node scripts/clean-generated.ts && bun --bun tsc -p tsconfig.generated.json",
-    "typecheck": "bun run build && bun --bun tsc --noEmit && bun --bun tsc --noEmit -p tests/tsconfig.json",
-    "test:unit": "bun run build && bun test .unit.test.ts",
-    "test:integration": "bun test --pass-with-no-tests .integration.test.ts"
+    "typecheck": "bun --bun tsc --noEmit && bun --bun tsc --noEmit -p tests/tsconfig.json",
+    "lint": "bun --bun oxlint --deny-warnings .",
+    "test:unit": "bun test .unit.test.ts"
   },
   "dependencies": {
     "@relay/contracts": "workspace:*"

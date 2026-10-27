@@ -8,7 +8,7 @@ import {
   registerProject,
 } from "@relay/project-runtime";
 import { RuntimeFixture } from "./helpers/runtime-fixture";
-import { windowsShortFilePath } from "./helpers/windows-short-path";
+import { windowsShortFilePath } from "./helpers/native/windows/short-path";
 
 if (process.platform === "win32") {
   const name = "workspace-with-long-file-name.json";

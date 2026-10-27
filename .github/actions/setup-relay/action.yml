@@ -1,0 +1,31 @@
+name: Подготовить инструменты Relay
+description: Закреплённые Bun/Node, кеш загрузок и установка workspace по lock-файлу.
+outputs:
+  artifacts:
+    description: Каталог служебных материалов этого CI job.
+    value: ${{ steps.directory.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version-file: .bun-version
+    - uses: actions/setup-node@v6
+      with:
+        node-version-file: .node-version
+    - name: Кеш загруженных пакетов Bun
+      uses: actions/cache@v4
+      with:
+        path: ~/.bun/install/cache
+        key: bun-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.bun-version', '.node-version', 'bun.lock') }}
+    - name: Установить зависимости
+      shell: bash
+      run: bun install --frozen-lockfile
+    - name: Проверить инструменты
+      shell: bash
+      run: bun scripts/verification/environment.ts
+    - name: Выбрать каталог материалов CI
+      id: directory
+      shell: bash
+      run: |
+        bun -e 'import {appendFileSync} from "node:fs"; const date = new Date().toISOString().slice(0,10); const path = `.artifacts/${date}/ci-${process.env.GITHUB_JOB}-${process.env.RUNNER_OS}-${process.env.RUNNER_ARCH}`; appendFileSync(process.env.GITHUB_OUTPUT, `path=${path}\n`);'

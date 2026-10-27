@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { RelayError } from "@relay/contracts";
 import type { GitSyncEnvironment } from "./client.types";
 import type { ProcessResult } from "./process.types";
-import { createServiceConfiguration } from "./service-configuration";
-import { windowsService } from "./service-windows";
+import { createServiceConfiguration, gitSyncServicePlatformFailure } from "./service-configuration";
+import { createGitSyncServiceContext } from "./service-context";
+import { selectUserService } from "../native/user-service/select";
 import type { NativeServiceStatus } from "./service.types";
 
 // Подмены часов принадлежат только этому отдельному процессу, не процессу bun test и не ОС.
@@ -70,6 +71,20 @@ const environment: GitSyncEnvironment = {
   version: "0.0.0",
   timeoutMs: configuredBudget,
   signal: cancellation.signal,
+  serviceFiles: {
+    /**
+     * Clock fixture владеет только in-memory конфигурацией.
+     */
+    read: (): string => configuration.content,
+    /**
+     * Публикация не касается файлов Windows на хосте теста.
+     */
+    write: (): void => {},
+    /**
+     * Очистка также не обращается к файловой системе.
+     */
+    remove: (): void => {},
+  },
   /**
    * Имитирует занятость после завершения manager, расходуя тот же бюджет либо отменяя ожидание.
    */
@@ -184,7 +199,13 @@ try {
   Date.now = wallClockNow;
   Object.defineProperty(performance, "now", { configurable: true, value: monotonicNow });
   try {
-    status = await windowsService("enable", configuration, environment);
+    const adapter = selectUserService("win32", gitSyncServicePlatformFailure);
+    status = await adapter.control(
+      "enable",
+      configuration,
+      createGitSyncServiceContext(environment, adapter, configuration.home),
+      true,
+    );
   } catch (error) {
     if (!(error instanceof RelayError)) {
       throw error;

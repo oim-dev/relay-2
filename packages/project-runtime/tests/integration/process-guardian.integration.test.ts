@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { RelayError } from "@relay/contracts";
 import {
   GuardedCommandError,
+  nativeExecutableName,
   runGuardedCommand,
   runNativeProcess,
   type ProcessCommand,
@@ -13,6 +14,7 @@ import {
 import { RuntimeFixture } from "./helpers/runtime-fixture";
 import type { NativeTreeReady } from "./helpers/process-guardian-fixture.types";
 import { ProcessGuardianBrokerFixture } from "./helpers/process-guardian-broker-fixture";
+import { running } from "./helpers/native/process-observation";
 
 const group = "git-sync-implementation/process-runtime";
 const actor = fileURLToPath(new URL("./helpers/process-guardian-actor.ts", import.meta.url));
@@ -40,29 +42,6 @@ async function observe(condition: () => boolean, timeoutMs = 5000): Promise<void
       throw new Error("Процессный барьер не достигнут");
     }
     await Bun.sleep(10);
-  }
-}
-
-/**
- * Отличает живой Linux-процесс от zombie; на других платформах проверяет существование PID.
- */
-function running(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    if (process.platform === "linux") {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z";
-    }
-    return true;
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      ["ENOENT", "ESRCH"].includes(String(error.code))
-    ) {
-      return false;
-    }
-    throw error;
   }
 }
 
@@ -594,7 +573,7 @@ process.stdout.write(Buffer.concat([header,body]),()=>process.exit(0));});`,
   test("compiled embedding требует явный доверенный component, после его передачи private роль работает", async () => {
     const fixture = new RuntimeFixture(group);
     const source = join(fixture.root, "embedding.ts");
-    const binary = join(fixture.root, process.platform === "win32" ? "embedding.exe" : "embedding");
+    const binary = join(fixture.root, nativeExecutableName("embedding"));
     const marker = join(fixture.root, "target-ran");
     const runtimeEntry = fileURLToPath(new URL("../../src/index.ts", import.meta.url));
     writeFileSync(

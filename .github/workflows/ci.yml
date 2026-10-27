@@ -1,271 +1,1219 @@
-name: Проверки Relay
-
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
-    inputs:
-      windows_resource_probe:
-        description: "Base64 JSON v1: четыре TS-файла одноразового Windows resource probe"
-        type: string
-        required: false
-        default: ""
-
-permissions:
-  contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  native:
-    name: CLI, Server, Web и Git Sync — ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    defaults:
-      run:
-        # В Windows используется Git Bash, а Bun и Git остаются нативными процессами.
-        # pipefail сохраняет отказ команды при записи её журнала через tee.
-        shell: bash --noprofile --norc -e -o pipefail {0}
-
-    steps:
-      - name: Получить исходники
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Установить Bun 1.4.3
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.3"
-
-      - name: Установить Node.js для Vite
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-
-      - name: Подготовить каталог журналов
-        id: artifacts
-        run: |
-          directory=".artifacts/$(date -u +%F)/ci-${RUNNER_OS}-${RUNNER_ARCH}"
-          mkdir -p "$directory"
-          echo "directory=$directory" >> "$GITHUB_OUTPUT"
-          echo "CI_LOG_DIR=$directory" >> "$GITHUB_ENV"
-
-      - name: Проверить версии инструментов
-        run: |
-          bun -e '
-            const expected = "1.4.3";
-            const manifest = await Bun.file("package.json").json();
-            const pinned = (await Bun.file(".bun-version").text()).trim();
-            if (
-              Bun.version !== expected ||
-              pinned !== expected ||
-              manifest.packageManager !== `bun@${expected}` ||
-              manifest.engines?.bun !== expected
-            ) {
-              throw new Error("Версии Bun в окружении и репозитории должны совпадать с 1.4.3");
-            }
-            console.log(`Bun ${Bun.version} (${process.platform}/${process.arch})`);
-          ' 2>&1 | tee "$CI_LOG_DIR/environment.log"
-          git --version 2>&1 | tee -a "$CI_LOG_DIR/environment.log"
-
-      - name: Установить зависимости по lock-файлу
-        id: install
-        run: |
-          bun install --frozen-lockfile 2>&1 | tee "$CI_LOG_DIR/install.log"
-          git diff --exit-code -- bun.lock 2>&1 | tee "$CI_LOG_DIR/lockfile.log"
-
-      - name: Извлечь одноразовый Windows resource probe
-        id: windows_resource_bundle
-        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.install.outcome == 'success' }}
-        run: |
-          # Payload читается из файла события, без переноса в shell/env.
-          bun -e '
-            import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-            import { createHash } from "node:crypto";
-            import { join, resolve } from "node:path";
-            const event = await Bun.file(process.env.GITHUB_EVENT_PATH).json();
-            const input = event.inputs?.windows_resource_probe;
-            if (typeof input !== "string" || !input || input.length > 64000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(input)) {
-              throw new Error("Некорректный размер или Base64 Windows resource probe");
-            }
-            const bytes = Buffer.from(input, "base64");
-            if (bytes.length > 48000 || bytes.toString("base64") !== input) {
-              throw new Error("Неканонический или слишком большой Windows resource probe");
-            }
-            let bundle;
-            try {
-              bundle = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-            } catch {
-              throw new Error("Некорректный UTF-8 JSON Windows resource probe");
-            }
-            const names = ["windows-resource-preload.ts", "windows-resource-snapshot.ts",
-              "windows-resource-snapshot.types.ts", "windows-resource-snapshot.integration.test.ts"];
-            if (!bundle || bundle.version !== 1 || Object.keys(bundle).length !== 2 ||
-                !bundle.files || Array.isArray(bundle.files) || typeof bundle.files !== "object" ||
-                Object.keys(bundle.files).length !== names.length ||
-                !names.every(name => Object.hasOwn(bundle.files, name) &&
-                  typeof bundle.files[name] === "string" && bundle.files[name].length > 0)) {
-              throw new Error("Ожидался bundle v1 с четырьмя разрешёнными TS-файлами");
-            }
-            const directory = resolve(process.env.CI_LOG_DIR, "windows-resource-cleanup");
-            const head = Bun.spawnSync(["git", "rev-parse", "HEAD"]);
-            const git = Bun.spawnSync(["git", "--version"]);
-            if (head.exitCode !== 0 || git.exitCode !== 0) {
-              throw new Error("Не удалось сохранить HEAD и версию Git для probe");
-            }
-            const metadata = {
-              version: bundle.version, bytes: bytes.length,
-              sha256: createHash("sha256").update(bytes).digest("hex"),
-              head: head.stdout.toString().trim(), githubSha: process.env.GITHUB_SHA,
-              bun: Bun.version, git: git.stdout.toString().trim(),
-              platform: process.platform, arch: process.arch,
-              files: Object.fromEntries(names.map(name => [name, {
-                bytes: Buffer.byteLength(bundle.files[name]),
-                sha256: createHash("sha256").update(bundle.files[name]).digest("hex"),
-              }])),
-            };
-            mkdirSync(directory, { recursive: true });
-            mkdirSync(join(directory, "probe"));
-            writeFileSync(join(directory, "bundle.json"), bytes, { flag: "wx" });
-            for (const name of names) {
-              writeFileSync(join(directory, "probe", name), bundle.files[name], { flag: "wx" });
-            }
-            writeFileSync(join(directory, "metadata.json"), JSON.stringify(metadata, null, 2), { flag: "wx" });
-            appendFileSync(process.env.GITHUB_ENV, `WINDOWS_RESOURCE_REPORT_DIR=${directory}\n`);
-            console.log(JSON.stringify(metadata, null, 2));
-          ' 2>&1 | tee "$CI_LOG_DIR/windows-resource-bundle.log"
-
-      - name: Проверить native Windows snapshot
-        id: windows_resource_validation
-        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_bundle.outcome == 'success' }}
-        run: |
-          bun test "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-snapshot.integration.test.ts" 2>&1 | tee "$CI_LOG_DIR/windows-resource-validation.log"
-
-      # Pre-rm snapshot меняет тайминг: успех адресного прогона не является lifetime-fix.
-      - name: Наблюдать очистку Runtime SIGKILL normal
-        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_validation.outcome == 'success' }}
-        run: |
-          bun test --cwd packages/project-runtime --preload "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-preload.ts" ./tests/integration/process-guardian.integration.test.ts -t "SIGKILL только владельца даёт stdin-eof target: обычный вывод" 2>&1 | tee "$CI_LOG_DIR/windows-resource-runtime.log"
-
-      - name: Наблюдать очистку Git refresh
-        if: ${{ !cancelled() && runner.os == 'Windows' && inputs.windows_resource_probe != '' && steps.windows_resource_validation.outcome == 'success' }}
-        run: |
-          bun test --cwd apps/git-sync --preload "$WINDOWS_RESOURCE_REPORT_DIR/probe/windows-resource-preload.ts" ./tests/integration/exchange.integration.test.ts -t "refresh получает behind" 2>&1 | tee "$CI_LOG_DIR/windows-resource-git-refresh.log"
-
-      - name: Проверить форматирование
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun run format:check 2>&1 | tee "$CI_LOG_DIR/format.log"
-
-      - name: Выполнить lint
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun run lint 2>&1 | tee "$CI_LOG_DIR/lint.log"
-
-      - name: Проверить типы
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun run typecheck 2>&1 | tee "$CI_LOG_DIR/typecheck.log"
-
-      - name: Собрать CLI, Server с Web и Git Sync
-        id: build
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun run build 2>&1 | tee "$CI_LOG_DIR/build.log"
-
-      # Все функциональные наборы запускаются на каждой ОС; платформенные условия принадлежат тестам.
-      # Отказ одного независимого пакета сохраняет ошибку job, но не обрывает проверки остальных.
-      - name: Модульные тесты
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun x --no-install turbo run test:unit --continue=always 2>&1 | tee "$CI_LOG_DIR/unit.log"
-
-      - name: Интеграционные тесты
-        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
-        run: bun x --no-install turbo run test:integration --continue=always 2>&1 | tee "$CI_LOG_DIR/integration.log"
-
-      - name: Процессные тесты CLI, Server и Git Sync
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: bun x --no-install turbo run test:process --filter=@relay/cli --filter=@relay/git-sync --filter=@relay/server --continue=always 2>&1 | tee "$CI_LOG_DIR/process.log"
-
-      - name: Сквозные сценарии
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: bun run test:e2e 2>&1 | tee "$CI_LOG_DIR/e2e.log"
-
-      - name: Сохранить журналы проверок
-        if: ${{ always() && steps.artifacts.outcome == 'success' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: ci-logs-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ steps.artifacts.outputs.directory }}
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-
-  native-services:
-    name: Пользовательская служба — ${{ matrix.platform }}
-    # Эти labels должны выбирать одноразовые машины с уже открытой пользовательской сессией.
-    # Preflight проваливает job, если hosted image не предоставляет нужный manager/token.
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux
-            runner: ${{ vars.RELAY_NATIVE_LINUX_RUNNER || 'ubuntu-latest' }}
-          - platform: darwin
-            runner: ${{ vars.RELAY_NATIVE_MACOS_RUNNER || 'macos-latest' }}
-          - platform: win32
-            runner: ${{ vars.RELAY_NATIVE_WINDOWS_RUNNER || 'windows-latest' }}
-    defaults:
-      run:
-        shell: bash --noprofile --norc -e -o pipefail {0}
-    steps:
-      - name: Получить исходники
-        uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-
-      - name: Установить Bun 1.4.3
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.4.3"
-
-      - name: Установить Node.js для Vite
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-
-      - name: Подготовить каталог журналов native service
-        id: artifacts
-        run: |
-          directory=".artifacts/$(date -u +%F)/git-sync-implementation/finalization/native-service-ci"
-          mkdir -p "$directory"
-          echo "directory=$directory" >> "$GITHUB_OUTPUT"
-          echo "CI_LOG_DIR=$directory" >> "$GITHUB_ENV"
-
-      - name: Установить зависимости по lock-файлу
-        run: bun install --frozen-lockfile 2>&1 | tee "$CI_LOG_DIR/install.log"
-
-      - name: Собрать настоящие бинарники
-        run: bun run build:cli 2>&1 | tee "$CI_LOG_DIR/build.log"
-
-      - name: Проверить реальный manager и lifecycle собственной службы
-        env:
-          CI: "true"
-          RELAY_NATIVE_SERVICE_TESTS: disposable-runner
-          RELAY_NATIVE_SERVICE_PLATFORM: ${{ matrix.platform }}
-        run: bun run test:native-service 2>&1 | tee "$CI_LOG_DIR/native-service.log"
-
-      - name: Сохранить native service диагностику
-        if: ${{ always() && steps.artifacts.outcome == 'success' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: native-service-${{ matrix.platform }}-${{ github.run_attempt }}
-          path: ${{ steps.artifacts.outputs.directory }}
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
+# Генерируется bun run ci:generate из scripts/verification/ci-model.ts.
+{
+  name: CI,
+  "on": { pull_request: {}, push: { branches: [main] }, workflow_dispatch: {}, workflow_call: {} },
+  permissions: { contents: read, actions: read },
+  concurrency:
+    {
+      group: "relay-ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
+      cancel-in-progress: true,
+    },
+  jobs:
+    {
+      cli_quality:
+        { name: CLI / Quality, uses: ./.github/workflows/quality.yml, with: { component: cli } },
+      cli_test_unit_linux_x64:
+        {
+          name: CLI / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      cli_test_unit_windows_x64:
+        {
+          name: CLI / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      cli_test_unit_macos_arm64:
+        {
+          name: CLI / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      cli_test_integration_linux_x64:
+        {
+          name: CLI / integration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      cli_test_integration_windows_x64:
+        {
+          name: CLI / integration / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      cli_test_integration_macos_arm64:
+        {
+          name: CLI / integration / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      cli_test_process_linux_x64:
+        {
+          name: CLI / process / linux-x64,
+          needs: [cli_build_linux_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:process,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-process,
+            },
+        },
+      cli_test_process_windows_x64:
+        {
+          name: CLI / process / windows-x64,
+          needs: [cli_build_windows_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:process,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-process,
+            },
+        },
+      cli_test_process_macos_arm64:
+        {
+          name: CLI / process / macos-arm64,
+          needs: [cli_build_macos_arm64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:process,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-process,
+            },
+        },
+      cli_test_e2e_linux_x64:
+        {
+          name: CLI / e2e / linux-x64,
+          needs: [cli_build_linux_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:e2e,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-e2e,
+            },
+        },
+      cli_test_e2e_windows_x64:
+        {
+          name: CLI / e2e / windows-x64,
+          needs: [cli_build_windows_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:e2e,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-e2e,
+            },
+        },
+      cli_test_e2e_macos_arm64:
+        {
+          name: CLI / e2e / macos-arm64,
+          needs: [cli_build_macos_arm64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: test:e2e,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-e2e,
+            },
+        },
+      contracts_quality:
+        {
+          name: Contracts / Quality,
+          uses: ./.github/workflows/quality.yml,
+          with: { component: contracts },
+        },
+      contracts_test_unit_linux_x64:
+        {
+          name: Contracts / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: contracts,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      contracts_test_unit_windows_x64:
+        {
+          name: Contracts / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: contracts,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      contracts_test_unit_macos_arm64:
+        {
+          name: Contracts / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: contracts,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      core_quality:
+        { name: Core / Quality, uses: ./.github/workflows/quality.yml, with: { component: core } },
+      core_test_unit_linux_x64:
+        {
+          name: Core / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      core_test_unit_windows_x64:
+        {
+          name: Core / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      core_test_unit_macos_arm64:
+        {
+          name: Core / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      core_test_integration_linux_x64:
+        {
+          name: Core / integration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      core_test_integration_windows_x64:
+        {
+          name: Core / integration / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      core_test_integration_macos_arm64:
+        {
+          name: Core / integration / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: core,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      git_sync_quality:
+        {
+          name: Git Sync / Quality,
+          uses: ./.github/workflows/quality.yml,
+          with: { component: git-sync },
+        },
+      git_sync_test_unit_linux_x64:
+        {
+          name: Git Sync / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      git_sync_test_unit_windows_x64:
+        {
+          name: Git Sync / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      git_sync_test_unit_macos_arm64:
+        {
+          name: Git Sync / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      git_sync_test_integration_linux_x64:
+        {
+          name: Git Sync / integration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      git_sync_test_integration_windows_x64:
+        {
+          name: Git Sync / integration / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      git_sync_test_integration_macos_arm64:
+        {
+          name: Git Sync / integration / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      git_sync_test_process_linux_x64:
+        {
+          name: Git Sync / process / linux-x64,
+          needs: [git_sync_build_linux_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:process,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-process,
+            },
+        },
+      git_sync_test_process_windows_x64:
+        {
+          name: Git Sync / process / windows-x64,
+          needs: [git_sync_build_windows_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:process,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-process,
+            },
+        },
+      git_sync_test_process_macos_arm64:
+        {
+          name: Git Sync / process / macos-arm64,
+          needs: [git_sync_build_macos_arm64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: test:process,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-process,
+            },
+        },
+      project_runtime_quality:
+        {
+          name: Project Runtime / Quality,
+          uses: ./.github/workflows/quality.yml,
+          with: { component: project-runtime },
+        },
+      project_runtime_test_unit_linux_x64:
+        {
+          name: Project Runtime / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      project_runtime_test_unit_windows_x64:
+        {
+          name: Project Runtime / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      project_runtime_test_unit_macos_arm64:
+        {
+          name: Project Runtime / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      project_runtime_test_integration_linux_x64:
+        {
+          name: Project Runtime / integration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      project_runtime_test_integration_windows_x64:
+        {
+          name: Project Runtime / integration / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      project_runtime_test_integration_macos_arm64:
+        {
+          name: Project Runtime / integration / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: project-runtime,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      rest_sdk_quality:
+        {
+          name: REST SDK / Quality,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/quality.yml,
+          with: { component: rest-sdk },
+        },
+      rest_sdk_test_unit_linux_x64:
+        {
+          name: REST SDK / unit / linux-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: rest-sdk,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      rest_sdk_test_unit_windows_x64:
+        {
+          name: REST SDK / unit / windows-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: rest-sdk,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      rest_sdk_test_unit_macos_arm64:
+        {
+          name: REST SDK / unit / macos-arm64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: rest-sdk,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      server_quality:
+        {
+          name: Server / Quality,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/quality.yml,
+          with: { component: server },
+        },
+      server_test_unit_linux_x64:
+        {
+          name: Server / unit / linux-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      server_test_unit_windows_x64:
+        {
+          name: Server / unit / windows-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      server_test_unit_macos_arm64:
+        {
+          name: Server / unit / macos-arm64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      server_test_integration_linux_x64:
+        {
+          name: Server / integration / linux-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      server_test_integration_windows_x64:
+        {
+          name: Server / integration / windows-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      server_test_integration_macos_arm64:
+        {
+          name: Server / integration / macos-arm64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      server_test_process_linux_x64:
+        {
+          name: Server / process / linux-x64,
+          needs: [rest_sdk_build_portable, web_build_portable, server_build_linux_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:process,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-process,
+            },
+        },
+      server_test_process_windows_x64:
+        {
+          name: Server / process / windows-x64,
+          needs: [rest_sdk_build_portable, web_build_portable, server_build_windows_x64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:process,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-process,
+            },
+        },
+      server_test_process_macos_arm64:
+        {
+          name: Server / process / macos-arm64,
+          needs: [rest_sdk_build_portable, web_build_portable, server_build_macos_arm64],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: test:process,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-process,
+            },
+        },
+      storage_quality:
+        {
+          name: Storage / Quality,
+          uses: ./.github/workflows/quality.yml,
+          with: { component: storage },
+        },
+      storage_test_unit_linux_x64:
+        {
+          name: Storage / unit / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      storage_test_unit_windows_x64:
+        {
+          name: Storage / unit / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      storage_test_unit_macos_arm64:
+        {
+          name: Storage / unit / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      storage_test_integration_linux_x64:
+        {
+          name: Storage / integration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:integration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-integration,
+            },
+        },
+      storage_test_integration_windows_x64:
+        {
+          name: Storage / integration / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:integration,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-integration,
+            },
+        },
+      storage_test_integration_macos_arm64:
+        {
+          name: Storage / integration / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: storage,
+              task: test:integration,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-integration,
+            },
+        },
+      web_quality:
+        {
+          name: Web / Quality,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/quality.yml,
+          with: { component: web },
+        },
+      web_test_unit_linux_x64:
+        {
+          name: Web / unit / linux-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: web,
+              task: test:unit,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit,
+            },
+        },
+      web_test_unit_windows_x64:
+        {
+          name: Web / unit / windows-x64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: web,
+              task: test:unit,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-unit,
+            },
+        },
+      web_test_unit_macos_arm64:
+        {
+          name: Web / unit / macos-arm64,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: web,
+              task: test:unit,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-unit,
+            },
+        },
+      rest_sdk_build_portable:
+        {
+          name: REST SDK / build / portable,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: rest-sdk,
+              task: build,
+              target: portable,
+              runner: ubuntu-24.04,
+              artifact-key: build,
+            },
+        },
+      web_build_portable:
+        {
+          name: Web / build / portable,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: web,
+              task: build,
+              target: portable,
+              runner: ubuntu-24.04,
+              artifact-key: build,
+            },
+        },
+      cli_build_linux_x64:
+        {
+          name: CLI / build / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: build,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: build,
+            },
+        },
+      cli_build_windows_x64:
+        {
+          name: CLI / build / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: build,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: build,
+            },
+        },
+      cli_build_macos_arm64:
+        {
+          name: CLI / build / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: cli,
+              task: build,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: build,
+            },
+        },
+      server_build_linux_x64:
+        {
+          name: Server / build / linux-x64,
+          needs: [web_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: build,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: build,
+            },
+        },
+      server_build_windows_x64:
+        {
+          name: Server / build / windows-x64,
+          needs: [web_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: build,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: build,
+            },
+        },
+      server_build_macos_arm64:
+        {
+          name: Server / build / macos-arm64,
+          needs: [web_build_portable],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: server,
+              task: build,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: build,
+            },
+        },
+      git_sync_build_linux_x64:
+        {
+          name: Git Sync / build / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: build,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: build,
+            },
+        },
+      git_sync_build_windows_x64:
+        {
+          name: Git Sync / build / windows-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: build,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: build,
+            },
+        },
+      git_sync_build_macos_arm64:
+        {
+          name: Git Sync / build / macos-arm64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: git-sync,
+              task: build,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: build,
+            },
+        },
+      repository_format_check:
+        {
+          name: Repository / format:check / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: format:check,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: format-check,
+            },
+        },
+      repository_verify_configuration:
+        {
+          name: Repository / verify:configuration / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: verify:configuration,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: verify-configuration,
+            },
+        },
+      repository_test_unit_repo:
+        {
+          name: Repository / unit:repo / linux-x64,
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: test:unit:repo,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-unit-repo,
+            },
+        },
+      repository_quality:
+        {
+          name: Repository / Quality,
+          needs: [rest_sdk_build_portable],
+          uses: ./.github/workflows/quality.yml,
+          with: { component: repository },
+        },
+      product_e2e_linux_x64:
+        {
+          name: Repository / e2e:product / linux-x64,
+          needs:
+            [
+              rest_sdk_build_portable,
+              cli_build_linux_x64,
+              server_build_linux_x64,
+              git_sync_build_linux_x64,
+            ],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: test:e2e:product,
+              target: linux-x64,
+              runner: ubuntu-24.04,
+              artifact-key: test-e2e-product,
+            },
+        },
+      native_services_linux_x64:
+        {
+          name: Native services / linux-x64,
+          needs: [cli_build_linux_x64, git_sync_build_linux_x64],
+          uses: ./.github/workflows/native-services.yml,
+          with:
+            {
+              target: linux-x64,
+              runner: "${{ vars.RELAY_NATIVE_LINUX_RUNNER || 'ubuntu-24.04' }}",
+            },
+        },
+      product_e2e_windows_x64:
+        {
+          name: Repository / e2e:product / windows-x64,
+          needs:
+            [
+              rest_sdk_build_portable,
+              cli_build_windows_x64,
+              server_build_windows_x64,
+              git_sync_build_windows_x64,
+            ],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: test:e2e:product,
+              target: windows-x64,
+              runner: windows-2025,
+              artifact-key: test-e2e-product,
+            },
+        },
+      native_services_windows_x64:
+        {
+          name: Native services / windows-x64,
+          needs: [cli_build_windows_x64, git_sync_build_windows_x64],
+          uses: ./.github/workflows/native-services.yml,
+          with:
+            {
+              target: windows-x64,
+              runner: "${{ vars.RELAY_NATIVE_WINDOWS_RUNNER || 'windows-2025' }}",
+            },
+        },
+      product_e2e_macos_arm64:
+        {
+          name: Repository / e2e:product / macos-arm64,
+          needs:
+            [
+              rest_sdk_build_portable,
+              cli_build_macos_arm64,
+              server_build_macos_arm64,
+              git_sync_build_macos_arm64,
+            ],
+          uses: ./.github/workflows/task.yml,
+          with:
+            {
+              component: repository,
+              task: test:e2e:product,
+              target: macos-arm64,
+              runner: macos-15,
+              artifact-key: test-e2e-product,
+            },
+        },
+      native_services_macos_arm64:
+        {
+          name: Native services / macos-arm64,
+          needs: [cli_build_macos_arm64, git_sync_build_macos_arm64],
+          uses: ./.github/workflows/native-services.yml,
+          with:
+            { target: macos-arm64, runner: "${{ vars.RELAY_NATIVE_MACOS_RUNNER || 'macos-15' }}" },
+        },
+      result:
+        {
+          name: Result,
+          needs:
+            [
+              cli_quality,
+              cli_test_unit_linux_x64,
+              cli_test_unit_windows_x64,
+              cli_test_unit_macos_arm64,
+              cli_test_integration_linux_x64,
+              cli_test_integration_windows_x64,
+              cli_test_integration_macos_arm64,
+              cli_test_process_linux_x64,
+              cli_test_process_windows_x64,
+              cli_test_process_macos_arm64,
+              cli_test_e2e_linux_x64,
+              cli_test_e2e_windows_x64,
+              cli_test_e2e_macos_arm64,
+              contracts_quality,
+              contracts_test_unit_linux_x64,
+              contracts_test_unit_windows_x64,
+              contracts_test_unit_macos_arm64,
+              core_quality,
+              core_test_unit_linux_x64,
+              core_test_unit_windows_x64,
+              core_test_unit_macos_arm64,
+              core_test_integration_linux_x64,
+              core_test_integration_windows_x64,
+              core_test_integration_macos_arm64,
+              git_sync_quality,
+              git_sync_test_unit_linux_x64,
+              git_sync_test_unit_windows_x64,
+              git_sync_test_unit_macos_arm64,
+              git_sync_test_integration_linux_x64,
+              git_sync_test_integration_windows_x64,
+              git_sync_test_integration_macos_arm64,
+              git_sync_test_process_linux_x64,
+              git_sync_test_process_windows_x64,
+              git_sync_test_process_macos_arm64,
+              project_runtime_quality,
+              project_runtime_test_unit_linux_x64,
+              project_runtime_test_unit_windows_x64,
+              project_runtime_test_unit_macos_arm64,
+              project_runtime_test_integration_linux_x64,
+              project_runtime_test_integration_windows_x64,
+              project_runtime_test_integration_macos_arm64,
+              rest_sdk_quality,
+              rest_sdk_test_unit_linux_x64,
+              rest_sdk_test_unit_windows_x64,
+              rest_sdk_test_unit_macos_arm64,
+              server_quality,
+              server_test_unit_linux_x64,
+              server_test_unit_windows_x64,
+              server_test_unit_macos_arm64,
+              server_test_integration_linux_x64,
+              server_test_integration_windows_x64,
+              server_test_integration_macos_arm64,
+              server_test_process_linux_x64,
+              server_test_process_windows_x64,
+              server_test_process_macos_arm64,
+              storage_quality,
+              storage_test_unit_linux_x64,
+              storage_test_unit_windows_x64,
+              storage_test_unit_macos_arm64,
+              storage_test_integration_linux_x64,
+              storage_test_integration_windows_x64,
+              storage_test_integration_macos_arm64,
+              web_quality,
+              web_test_unit_linux_x64,
+              web_test_unit_windows_x64,
+              web_test_unit_macos_arm64,
+              rest_sdk_build_portable,
+              web_build_portable,
+              cli_build_linux_x64,
+              cli_build_windows_x64,
+              cli_build_macos_arm64,
+              server_build_linux_x64,
+              server_build_windows_x64,
+              server_build_macos_arm64,
+              git_sync_build_linux_x64,
+              git_sync_build_windows_x64,
+              git_sync_build_macos_arm64,
+              repository_format_check,
+              repository_verify_configuration,
+              repository_test_unit_repo,
+              repository_quality,
+              product_e2e_linux_x64,
+              native_services_linux_x64,
+              product_e2e_windows_x64,
+              native_services_windows_x64,
+              product_e2e_macos_arm64,
+              native_services_macos_arm64,
+            ],
+          if: "${{ always() }}",
+          runs-on: ubuntu-24.04,
+          steps:
+            [
+              {
+                name: Проверить все обязательные результаты,
+                uses: actions/github-script@v8,
+                env: { RESULTS: "${{ toJSON(needs) }}" },
+                with:
+                  {
+                    script: "const jobs = Object.entries(JSON.parse(process.env.RESULTS));\nawait core.summary.addTable([[\"Job\",\"Результат\"], ...jobs.map(([name, value]) => [name, value.result])]).write();\nconst failed = jobs.filter(([, value]) => value.result !== 'success');\nif (failed.length) core.setFailed(\"Не прошли обязательные jobs: {jobs}\".replace('{jobs}', failed.map(([name]) => name).join(', ')));",
+                  },
+              },
+            ],
+        },
+    },
+}

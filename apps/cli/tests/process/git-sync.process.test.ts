@@ -10,9 +10,10 @@ import {
 } from "node:fs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join, resolve } from "node:path";
-import { setTimeout as pause } from "node:timers/promises";
-import { runNativeProcess } from "@relay/project-runtime";
+import { nativeExecutableName, runNativeProcess } from "@relay/project-runtime";
 import type { GitSyncFixtureReady } from "./git-sync-process.types";
+import { waitForFixtureExit } from "./native/linux/process-observation";
+import { terminateLinuxGroup } from "./native/linux/process-tree";
 
 const artifacts = resolve(
   import.meta.dir,
@@ -20,10 +21,7 @@ const artifacts = resolve(
   new Date().toISOString().slice(0, 10),
   "git-sync-implementation/cli-runtime",
 );
-const relay = resolve(
-  import.meta.dir,
-  process.platform === "win32" ? "../../dist/relay.exe" : "../../dist/relay",
-);
+const relay = resolve(import.meta.dir, "../../dist", nativeExecutableName("relay"));
 const componentSource = `
 import {writeFileSync} from 'node:fs';
 if (process.argv.includes('--version')) { console.log('0.0.0'); process.exit(0); }
@@ -91,41 +89,6 @@ function proxyReadiness(child: ChildProcessWithoutNullStreams): Promise<GitSyncF
 }
 
 /**
- * Ожидает наблюдаемое завершение Linux-процесса; zombie уже не выполняется, его reap принадлежит init.
- * Poll проверяет конкретное условие до deadline и не подменяет его произвольной задержкой.
- */
-async function waitForFixtureExit(pid: number): Promise<void> {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    try {
-      if (readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.startsWith("Z ")) {
-        return;
-      }
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-        return;
-      }
-      throw error;
-    }
-    await pause(10);
-  }
-  throw new Error(`Fixture supervisor ${pid} пережил EOF своего stdin lease`);
-}
-
-/**
- * Убирает принадлежащую тесту POSIX-группу, если отказ прокси оставил отдельный supervisor живым.
- */
-function terminateFixtureComponent(pid: number): void {
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
-      throw error;
-    }
-  }
-}
-
-/**
  * Собирает неизменяемый fixture-компонент рядом с изолированным home; реальные службы не используются.
  */
 async function withComponentFixture(
@@ -134,7 +97,7 @@ async function withComponentFixture(
   mkdirSync(artifacts, { recursive: true });
   const root = mkdtempSync(join(artifacts, "cli-component-"));
   const source = join(root, "fixture.ts");
-  const binary = join(root, process.platform === "win32" ? "компонент sync.exe" : "компонент sync");
+  const binary = join(root, nativeExecutableName("компонент sync"));
   writeFileSync(source, componentSource);
   try {
     const build = await runNativeProcess({
@@ -339,7 +302,7 @@ describe("Git Sync в собранной CLI", () => {
           expect(componentPid).toBeDefined();
         } finally {
           if (componentPid) {
-            terminateFixtureComponent(componentPid);
+            await terminateLinuxGroup(componentPid);
           }
         }
       });
@@ -414,7 +377,7 @@ describe("Git Sync в собранной CLI", () => {
           }
           await exited;
           if (componentPid) {
-            terminateFixtureComponent(componentPid);
+            await terminateLinuxGroup(componentPid);
           }
         }
       });

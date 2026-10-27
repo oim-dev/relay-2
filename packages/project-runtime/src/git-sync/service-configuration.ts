@@ -1,38 +1,20 @@
 import { createHash } from "node:crypto";
-import { posix, win32 } from "node:path";
 import { RelayError } from "@relay/contracts";
+import { selectUserService } from "../native/user-service/select";
 import { gitSyncMessages as messages } from "./git-sync.messages";
 import type { ServiceConfiguration, ServiceConfigurationInput } from "./service.types";
 
 /**
- * Экранирует XML/plist, сохраняя пробелы и Unicode в значении одного элемента.
+ * Сохраняет публичный отказ выбора manager вместо общего PLATFORM_UNSUPPORTED.
  */
-export function escapeServiceXml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
+export function gitSyncServicePlatformFailure(): RelayError {
+  return new RelayError("GIT_SYNC_SERVICE_PLATFORM", messages.servicePlatform, 2);
 }
 
 /**
- * Кодирует один аргумент systemd ExecStart без shell, подстановок specifier и переменных.
- */
-export function quoteSystemdArgument(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%").replaceAll("$", "$$$$")}"`;
-}
-
-/**
- * Кодирует один аргумент Windows CommandLineToArgvW, включая завершающие обратные слеши.
- */
-export function quoteWindowsArgument(value: string): string {
-  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1")}"`;
-}
-
-/**
- * Генерирует реальный unit, LaunchAgent или logon task только текущего пользователя.
- * Не выполняет native-команды; абсолютный executable и home сохраняются раздельными аргументами.
+ * Генерирует конфигурацию supervisor, сохраняя стабильный home/user identity и exact argv.
+ * Сценарий владеет хешем и командой; формат, namespace и пути manager принадлежат native-адаптеру.
+ * Не запускает процессов и не пишет файлы; управляющие символы отклоняются до генерации.
  */
 export function createServiceConfiguration(input: ServiceConfigurationInput): ServiceConfiguration {
   for (const value of [input.binary, input.home, input.userHome, input.userName ?? ""]) {
@@ -44,50 +26,26 @@ export function createServiceConfiguration(input: ServiceConfigurationInput): Se
       throw new RelayError("INVALID_ARGUMENT", messages.invalidServicePath, 2);
     }
   }
-  const identity =
-    input.platform === "win32" ? `${input.userName?.toLowerCase()}\0${input.home}` : input.home;
+  const adapter = selectUserService(input.platform, gitSyncServicePlatformFailure);
+  const identity = adapter.scopeIdentity(input.home, input.userName);
   const hash = createHash("sha256").update(identity).digest("hex").slice(0, 16);
-  const marker = `Relay Git Sync managed: ${hash}`;
-  const args = [input.binary, "supervise", "--home", input.home];
-  if (input.platform === "linux") {
-    const id = `relay-git-sync-${hash}.service`;
-    // systemd запрещает кавычки и backslash в executable первого токена, даже после unescape.
-    // Фиксированный exec не интерпретирует пути как shell-код и сохраняет PID через замену sh.
-    const command = ["/bin/sh", "-c", 'exec "$@"', "relay-git-sync", ...args];
-    return {
-      platform: input.platform,
-      id,
-      marker,
-      home: input.home,
-      path: posix.join(input.userHome, ".config/systemd/user", id),
-      content: `# ${marker}\n[Unit]\nDescription=Relay Git Sync\nAfter=network.target\n\n[Service]\nType=exec\nExecStart=${command.map(quoteSystemdArgument).join(" ")}\nRestart=on-failure\nRestartSec=5\nKillMode=control-group\nTimeoutStopSec=20\n\n[Install]\nWantedBy=default.target\n`,
-    };
-  }
-  if (input.platform === "darwin") {
-    const id = `dev.relay.git-sync.${hash}`;
-    return {
-      platform: input.platform,
-      id,
-      marker,
-      home: input.home,
-      path: posix.join(input.userHome, "Library/LaunchAgents", `${id}.plist`),
-      content: `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${id}</string>\n<key>Comment</key><string>${marker}</string>\n<key>ProgramArguments</key><array>${args.map((arg) => `<string>${escapeServiceXml(arg)}</string>`).join("")}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n<key>ThrottleInterval</key><integer>5</integer>\n<key>ProcessType</key><string>Background</string>\n</dict></plist>\n`,
-    };
-  }
-  if (!input.userName?.trim()) {
-    throw new RelayError("GIT_SYNC_SERVICE_IDENTITY", messages.serviceIdentity);
-  }
-  const id = `Relay Git Sync ${hash}`;
-  const user = escapeServiceXml(input.userName);
-  // Repetition — native-поддержание enabled task после любого выхода, не retry по exit code action.
-  const triggerPolicy =
-    "<Repetition><Interval>PT1M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>";
-  return {
-    platform: input.platform,
-    id,
-    marker,
+  return adapter.configure({
+    name: "git-sync",
+    displayName: "Relay Git Sync",
+    description: "Relay Git Sync",
+    hash,
+    marker: `Relay Git Sync managed: ${hash}`,
+    taskFileName: `${hash}.xml`,
+    xmlBodySeparator: "\n",
+    binary: input.binary,
+    args: ["supervise", "--home", input.home],
     home: input.home,
-    path: win32.join(input.userHome, "AppData/Local/Relay/services", `${hash}.xml`),
-    content: `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\n<RegistrationInfo><Description>${marker}</Description></RegistrationInfo>\n<Triggers><LogonTrigger><Enabled>true</Enabled>${triggerPolicy}<UserId>${user}</UserId></LogonTrigger><RegistrationTrigger><Enabled>true</Enabled>${triggerPolicy}</RegistrationTrigger></Triggers>\n<Principals><Principal id="RelayUser"><UserId>${user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>\n<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit></Settings>\n<Actions Context="RelayUser"><Exec><Command>${escapeServiceXml(input.binary)}</Command><Arguments>${escapeServiceXml(args.slice(1).map(quoteWindowsArgument).join(" "))}</Arguments></Exec></Actions>\n</Task>\n`,
-  };
+    userHome: input.userHome,
+    ...(input.userName !== undefined ? { userName: input.userName } : {}),
+    /**
+     * Сохраняет предметный отказ отсутствующей identity, не подставляя другого пользователя.
+     */
+    identityFailure: (): RelayError =>
+      new RelayError("GIT_SYNC_SERVICE_IDENTITY", messages.serviceIdentity),
+  });
 }

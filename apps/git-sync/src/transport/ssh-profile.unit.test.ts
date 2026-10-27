@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { gitCommand } from "./git";
-import { probeSsh, selectSshProfile, shellWord, usesSsh } from "./ssh-profile";
+import { probeSsh, selectSshProfile } from "./ssh-profile";
+import { shellWord, usesSsh } from "./native/select";
 import type { ProcessInput, ProcessResult } from "./process.types";
 
 /**

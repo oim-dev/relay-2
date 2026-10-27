@@ -45,16 +45,3 @@ export function readSshCapability(repository: string): SshCapability | null {
   }
   return { mode, source, implementation: item.implementation, options: item.options };
 }
-
-/**
- * Описывает реальную платформенную границу собственного guardian, не включая внешние agents/master.
- */
-export function processTreeCapability(): string {
-  if (process.platform === "linux") {
-    return "linux-subreaper";
-  }
-  if (process.platform === "win32") {
-    return "windows-job";
-  }
-  return "posix-group-foreground-only";
-}

@@ -8,6 +8,7 @@
     "build": "bun build --compile --bytecode --format=esm ./src/main.ts --outfile ./dist/relay-git-sync",
     "start": "./dist/relay-git-sync",
     "typecheck": "bun --bun tsc --noEmit",
+    "lint": "bun --bun oxlint --deny-warnings .",
     "test:unit": "bun test .unit.test.ts",
     "test:integration": "bun test .integration.test.ts",
     "test:extended-replication": "bun test ./tests/extended",

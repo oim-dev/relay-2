@@ -8,8 +8,8 @@
   },
   "scripts": {
     "typecheck": "bun --bun tsc --noEmit && bun --bun tsc --noEmit -p tests/tsconfig.json",
-    "test:unit": "bun test .unit.test.ts",
-    "test:integration": "bun test --pass-with-no-tests .integration.test.ts"
+    "lint": "bun --bun oxlint --deny-warnings .",
+    "test:unit": "bun test .unit.test.ts"
   },
   "devDependencies": {
     "@relay/typescript-config": "workspace:*",

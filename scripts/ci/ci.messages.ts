@@ -1,0 +1,99 @@
+/**
+ * Видимые имена компонентов CI; технические ID остаются в каталоге проверок.
+ */
+export const ciComponentLabels: Readonly<Record<string, string>> = {
+  cli: "CLI",
+  server: "Server",
+  web: "Web",
+  "git-sync": "Git Sync",
+  contracts: "Contracts",
+  core: "Core",
+  storage: "Storage",
+  "project-runtime": "Project Runtime",
+  "rest-sdk": "REST SDK",
+  repository: "Repository",
+};
+
+/**
+ * Диагностики leaf dispatcher и представление GitHub jobs/summary.
+ */
+export const ciMessages = {
+  workflowName: "CI",
+  resultJob: "Result",
+  resultStep: "Проверить все обязательные результаты",
+  resultColumns: ["Job", "Результат"],
+  failedJobs: "Не прошли обязательные jobs: {jobs}",
+  nativeRuntimeOnly: "Native service принадлежит Runtime",
+  taskUsage: "Использование: bun scripts/ci/task.ts <component> <task> <target>",
+  taskArguments: "Не заданы component/task/target",
+  consumerArguments: "Не заданы параметры потребителя артефактов CI",
+  generatedHeader: "# Генерируется bun run ci:generate из scripts/verification/ci-model.ts.\n",
+
+  /**
+   * Называет отдельный job исполнения leaf-команды.
+   */
+  taskName: (component: string, task: string, target: string): string =>
+    `${ciComponentLabels[component] ?? component} / ${task.replace("test:", "")} / ${target}`,
+
+  /**
+   * Называет совместную проверку lint и types.
+   */
+  qualityName: (component: string): string =>
+    `${ciComponentLabels[component] ?? component} / Quality`,
+
+  /**
+   * Называет отдельную приёмку настоящего менеджера служб.
+   */
+  nativeName: (target: string): string => `Native services / ${target}`,
+
+  /**
+   * Объясняет отказ передать незарегистрированную задачу исполнителю.
+   */
+  unknownTask: (task: string): string => `Неизвестная задача ${task}`,
+
+  /**
+   * Указывает отсутствующую package-команду выбранного компонента.
+   */
+  missingTask: (component: string, task: string): string => `Нет команды ${component}/${task}`,
+
+  /**
+   * Объясняет отказ потребителя без попытки скрытой пересборки.
+   */
+  missingArtifact: (id: string, component: string, task: string): string =>
+    `Не получен обязательный артефакт ${id} для ${component}/${task}`,
+
+  /**
+   * Объясняет несовпадение фактического хоста с target команды.
+   */
+  hostMismatch: (target: string, platform: string, arch: string): string =>
+    `Target ${target} не соответствует хосту ${platform}/${arch}`,
+
+  /**
+   * Обозначает начало фактической команды после получения prerequisites.
+   */
+  taskStarted: (component: string, task: string, target: string): string =>
+    `${component} / ${task} / ${target}`,
+
+  /**
+   * Отображает exit code как короткий статус CI, не меняя числовой результат процесса.
+   */
+  result: (code: number): string => (code === 0 ? "успех" : "отказ"),
+
+  /**
+   * Показывает результат команды и длительность самого исполнения, без setup.
+   */
+  taskFinished: (component: string, task: string, code: number, seconds: string): string =>
+    `${component} / ${task}: ${ciMessages.result(code)}, ${seconds} с`,
+
+  /**
+   * Формирует GitHub step summary; вызывается только CI dispatcher, не локальным check.
+   */
+  taskSummary: (
+    component: string,
+    task: string,
+    target: string,
+    code: number,
+    seconds: string,
+  ): string =>
+    `| Компонент | Задача | Target | Результат | Выполнение |\n|---|---|---|---|---|\n| ${component} | ${task} | ${target} | ${ciMessages.result(code)} | ${seconds} с |\n\n`,
+} as const;

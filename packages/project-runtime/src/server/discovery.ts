@@ -1,44 +1,23 @@
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { basename, delimiter, dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
+import {
+  nativeExecutableName,
+  nativeExecutableSearchPath,
+  resolveNativeExecutable as executable,
+} from "../native/executable/select";
 import { RelayError } from "@relay/contracts";
 import { runNativeProcess } from "../git-sync/process";
 import { serverMessages as messages } from "./server.messages";
 import type { ServerEnvironment } from "./server.types";
 
 /**
- * Находит обычный исполняемый файл без shell; отсутствие кандидата позволяет продолжить discovery.
- */
-function executable(path: string): string | undefined {
-  try {
-    if (!statSync(path).isFile()) {
-      return undefined;
-    }
-    accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
-    return realpathSync(path);
-  } catch (cause) {
-    if (
-      cause instanceof Error &&
-      "code" in cause &&
-      ["ENOENT", "ENOTDIR", "EACCES"].includes(String(cause.code))
-    ) {
-      return undefined;
-    }
-    throw cause;
-  }
-}
-
-/**
  * Проверяет exact override, sibling, PATH, затем dev checkout в том же порядке, что Git Sync.
  * --version выполняется под общим guardian; явный несовместимый override никогда не обходится.
  */
 export async function discoverServerBinary(environment: ServerEnvironment): Promise<string> {
-  const name = process.platform === "win32" ? "relay-server.exe" : "relay-server";
+  const name = nativeExecutableName("relay-server");
   const cliPath = resolve(environment.cwd, environment.executablePath);
   const directory = dirname(executable(cliPath) ?? cliPath);
-  const pathKey =
-    process.platform === "win32"
-      ? Object.keys(environment.env).find((key) => key.toUpperCase() === "PATH")
-      : "PATH";
+  const searchPath = nativeExecutableSearchPath(environment.env);
   const checkout =
     basename(dirname(directory)) === "cli" && basename(dirname(dirname(directory))) === "apps"
       ? [resolve(directory, "../../server/dist", name)]
@@ -52,10 +31,7 @@ export async function discoverServerBinary(environment: ServerEnvironment): Prom
       : [
           resolve(dirname(cliPath), name),
           resolve(directory, name),
-          ...(pathKey ? (environment.env[pathKey] ?? "") : "")
-            .split(delimiter)
-            .filter(Boolean)
-            .map((entry) => resolve(environment.cwd, entry, name)),
+          ...searchPath.map((entry) => resolve(environment.cwd, entry, name)),
           ...checkout,
           resolve(import.meta.dir, "../../../../apps/server/dist", name),
         ];

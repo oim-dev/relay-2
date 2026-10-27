@@ -71,8 +71,7 @@ stop();
 ```sh
 bun run --filter @relay/rest-sdk generate
 bun run --filter @relay/rest-sdk generate:check
-bun run --filter @relay/rest-sdk typecheck
-bun run --filter @relay/rest-sdk test:unit
+bun x --no-install turbo run typecheck test:unit --filter=@relay/rest-sdk
 ```
 
 `generate` сначала обновляет спецификацию Server, затем запускает публичный CLI
@@ -88,7 +87,8 @@ bun run --filter @relay/rest-sdk test:unit
 
 Сборка `bun run --filter @relay/rest-sdk build` выпускает vendor JS и декларации в
 `dist/generated/`. Она нужна до прямого запуска consumers из чистого checkout.
-SDK `generate`, `typecheck` и `test:unit` выполняют её автоматически.
+SDK `generate` выполняет её автоматически. Для typecheck/unit Turbo подготавливает
+сборку один раз; прямые package scripts проверяют только свой набор и требуют готового `dist`.
 Версия генератора 5.2.4 требует отдельного `tsconfig.generated.json`: только vendor source
 проверяется без `exactOptionalPropertyTypes` и `noUnusedParameters`. Handwritten browser SDK
 проверяется со всеми строгими настройками проекта и импортирует compiled declarations.

@@ -39,17 +39,18 @@ Preflight делает только чтения. Отсутствие manager/�
 
 ## CI и граница доказательства
 
-Отдельный job `native-services` в [CI](../../../../.github/workflows/ci.yml) запускает
-этот набор на Linux, macOS и Windows. По умолчанию используются GitHub-hosted
-`ubuntu-latest`, `macos-latest`, `windows-latest`; их label сам по себе **не гарантирует**
+Отдельные jobs `Native services / <target>` в [CI](../../../../.github/workflows/ci.yml) запускают
+этот набор на Linux, macOS и Windows. По умолчанию используются закреплённые GitHub-hosted
+runners из [общего каталога CI](../../../../docs/development/CI.md#задания-ci); их label сам по себе **не гарантирует**
 доступность user manager. В частности, Windows runner как служба в Session 0
 не подходит для текущего InteractiveToken, а Linux runner может не иметь user bus.
 
 При таком отказе инфраструктура должна предоставить одноразовый runner с уже
 открытой требуемой сессией. Repository variables `RELAY_NATIVE_LINUX_RUNNER`,
 `RELAY_NATIVE_MACOS_RUNNER`, `RELAY_NATIVE_WINDOWS_RUNNER` выбирают его label.
-Ожидаемая ОС передаётся через `RELAY_NATIVE_SERVICE_PLATFORM`; ошибочно назначенный
-label другой ОС отклоняется до setup, а не засчитывается за нужную платформу.
+CI передаёт ожидаемый target общему `ci:task`; ошибочно назначенный label другой ОС
+или архитектуры отклоняется до запуска native-набора. При прямом запуске теста
+дополнительный guard ОС можно задать через `RELAY_NATIVE_SERVICE_PLATFORM`.
 Для self-hosted это должен быть ephemeral runner в уничтожаемой после job VM,
 допущенный политикой репозитория к выполнению его CI. Постоянный пользовательский
 компьютер для этого label не подходит. Workflow не переустраивает сессию runner.

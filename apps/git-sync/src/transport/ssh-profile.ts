@@ -1,5 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { shellWord, usesSsh } from "./native/select";
 import { gitCommand, checkGit } from "./git";
 import { componentCommand } from "./component-command";
 import { runProcess } from "./process";
@@ -14,27 +15,6 @@ import type { RepositoryOptions } from "./repository.types";
 import { invalidSnapshot, keys, object, text, array } from "../snapshot/json";
 
 const FOREGROUND_OPTIONS = ["ForkAfterAuthentication=no", "ControlPersist=no"] as const;
-
-/**
- * Отличает стандартные SSH URL/scp формы от HTTP и локальных файловых remote.
- */
-export function usesSsh(remote: string, platform: string = process.platform): boolean {
-  if (platform === "win32" && /^[a-z]:/i.test(remote)) {
-    return false;
-  }
-  if (/^ssh:\/\//i.test(remote)) {
-    return true;
-  }
-  return !/^[a-z][a-z0-9+.-]*:\/\//i.test(remote) && /^[^/\\:]+(?:@[^/\\:]+)?:[^/\\]/.test(remote);
-}
-
-/**
- * Кодирует только контролируемые argv в Git shell: Git for Windows также использует sh для alias/sshCommand.
- */
-export function shellWord(value: string, platform: string = process.platform): string {
-  const word = platform === "win32" ? value.replaceAll("\\", "/") : value;
-  return `'${word.replaceAll("'", "'\\''")}'`;
-}
 
 /**
  * Проверяет известный default SSH внутри Git окружения; -G с собственным пустым -F исключает сеть и Match exec.

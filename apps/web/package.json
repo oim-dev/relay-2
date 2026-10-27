@@ -9,7 +9,7 @@
     "dev": "node scripts/vite.mjs --host 127.0.0.1",
     "build": "node scripts/vite.mjs build",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint src",
+    "lint": "bun --bun oxlint --deny-warnings .",
     "browser": "agent-browser --config ./agent-browser.json",
     "browser:install": "agent-browser install",
     "test:unit": "bun test .unit.test.ts",

@@ -3,18 +3,10 @@ import { join } from "node:path";
 import { probeGitSyncSupervisor, readGitSyncControlEndpoint } from "@relay/project-runtime";
 import { failureDiagnostic, type NativeCommands } from "./native-command";
 import type { NativeConfiguration } from "./native-service.types";
-import { readWindowsFailureSnapshot } from "./native-windows";
-
-/**
- * Удерживает отказ отдельного чтения в снимке, чтобы отсутствие журнала не скрыло task result.
- */
-async function observe(label: string, read: () => unknown | Promise<unknown>): Promise<unknown> {
-  try {
-    return { label, value: await read() };
-  } catch (error) {
-    return { label, readError: failureDiagnostic(error) };
-  }
-}
+import { readWindowsFailureSnapshot } from "./windows/registration";
+import { linuxFailureObservations } from "./linux/failure-snapshot";
+import { macosFailureObservations } from "./macos/failure-snapshot";
+import { observe } from "./native-observation";
 
 /**
  * Сужает JSON на границе диагностического чтения без утверждения прикладного контракта.
@@ -128,48 +120,13 @@ export async function captureNativeFailure(
     observe("supervisor-failures", () => readSupervisorFailures(config.home)),
   ];
   if (config.platform === "linux") {
-    observations.push(
-      observe("systemd-properties", () =>
-        commands.run(
-          "systemctl",
-          [
-            "--user",
-            "show",
-            config.id,
-            "--no-pager",
-            "--property=LoadState,ActiveState,SubState,UnitFileState,Result,ExecMainCode,ExecMainStatus,MainPID,ExecMainPID,NRestarts,ExecStart,FragmentPath,InvocationID,ExecMainStartTimestamp,ExecMainExitTimestamp,ConditionResult,AssertResult,StatusText",
-          ],
-          [0, 4],
-        ),
-      ),
-      observe("systemd-status", () =>
-        commands.run(
-          "systemctl",
-          ["--user", "status", config.id, "--no-pager", "--full"],
-          [0, 3, 4],
-        ),
-      ),
-      observe("systemd-journal", () =>
-        commands.run("journalctl", [
-          "--user",
-          "--unit",
-          config.id,
-          "--no-pager",
-          "--output=json",
-          "--lines=100",
-        ]),
-      ),
-    );
+    observations.push(...linuxFailureObservations(commands, config));
   } else if (config.platform === "win32") {
     observations.push(
       observe("task-scheduler", () => readWindowsFailureSnapshot(commands, config, binary)),
     );
   } else {
-    observations.push(
-      observe("launchd", () =>
-        commands.run("launchctl", ["print", `gui/${process.getuid?.()}/${config.id}`], [0, 113]),
-      ),
-    );
+    observations.push(...macosFailureObservations(commands, config));
   }
   writeFileSync(
     join(commands.directory, `failure-${stage}.json`),

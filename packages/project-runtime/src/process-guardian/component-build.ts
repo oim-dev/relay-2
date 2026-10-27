@@ -1,5 +1,6 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { nativeExecutableName } from "../native/executable/select";
 import { sourceGuardianComponent } from "./component";
 import { GuardedCommandError } from "./errors";
 import { combineProcessFailures } from "./component-failures";
@@ -19,7 +20,7 @@ export async function buildSourceGuardianComponent(directory: string): Promise<r
   }
   mkdirSync(directory, { mode: 0o700 });
   try {
-    const outfile = join(directory, process.platform === "win32" ? "guardian.exe" : "guardian");
+    const outfile = join(directory, nativeExecutableName("guardian"));
     const result = await Bun.build({
       entrypoints: [entry],
       target: "bun",

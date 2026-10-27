@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runNativeProcess } from "@relay/project-runtime";
+import { nativeExecutableName, runNativeProcess } from "@relay/project-runtime";
 import { withRuntimeDirectory } from "./helpers/source-runtime-fixture";
 
 const entry = fileURLToPath(new URL("./helpers/process-scope-actor.ts", import.meta.url));
@@ -12,7 +12,7 @@ describe("Одинаковый lifetime source и standalone scope", () => {
     "pending и closed не зависят от режима observer: %s",
     async (mode) => {
       await withRuntimeDirectory(async (root) => {
-        const binary = join(root, process.platform === "win32" ? "scope-probe.exe" : "scope-probe");
+        const binary = join(root, nativeExecutableName("scope-probe"));
         const built = await Bun.build({
           entrypoints: [entry],
           target: "bun",

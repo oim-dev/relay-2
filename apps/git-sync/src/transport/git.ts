@@ -2,6 +2,7 @@ import { RelayError } from "@relay/contracts";
 import { runProcess, redact } from "./process";
 import type { ProcessInput, ProcessResult } from "./process.types";
 import { transportMessages } from "./transport.messages";
+import { nativeGitPlatform } from "./native/select";
 
 /**
  * Запускает Git с отключёнными интерактивными запросами, внешними diff и наследованием GIT_DIR.
@@ -18,7 +19,7 @@ export function gitCommand(
     cwd,
     args: [
       "-c",
-      "core.hooksPath=/dev/null",
+      `core.hooksPath=${nativeGitPlatform().disabledHooksPath}`,
       "-c",
       "protocol.ext.allow=never",
       "-c",

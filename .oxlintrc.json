@@ -7,6 +7,188 @@
   "rules": {
     "typescript/no-explicit-any": "error"
   },
+  "overrides": [
+    {
+      "files": ["apps/**/src/**/*.{ts,tsx}", "packages/**/src/**/*.ts", "apps/**/scripts/*.ts"],
+      "excludeFiles": [
+        "**/native/**",
+        "**/*.test.ts",
+        "**/*.test-worker.ts",
+        "**/*.test.types.ts",
+        "**/generated/**"
+      ],
+      "rules": {
+        "no-restricted-properties": [
+          "error",
+          {
+            "object": "process",
+            "property": "platform",
+            "message": "Выбор ОС принадлежит native-адаптеру."
+          },
+          {
+            "object": "process",
+            "property": "arch",
+            "message": "Выбор native ABI принадлежит адаптеру."
+          },
+          {
+            "object": "process",
+            "property": "getuid",
+            "message": "Unix identity принадлежит native-адаптеру."
+          },
+          {
+            "object": "process",
+            "property": "getgid",
+            "message": "Unix identity принадлежит native-адаптеру."
+          }
+        ],
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              { "name": "bun:ffi", "message": "FFI разрешён только внутри native-реализации." }
+            ],
+            "patterns": [
+              {
+                "group": ["node:os", "os"],
+                "importNames": ["default", "platform", "arch", "type", "release"],
+                "message": "Определение ОС и ABI принадлежит native-адаптеру; нейтральные функции импортируются по имени."
+              },
+              {
+                "group": ["node:process", "process"],
+                "importNames": ["default", "platform", "arch", "getuid", "getgid"],
+                "message": "Нативные свойства процесса принадлежат адаптеру; нейтральные свойства импортируются по имени."
+              },
+              {
+                "group": [
+                  "**/native/**/linux*",
+                  "**/native/**/windows*",
+                  "**/native/**/macos*",
+                  "**/native/**/posix*",
+                  "**/native/**/linux/**",
+                  "**/native/**/windows/**",
+                  "**/native/**/macos/**"
+                ],
+                "allowTypeImports": true,
+                "message": "Общий сценарий получает реализацию через native selector, без прямого импорта ОС."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["**/src/**/native/**/*.ts"],
+      "excludeFiles": ["**/native/platform.ts", "**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["node:os", "os"],
+                "importNames": ["default", "platform", "type"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["node:process", "process"],
+                "importNames": ["default", "platform"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              }
+            ]
+          }
+        ],
+        "no-restricted-properties": [
+          "error",
+          {
+            "object": "process",
+            "property": "platform",
+            "message": "ОС хоста определяется через единую границу native/platform.ts; реализация не выбирает другую ОС."
+          }
+        ]
+      }
+    },
+    {
+      "files": ["**/src/**/native/**/linux*.ts", "**/src/**/native/**/linux/**/*.ts"],
+      "excludeFiles": ["**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["node:os", "os"],
+                "importNames": ["default", "platform", "type"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["node:process", "process"],
+                "importNames": ["default", "platform"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["**/windows*", "**/macos*", "**/windows/**", "**/macos/**"],
+                "message": "Linux-реализация не зависит от Windows или macOS."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["**/src/**/native/**/windows*.ts", "**/src/**/native/**/windows/**/*.ts"],
+      "excludeFiles": ["**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["node:os", "os"],
+                "importNames": ["default", "platform", "type"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["node:process", "process"],
+                "importNames": ["default", "platform"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["**/linux*", "**/macos*", "**/posix*", "**/linux/**", "**/macos/**"],
+                "message": "Windows-реализация не зависит от Linux, macOS или POSIX lifecycle."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["**/src/**/native/**/macos*.ts", "**/src/**/native/**/macos/**/*.ts"],
+      "excludeFiles": ["**/*.test.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["node:os", "os"],
+                "importNames": ["default", "platform", "type"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["node:process", "process"],
+                "importNames": ["default", "platform"],
+                "message": "ОС хоста определяется только в native/platform.ts. Нативные ABI/identity импортируются по имени."
+              },
+              {
+                "group": ["**/windows*", "**/linux*", "**/windows/**", "**/linux/**"],
+                "message": "macOS-реализация не зависит от Windows или Linux."
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
   "ignorePatterns": [
     "**/node_modules/**",
     "**/dist/**",

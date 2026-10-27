@@ -26,7 +26,7 @@ import {
   withProjectDatabase,
   writeConfig,
 } from "./helpers/runtime-fixture";
-import { withWindowsDeleteDeniedReader } from "./helpers/windows-file-reader";
+import { withWindowsDeleteDeniedReader } from "./helpers/native/windows/file-reader";
 
 describe("Локальные регистрации workspace", () => {
   let fixture: RuntimeFixture;

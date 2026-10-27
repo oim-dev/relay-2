@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CommandOwner } from "./fixture.types";
+import { nativeOwnerChildren, nativeProcessIdentity } from "../native/owner-observation";
 import type {
   OwnerKillPhase,
   OwnerKillSnapshot,
@@ -76,41 +77,18 @@ function ownerResult(root: string): string | null {
 }
 
 /**
- * Читает текущий Linux stat без отправки сигналов; starttime отделяет PID от конкретного процесса.
- */
-function processIdentity(pid: number): ProcessIdentity {
-  const value = readFileSync(`/proc/${pid}/stat`, "utf8");
-  const fields = value.slice(value.lastIndexOf(")") + 2).split(" ");
-  const [state, parent, group, session] = fields;
-  const startTicks = fields[19];
-  if (!state || !startTicks || !/^\d+$/u.test(startTicks)) {
-    throw new Error("Некорректный stat процессной fixture");
-  }
-  return {
-    pid,
-    state,
-    parent: Number(parent),
-    group: Number(group),
-    session: Number(session),
-    startTicks,
-  };
-}
-
-/**
  * Сохраняет идентичность либо причину отсутствия PID. Чтение не объявляет cleanup успешным.
  */
 function processObservation(pid: number, identities: Map<number, string>): ProcessObservation {
   let current: ProcessIdentity | null = null;
   let errorCode: string | null = null;
-  if (process.platform === "linux") {
-    try {
-      current = processIdentity(pid);
-      if (!identities.has(pid)) {
-        identities.set(pid, current.startTicks);
-      }
-    } catch (error) {
-      errorCode = systemCode(error);
+  try {
+    current = nativeProcessIdentity(pid);
+    if (current !== null && !identities.has(pid)) {
+      identities.set(pid, current.startTicks);
     }
+  } catch (error) {
+    errorCode = systemCode(error);
   }
   return { pid, expectedStartTicks: identities.get(pid) ?? null, current, errorCode };
 }
@@ -128,27 +106,11 @@ function addPid(pids: Set<number>, value: unknown): void {
  * Находит непосредственный helper owner до появления tree.ready, учитывая native threads Bun.
  */
 function addOwnerChildren(pids: Set<number>, owner: CommandOwner): void {
-  if (
-    process.platform !== "linux" ||
-    !owner.child.pid ||
-    owner.child.exitCode !== null ||
-    owner.child.signalCode !== null
-  ) {
+  if (!owner.child.pid || owner.child.exitCode !== null || owner.child.signalCode !== null) {
     return;
   }
-  try {
-    for (const task of readdirSync(`/proc/${owner.child.pid}/task`).slice(0, 32)) {
-      try {
-        const children = readFileSync(`/proc/${owner.child.pid}/task/${task}/children`, "utf8");
-        for (const child of children.trim().split(/\s+/u).slice(0, 16)) {
-          addPid(pids, Number(child));
-        }
-      } catch {
-        // Поток owner мог завершиться между списком и чтением; это лишь дополнительная диагностика.
-      }
-    }
-  } catch {
-    // Основное состояние owner отдельно включается в снимок, даже если procfs уже исчез.
+  for (const pid of nativeOwnerChildren(owner.child.pid)) {
+    addPid(pids, pid);
   }
 }
 

@@ -1,64 +1,55 @@
 {
   "$schema": "https://turborepo.com/schema.json",
   "ui": "stream",
-  "globalDependencies": ["bunfig.toml", ".bun-version"],
-  "remoteCache": {
-    "enabled": false
-  },
+  "globalDependencies": ["bunfig.toml", ".bun-version", ".node-version", ".oxlintrc.json"],
+  "remoteCache": { "enabled": false },
   "tasks": {
-    "build": {
-      "dependsOn": ["^build", "typecheck"],
-      "outputs": ["dist/**"]
-    },
-    "@relay/cli#build": {
-      "dependsOn": ["^build", "typecheck", "@relay/git-sync#build", "@relay/server#build"],
-      "outputs": ["dist/**"]
-    },
+    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+    "@relay/cli#build": { "cache": false, "outputs": ["dist/**"] },
+    "@relay/git-sync#build": { "cache": false, "outputs": ["dist/**"] },
     "@relay/server#build": {
-      "dependsOn": ["^build", "typecheck", "@relay/web#build"],
+      "dependsOn": ["@relay/web#build"],
+      "cache": false,
       "outputs": ["dist/**"]
     },
-    "@relay/rest-sdk#build": {
-      "dependsOn": ["^build"],
-      "outputs": ["dist/generated/**"]
+    "@relay/rest-sdk#build": { "outputs": ["dist/generated/**"] },
+    "@relay/web#build": { "dependsOn": ["@relay/rest-sdk#build"], "outputs": ["dist/**"] },
+    "lint": { "cache": false },
+    "typecheck": { "cache": false },
+    "@relay/rest-sdk#typecheck": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "@relay/web#typecheck": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "@relay/server#typecheck": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "test:unit": { "cache": false },
+    "@relay/rest-sdk#test:unit": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "@relay/web#test:unit": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "@relay/server#test:unit": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "test:integration": { "cache": false, "passThroughEnv": ["CI_LOG_DIR"] },
+    "@relay/server#test:integration": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "test:process": { "dependsOn": ["build"], "cache": false },
+    "@relay/server#test:process": {
+      "dependsOn": ["@relay/server#build", "@relay/rest-sdk#build"],
+      "cache": false
     },
-    "@relay/rest-sdk#typecheck": {
-      "dependsOn": ["^typecheck", "@relay/rest-sdk#build"],
-      "outputs": ["dist/generated/**"]
-    },
-    "@relay/rest-sdk#test:unit": {
-      "dependsOn": ["^test:unit", "@relay/rest-sdk#build"],
-      "outputs": ["dist/generated/**"]
-    },
-    "@relay/server#test:integration": {
-      "dependsOn": ["@relay/rest-sdk#build"],
-      "cache": false,
-      "passThroughEnv": ["CI_LOG_DIR"]
+    "test:e2e": { "dependsOn": ["build"], "cache": false },
+    "//#format:check": { "cache": false },
+    "//#lint:repo": { "cache": false },
+    "//#typecheck:repo": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
+    "//#verify:configuration": { "cache": false },
+    "//#test:unit:repo": { "cache": false },
+    "//#test:e2e:product": {
+      "dependsOn": [
+        "@relay/cli#build",
+        "@relay/server#build",
+        "@relay/git-sync#build",
+        "@relay/rest-sdk#build"
+      ],
+      "cache": false
     },
     "@relay/web#dev": {
       "dependsOn": ["@relay/rest-sdk#build"],
       "cache": false,
       "persistent": true
     },
-    "dev": {
-      "cache": false,
-      "persistent": true
-    },
-    "typecheck": {
-      "dependsOn": ["^typecheck"],
-      "outputs": []
-    },
-    "test:unit": {
-      "dependsOn": ["^test:unit"],
-      "outputs": []
-    },
-    "test:integration": {
-      "cache": false,
-      "passThroughEnv": ["CI_LOG_DIR"]
-    },
-    "test:process": {
-      "dependsOn": ["build"],
-      "cache": false
-    }
+    "dev": { "cache": false, "persistent": true }
   }
 }

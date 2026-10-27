@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { createServiceConfiguration, runNativeProcess } from "@relay/project-runtime";
+import { createServiceConfiguration } from "@relay/project-runtime";
 import { RuntimeFixture } from "./helpers/runtime-fixture";
-import { parseWindowsArguments } from "./helpers/windows-arguments";
+import { parseWindowsArguments } from "./helpers/native/windows/arguments";
+import { readWindowsServiceXml } from "./helpers/native/windows/service-xml";
 
 const group = "git-sync-implementation/cli-runtime";
 
@@ -20,29 +21,8 @@ describe("Нативное чтение формата Windows service", () => {
         userHome: fixture.root,
         userName: "TEAM\\Ира",
       });
-      const source = `
-$ErrorActionPreference='Stop'
-[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: entered')
-$xml=[xml][Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(config.content, "utf8").toString("base64")}'))
-[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: xml-parsed')
-[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$xml.Task.Actions.Exec.Command)))
-[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$xml.Task.Actions.Exec.Arguments)))
-[Console]::Error.WriteLine('RELAY_SERVICE_FORMAT: completed')
-`;
       try {
-        const result = await runNativeProcess({
-          executable: "powershell.exe",
-          args: [
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-EncodedCommand",
-            Buffer.from(source, "utf16le").toString("base64"),
-          ],
-          cwd: fixture.cwd,
-          env: { ...process.env, HOME: fixture.root, USERPROFILE: fixture.root },
-          timeoutMs: 30_000,
-        });
+        const result = await readWindowsServiceXml(config.content, fixture.cwd, fixture.root);
 
         expect(result.exitCode).toBe(0);
         // ASCII-envelope не зависит от OEM-кодировки и не меняет Console.OutputEncoding.

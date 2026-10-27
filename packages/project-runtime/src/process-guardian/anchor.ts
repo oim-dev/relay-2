@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:os";
-import { terminateCommandGroup } from "./posix-group";
+import { nativeProcessLifetime } from "../native/process-lifetime/select";
 import { spawnDiagnostic } from "./diagnostics";
 import type { AnchorOutcome, GuardianRequest } from "./protocol.types";
 
@@ -21,20 +21,19 @@ export function runCommandAnchor(
   lease: AbortSignal,
   control: AbortSignal,
 ): Promise<number> {
+  const lifetime = nativeProcessLifetime();
   return new Promise((resolve) => {
     let child: ChildProcess | undefined;
     let commandEnded = false;
 
     /**
-     * Потеря guardian не оставляет обычную POSIX-группу без владельца.
+     * Потеря guardian включает нативную страховочную очистку и не считается успешным исходом.
      */
     function ownerLost(): void {
-      if (process.platform !== "win32") {
-        try {
-          terminateCommandGroup(process.pid);
-        } catch {
-          // Нарушенное владение не превращается в успешный исход служебной роли.
-        }
+      try {
+        lifetime.ownerLost();
+      } catch {
+        // Нарушенное владение не превращается в успешный исход служебной роли.
       }
       resolve(1);
     }
@@ -48,16 +47,10 @@ export function runCommandAnchor(
         child?.stdin?.end();
         return;
       }
-      if (process.platform !== "win32") {
-        try {
-          process.kill(-process.pid, signal);
-        } catch {
-          ownerLost();
-        }
-      } else if (request.stdinLease) {
-        child?.stdin?.end();
-      } else if (child && !commandEnded) {
-        child.kill(signal);
+      try {
+        lifetime.stopAnchor({ child, commandEnded, stdinLease: request.stdinLease, signal });
+      } catch {
+        ownerLost();
       }
     }
 
@@ -77,7 +70,7 @@ export function runCommandAnchor(
         cwd: request.cwd,
         env: request.env,
         stdio: ["pipe", "inherit", "inherit"],
-        windowsHide: true,
+        ...lifetime.commandSpawn,
       });
       child.once("error", (cause) => {
         commandEnded = true;

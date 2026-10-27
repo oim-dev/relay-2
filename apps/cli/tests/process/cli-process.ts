@@ -1,42 +1,16 @@
 import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { nativeExecutableName } from "@relay/project-runtime";
 import type { BinaryOptions, BinaryResult } from "./cli-process.types";
+import { fixtureProcessTree } from "./native/process-tree";
 
-const binary = resolve(
-  import.meta.dir,
-  process.platform === "win32" ? "../../dist/relay.exe" : "../../dist/relay",
-);
+const binary = resolve(import.meta.dir, "../../dist", nativeExecutableName("relay"));
 const artifacts = resolve(
   import.meta.dir,
   "../../../../.artifacts",
   new Date().toISOString().slice(0, 10),
 );
 const processDeadlineMs = 3000;
-
-/**
- * Завершает принадлежащую fixture POSIX-группу либо Windows-дерево через native taskkill.
- * Исчезнувшая группа уже освобождена; остальные системные ошибки не скрываются.
- */
-async function terminateProcessGroup(pid: number): Promise<void> {
-  if (process.platform === "win32") {
-    const killer = Bun.spawn(["taskkill.exe", "/PID", String(pid), "/T", "/F"], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    const code = await killer.exited;
-    if (code !== 0 && code !== 128) {
-      throw new Error(`taskkill завершился с кодом ${code}`);
-    }
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGKILL");
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
-      throw error;
-    }
-  }
-}
 
 /**
  * Запускает бинарник или оболочку с изолированными HOME и cwd, читая реальные потоки.
@@ -48,6 +22,7 @@ export async function invokeBinary(
   argv: readonly string[],
   options: BinaryOptions = {},
 ): Promise<BinaryResult> {
+  const tree = fixtureProcessTree();
   const root = options.artifactGroup ? join(artifacts, options.artifactGroup) : artifacts;
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, "cli-process-"));
@@ -73,11 +48,11 @@ export async function invokeBinary(
       stdin,
       stdout: "pipe",
       stderr: "pipe",
-      detached: process.platform !== "win32",
+      detached: tree.detached,
     });
     child = running;
     deadline = setTimeout(() => {
-      termination = terminateProcessGroup(running.pid);
+      termination = tree.terminate(running.pid);
     }, processDeadlineMs);
     const [exitCode, stdout, stderr] = await Promise.all([
       running.exited,
@@ -91,7 +66,7 @@ export async function invokeBinary(
     clearTimeout(deadline);
     try {
       if (child) {
-        await (termination ?? terminateProcessGroup(child.pid));
+        await (termination ?? tree.terminate(child.pid));
         await child.exited;
       }
     } finally {

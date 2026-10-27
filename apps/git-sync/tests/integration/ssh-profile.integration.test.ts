@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url";
 import { git, requireGit } from "../../src/transport/git";
 import { redact, runProcess } from "../../src/transport/process";
 import type { ProcessInput, ProcessResult } from "../../src/transport/process.types";
-import { probeSsh, selectSshProfile, shellWord } from "../../src/transport/ssh-profile";
+import { probeSsh, selectSshProfile } from "../../src/transport/ssh-profile";
+import { shellWord } from "../../src/transport/native/select";
 
 const modernClients = [
   {

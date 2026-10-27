@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compileServer } from "./compile-server";
+import { nativeExecutableName } from "@relay/project-runtime";
 
 /**
  * Компилирует Nest/Fastify Server с guardian и готовым Vite output в один executable.
@@ -8,11 +9,7 @@ import { compileServer } from "./compile-server";
  */
 async function buildServer(): Promise<void> {
   const root = fileURLToPath(new URL("../", import.meta.url));
-  const outfile = join(
-    root,
-    "dist",
-    process.platform === "win32" ? "relay-server.exe" : "relay-server",
-  );
+  const outfile = join(root, "dist", nativeExecutableName("relay-server"));
   const assets = await compileServer(
     fileURLToPath(new URL("../../web/dist/", import.meta.url)),
     outfile,

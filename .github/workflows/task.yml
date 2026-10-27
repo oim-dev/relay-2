@@ -1,0 +1,78 @@
+name: Компонентная задача
+on:
+  workflow_call:
+    inputs:
+      component:
+        type: string
+        required: true
+      task:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      artifact-key:
+        type: string
+        required: true
+jobs:
+  execute:
+    name: Выполнение
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-relay
+        id: setup
+      - uses: ./.github/actions/restore-builds
+        with:
+          component: ${{ inputs.component }}
+          task: ${{ inputs.task }}
+          target: ${{ inputs.target }}
+          directory: ${{ steps.setup.outputs.artifacts }}/downloads
+      - name: Выполнить проверку или сборку
+        id: task
+        env:
+          COMPONENT: ${{ inputs.component }}
+          TASK: ${{ inputs.task }}
+          TARGET: ${{ inputs.target }}
+          CI_LOG_DIR: ${{ steps.setup.outputs.artifacts }}
+        run: bun run ci:task "$COMPONENT" "$TASK" "$TARGET"
+      - name: Упаковать результат сборки
+        if: ${{ inputs.task == 'build' }}
+        id: package
+        env:
+          COMPONENT: ${{ inputs.component }}
+          TARGET: ${{ inputs.target }}
+          DIRECTORY: ${{ steps.setup.outputs.artifacts }}/build
+        run: bun scripts/ci/artifacts.ts pack "$COMPONENT" "$TARGET" "$DIRECTORY"
+      - name: Передать результат потребителям
+        if: ${{ inputs.task == 'build' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.package.outputs.artifact-name }}
+          path: ${{ steps.package.outputs.artifact-path }}
+          # Rerun того же producer обновляет bundle с прежним id-target-SHA.
+          overwrite: true
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Сохранить диагностику отказа
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: failure-${{ inputs.component }}-${{ inputs.artifact-key }}-${{ inputs.target }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/**/*.json
+            .artifacts/**/*.log
+            .artifacts/**/*.txt
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

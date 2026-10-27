@@ -10,7 +10,7 @@ import { readConfiguration, stateDirectory } from "../../src/local/state";
 import { startTestSupervisor } from "./supervisor-fixture";
 import { readLocalJson } from "../../src/local/files";
 import { requestObject } from "../../src/app/protocol";
-import { running } from "./guardian-helpers/fixture";
+import { running } from "./native/process-observation";
 
 /**
  * Читает результаты завершённого обхода только указанного lifetime S; старый cache не служит барьером.

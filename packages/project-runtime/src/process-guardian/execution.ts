@@ -6,7 +6,7 @@ import type { GuardedCommandDiagnostic, GuardedCommandFailureReason } from "./gu
 import { CommandOutput } from "./output";
 import { decodeOutcome, failureReason, treeCleanupMs } from "./protocol";
 import type { AnchorOutcome, GuardianRequest, GuardianResponse } from "./protocol.types";
-import { ownCommandTree } from "./tree";
+import { nativeProcessLifetime } from "../native/process-lifetime/select";
 import type { CommandTree } from "./tree.types";
 
 /**
@@ -57,8 +57,7 @@ class GuardianExecution {
     }
     this.child = spawn(executable, [...args, "--guarded-command"], {
       stdio: ["pipe", "pipe", "pipe", "ipc"],
-      detached: true,
-      windowsHide: true,
+      ...nativeProcessLifetime().guardianSpawn,
       serialization: "json",
     });
     this.output = new CommandOutput(request, cancellation, (reason) => this.fail(reason));
@@ -125,7 +124,7 @@ class GuardianExecution {
         this.fail("spawn");
         return;
       }
-      this.tree = ownCommandTree(this.child.pid);
+      this.tree = nativeProcessLifetime().ownTree(this.child.pid);
       void writeFrame(this.child.stdin, { ...this.request, role: "anchor" }).catch(() =>
         this.fail("guardian"),
       );

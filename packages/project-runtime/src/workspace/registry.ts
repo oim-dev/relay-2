@@ -11,10 +11,10 @@ import {
   explicitConfig,
   findConfig,
   initializationPath,
-  physicalConfigPath,
   projectConfigName,
   validateOptions,
 } from "../configuration/paths";
+import { physicalConfigPath } from "../native/config-path/select";
 import { withFileErrors, withWorkspaceLock, writeJsonAtomic } from "../configuration/files";
 import { readProjectLocation } from "../project/selection";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";

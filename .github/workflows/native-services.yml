@@ -1,0 +1,67 @@
+name: Native Services
+on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        required: true
+        options: [linux-x64, windows-x64, macos-arm64]
+      runner:
+        type: string
+        required: true
+        description: Одноразовый runner с открытой пользовательской сессией.
+      run-id:
+        type: string
+        required: true
+        description: CI run с бинарниками того же commit, выбранного для этого запуска.
+permissions:
+  contents: read
+  actions: read
+jobs:
+  native:
+    name: Native services / ${{ inputs.target }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash --noprofile --norc -e -o pipefail {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-relay
+        id: setup
+      - uses: ./.github/actions/restore-builds
+        with:
+          component: project-runtime
+          task: test:native-service
+          target: ${{ inputs.target }}
+          directory: ${{ steps.setup.outputs.artifacts }}/downloads
+          run-id: ${{ inputs.run-id || '' }}
+      - name: Проверить настоящий manager и lifecycle службы
+        env:
+          TARGET: ${{ inputs.target }}
+          CI: "true"
+          RELAY_NATIVE_SERVICE_TESTS: disposable-runner
+          CI_LOG_DIR: ${{ steps.setup.outputs.artifacts }}
+        run: bun run ci:task project-runtime test:native-service "$TARGET"
+      - name: Сохранить диагностику native service
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-service-${{ inputs.target }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/**/*.json
+            .artifacts/**/*.log
+            .artifacts/**/*.txt
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7

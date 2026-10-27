@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database, constants } from "bun:sqlite";
 import { spawnSync } from "node:child_process";
-import { existsSync, linkSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, linkSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { ProjectDatabase } from "../../src/database/project-database";
 import { withProjectDatabasePublication } from "../../src/database/project-publication";
+import { publishFixtureDatabase } from "./helpers/native/publication";
 import {
   ProjectDatabaseFixture,
   createDocument,
@@ -59,12 +60,7 @@ describe("SQLite-барьер публикации private БД", () => {
     const target = join(fixture.directory, "published.sqlite");
 
     withProjectDatabasePublication(fixture.path, () => {
-      if (process.platform === "win32") {
-        linkSync(fixture.path, target);
-      } else {
-        // Namespace здесь принадлежит одному тесту; no-replace race проверяет вызывающий Runtime.
-        renameSync(fixture.path, target);
-      }
+      publishFixtureDatabase(fixture.path, target);
       expectPublicationWriterProbe(target, "SQLITE_BUSY");
     });
 

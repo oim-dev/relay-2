@@ -2,6 +2,7 @@ import { lstatSync, readdirSync, rmdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { fileExists } from "../configuration/files";
+import { nativeDatabasePublication } from "../native/database-publication/select";
 import { projectMessages } from "./project.messages";
 import { restorationMessages } from "./restoration.messages";
 import type {
@@ -170,7 +171,7 @@ export function requirePublishedRestorationDatabase(
     }
     return;
   }
-  if (process.platform !== "win32") {
+  if (nativeDatabasePublication().transfer !== "hardlink") {
     throw restorationOwnershipError(publication.databasePath);
   }
   if (fileExists(stagedPath)) {

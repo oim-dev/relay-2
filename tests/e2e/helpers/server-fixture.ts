@@ -1,12 +1,16 @@
 import { createRelayClient } from "@relay/rest-sdk";
+import { nativeExecutableName } from "@relay/project-runtime";
 import { chmod, copyFile, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { WorkflowEnvironment } from "./workflow-fixture.types";
-import { invokeSuccess } from "./workflow-fixture";
+import type { WorkflowEnvironment } from "../../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
+import { invokeSuccess } from "../../../apps/cli/tests/e2e/helpers/workflow-fixture";
 import type { WorkflowServer, WorkflowServerReady } from "./server-fixture.types";
 
-const suffix = process.platform === "win32" ? ".exe" : "";
-const source = resolve(import.meta.dir, `../../../apps/server/dist/relay-server${suffix}`);
+const source = resolve(
+  import.meta.dir,
+  "../../../apps/server/dist",
+  nativeExecutableName("relay-server"),
+);
 const readinessDeadlineMs = 30_000;
 const requestDeadlineMs = 30_000;
 const gracefulDeadlineMs = 30_000;
@@ -134,7 +138,7 @@ export async function startWorkflowServer(
 ): Promise<WorkflowServer> {
   const directory = join(environment.root, `server-${crypto.randomUUID()}`);
   await mkdir(directory);
-  const executable = join(directory, `relay-server${suffix}`);
+  const executable = join(directory, nativeExecutableName("relay-server"));
   await copyFile(source, executable);
   await chmod(executable, 0o755);
   const child = Bun.spawn([executable, "--port", "0"], {

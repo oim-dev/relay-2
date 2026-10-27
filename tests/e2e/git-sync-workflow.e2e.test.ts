@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readdir } from "node:fs/promises";
 import { createGitSyncFixture } from "./helpers/git-sync-fixture";
-import { invokeRecord, invokeSuccess, readRecordResult } from "./helpers/workflow-fixture";
-import type { RecordResult } from "./helpers/workflow-fixture.types";
+import {
+  invokeRecord,
+  invokeSuccess,
+  readRecordResult,
+} from "../../apps/cli/tests/e2e/helpers/workflow-fixture";
+import type { RecordResult } from "../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
 
 const branch = "relay-data-v2";
 const bodyA = "# Запись A\n\n  Значимые пробелы\n\n```sh\necho '$HOME'\n```\n";

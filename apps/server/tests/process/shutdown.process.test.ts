@@ -7,6 +7,7 @@ import {
   acquireServerInstance,
   createServerLaunch,
   initializeProject,
+  nativeExecutableName,
   openProject,
   type ServerLaunch,
 } from "@relay/project-runtime";
@@ -45,10 +46,7 @@ async function withShutdownBinary(
   );
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, "shutdown-"));
-  const binary = join(
-    directory,
-    process.platform === "win32" ? "relay-server.exe" : "relay-server",
-  );
+  const binary = join(directory, nativeExecutableName("relay-server"));
   try {
     if (fault === "blocked-writer") {
       const entry = join(directory, "blocked-writer.ts");
@@ -90,11 +88,7 @@ await import(${JSON.stringify(join(repository, "apps/server/src/main.ts"))});
     } else {
       await copyFile(
         process.env.RELAY_SERVER_TEST_BINARY ??
-          join(
-            repository,
-            "apps/server/dist",
-            process.platform === "win32" ? "relay-server.exe" : "relay-server",
-          ),
+          join(repository, "apps/server/dist", nativeExecutableName("relay-server")),
         binary,
       );
     }
@@ -170,10 +164,7 @@ async function openProbe(): Promise<{
  */
 async function controlledGitBinary(directory: string): Promise<string> {
   const source = join(directory, "controlled-git.ts");
-  const binary = join(
-    directory,
-    process.platform === "win32" ? "controlled-git.exe" : "controlled-git",
-  );
+  const binary = join(directory, nativeExecutableName("controlled-git"));
   await writeFile(
     source,
     `

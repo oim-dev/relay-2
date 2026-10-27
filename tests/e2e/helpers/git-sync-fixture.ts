@@ -1,11 +1,12 @@
 import { expect } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { nativeExecutableName } from "@relay/project-runtime";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import {
   createWorkflowEnvironment,
   invokeSuccess,
   workflowArtifactsDirectory,
-} from "./workflow-fixture";
+} from "../../../apps/cli/tests/e2e/helpers/workflow-fixture";
 import { launchGitSyncSupervisor } from "./git-sync-supervisor";
 import type {
   GitSyncFixture,
@@ -14,13 +15,24 @@ import type {
 } from "./git-sync-fixture.types";
 
 const artifacts = join(workflowArtifactsDirectory, "git-sync-implementation/e2e");
+const gitSyncBinary = resolve(
+  import.meta.dir,
+  "../../../apps/git-sync/dist",
+  nativeExecutableName("relay-git-sync"),
+);
 
 /**
  * Создаёт пустую копию проекта, сохраняя изоляцию HOME существующего workflow fixture.
+ * Только продуктовый маршрут получает Git и компонент обмена; общий Git-config неизменяем.
  * При ошибке подготовки освобождает уже созданный каталог самостоятельно.
  */
 async function createReplica(root: string): Promise<GitSyncReplica> {
-  const environment = await createWorkflowEnvironment(root);
+  const environment = await createWorkflowEnvironment(root, {
+    RELAY_GIT_SYNC_BIN: gitSyncBinary,
+    PATH: process.env.PATH ?? process.env.Path ?? "",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: join(root, ".gitconfig"),
+  });
   try {
     const cwd = join(environment.root, "project");
     await mkdir(cwd);
@@ -98,6 +110,8 @@ export async function createGitSyncFixture(): Promise<GitSyncFixture> {
   const workers = new Set<GitSyncReplica>();
   const supervisors = new Map<GitSyncReplica, GitSyncSupervisorProcess>();
   try {
+    // Глубокий каталог артефактов не должен упираться в ограничение путей Git for Windows.
+    await writeFile(join(root, ".gitconfig"), "[core]\n\tlongpaths = true\n");
     const a = await createReplica(root);
     const b = await createReplica(root);
     const remote = join(root, "shared remote.git");

@@ -1,6 +1,6 @@
 import { setTimeout as pause } from "node:timers/promises";
 import type { GitSyncReplica, GitSyncSupervisorProcess } from "./git-sync-fixture.types";
-import type { ProcessResult } from "./workflow-fixture.types";
+import type { ProcessResult } from "../../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
 
 const readinessDeadlineMs = 15_000;
 const shutdownDeadlineMs = 20_000;

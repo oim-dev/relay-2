@@ -1,11 +1,6 @@
 import type { createServiceConfiguration, GitSyncSupervisorStatus } from "@relay/project-runtime";
 
 /**
- * Платформы отдельного набора, на которых проверяется настоящий user manager.
- */
-export type NativePlatform = "linux" | "darwin" | "win32";
-
-/**
  * Конфигурация собственной регистрации, вычисленная публичным Runtime до её установки.
  */
 export type NativeConfiguration = ReturnType<typeof createServiceConfiguration>;
@@ -32,4 +27,31 @@ export interface NativeSession {
   readonly userName?: string;
   /* Исходный ответ loginctl yes/no; null на остальных платформах. */
   readonly linger: string | null;
+}
+
+/**
+ * Независимое наблюдение и аварийная уборка единственной регистрации native-fixture.
+ * Готовность приложения отдельно подтверждается публичным health, не статусом manager.
+ */
+export interface NativeManager {
+  /**
+   * Проверяет точную регистрацию и принадлежность живого PID собственному executable/argv.
+   */
+  assertRegistered(pid: number): Promise<void>;
+  /**
+   * Проверяет отсутствие регистрации независимо от production service status и health.
+   */
+  assertAbsent(): Promise<void>;
+  /**
+   * Аварийно завершает зарегистрированный supervisor; восстановление обязан выполнить manager.
+   */
+  crash(pid: number): Promise<void>;
+  /**
+   * Снимает только свою регистрацию после отказа production cleanup, не скрывая исходный отказ.
+   */
+  emergencyRemove(): Promise<void>;
+  /**
+   * Завершает PID, принадлежность которого вызывающий только что подтвердил живым health.
+   */
+  killSupervisor(pid: number): Promise<void>;
 }

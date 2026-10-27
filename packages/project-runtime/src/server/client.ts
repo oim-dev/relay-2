@@ -8,6 +8,7 @@ import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import { hasCode } from "../configuration/files";
 import { runNativeProcess } from "../git-sync/process";
 import { replaceLocalFile } from "../local-files/replace";
+import { nativeBrowserCommand } from "../native/browser/select";
 import { discoverServerBinary } from "./discovery";
 import {
   checkServerCancellation,
@@ -145,14 +146,8 @@ function publishRestart(launch: ServerLaunch, version: string): ServerLaunch {
  */
 async function openBrowser(url: string, environment: ServerEnvironment): Promise<void> {
   checkServerCancellation(environment);
-  const platform = environment.platform ?? process.platform;
-  let command = ["xdg-open", url];
-  if (platform === "darwin") {
-    command = ["open", url];
-  } else if (platform === "win32") {
-    command = ["explorer.exe", url];
-  }
-  const child = Bun.spawn(command, {
+  const command = nativeBrowserCommand(url, environment.platform);
+  const child = Bun.spawn([...command], {
     cwd: environment.cwd,
     env: environment.env,
     stdin: "ignore",

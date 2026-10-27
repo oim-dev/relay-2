@@ -6,22 +6,7 @@ import { readEndpoint } from "../../src/local/control";
 import { stateDirectory } from "../../src/local/state";
 import { requestObject } from "../../src/app/protocol";
 import { startTestSupervisor } from "./supervisor-fixture";
-
-/**
- * Отличает завершённый/zombie процесс fixture от выполняющегося потомка; чужие PID не посылает.
- */
-function running(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    if (process.platform === "linux") {
-      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z";
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
+import { running } from "./native/process-observation";
 
 describe("Crash ownership Git/SSH", () => {
   test.skipIf(process.platform === "win32")(
