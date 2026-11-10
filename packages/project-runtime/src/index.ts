@@ -1,11 +1,19 @@
 export { initializeProject } from "./project/initialization";
+export { hasProjectGit } from "./project/git-context";
+export {
+  SYNC_DEBOUNCE,
+  synchronizationDueAt,
+  synchronizationRetryDelay,
+} from "./git-sync/schedule";
 export { currentNativePlatform, parseNativePlatform } from "./native/platform";
 export type { NativePlatform } from "./native/platform.types";
 export { nativeExecutableName } from "./native/executable/select";
 export { nativeProcessTreeCapability } from "./native/process-lifetime/select";
 export type { ProcessTreeCapability } from "./native/process-lifetime/lifetime.types";
 export { replaceLocalFile } from "./local-files/replace";
-export { restoreProject } from "./project/restoration";
+export { restoreProject, resolveVacantRestorationTarget } from "./project/restoration";
+export { resolveProjectRestoration } from "./project/restoration-target";
+export type { ProjectRestorationContext } from "./project/restoration.types";
 export { openProject, resolveProject } from "./project/selection";
 export {
   initializeWorkspace,
@@ -15,7 +23,16 @@ export {
 } from "./workspace/registry";
 export type { OpenedProject, ProjectLocation } from "./project/location.types";
 export type { RuntimeOptions } from "./configuration/runtime-options.types";
+export { resolveRelayHome } from "./configuration/home";
 export { createGitSyncClient, decodeGitSyncResponse } from "./git-sync/client";
+export {
+  correlateGitSyncRequest,
+  correlatedTransportFailure,
+} from "./git-sync/request-correlation";
+export type {
+  CorrelatedGitSyncRequest,
+  GitSyncRequestCorrelation,
+} from "./git-sync/request-correlation.types";
 export { assertGitSyncJson, encodeGitSyncRequest } from "./git-sync/request";
 export { isGitSyncWorkspace, readGitSyncWorkspaceStatus } from "./git-sync/status";
 export type { GitSyncClient, GitSyncEnvironment } from "./git-sync/client.types";

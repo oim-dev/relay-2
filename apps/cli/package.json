@@ -19,6 +19,7 @@
     "@gunshi/plugin-i18n": "1.0.0-rc.1",
     "@relay/contracts": "workspace:*",
     "@relay/core": "workspace:*",
+    "@relay/git-sync": "workspace:*",
     "@relay/project-runtime": "workspace:*",
     "@relay/storage": "workspace:*",
     "gunshi": "1.0.0-rc.1"

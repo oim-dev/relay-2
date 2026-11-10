@@ -3,9 +3,9 @@
  */
 export const gitSyncMessages = {
   binaryMissing:
-    "Компонент relay-git-sync не найден. Соберите его рядом с relay либо задайте RELAY_GIT_SYNC_BIN.",
-  invalidBinary: "RELAY_GIT_SYNC_BIN должен указывать на исполняемый файл.",
-  invalidResponse: "Компонент Git Sync вернул несовместимый или повреждённый ответ.",
+    "Совместимая CLI relay не найдена. Соберите apps/cli/dist, разместите relay рядом с приложением либо задайте RELAY_CLI_BIN.",
+  invalidBinary: "RELAY_CLI_BIN должен указывать на исполняемый файл CLI relay.",
+  invalidResponse: "Процессный порт Git Sync вернул несовместимый или повреждённый ответ.",
   requestIdRequired: "ID корреляции Git Sync должен быть непустой строкой.",
   conflictingRequestIds:
     "requestId ожидания и operationId нового запроса нельзя передавать одновременно.",
@@ -15,7 +15,7 @@ export const gitSyncMessages = {
     "Запрос Git Sync должен содержать только JSON-значения с конечными числами без потери полей при сериализации.",
   requestTooLarge: "Полный запрос Git Sync превышает допустимый размер процессного протокола.",
   incompatibleVersion:
-    "Версии relay и relay-git-sync не совпадают. Установите компоненты одного выпуска.",
+    "Версии приложения и CLI relay не совпадают. Установите компоненты одного выпуска.",
   processFailed: "Не удалось запустить дочерний процесс Git Sync.",
   processTimeout: "Превышено время ожидания дочернего процесса Git Sync.",
   processCancelled: "Запуск Git Sync отменён.",

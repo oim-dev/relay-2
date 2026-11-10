@@ -159,21 +159,22 @@ async function openProbe(): Promise<{
 }
 
 /**
- * Компилирует управляемый процесс Git Sync: --version реален, --request удерживается до SIGTERM/release.
+ * Компилирует управляемый CLI-порт: --version реален, --git-sync-request ждёт SIGTERM/release.
  * Реальный Server вызывает его через текущий Runtime и собственный standalone guardian.
  */
-async function controlledGitBinary(directory: string): Promise<string> {
-  const source = join(directory, "controlled-git.ts");
-  const binary = join(directory, nativeExecutableName("controlled-git"));
+async function controlledCliBinary(directory: string): Promise<string> {
+  const source = join(directory, "controlled-cli.ts");
+  const binary = join(directory, nativeExecutableName("controlled-cli"));
   await writeFile(
     source,
     `
 import { createConnection } from "node:net";
 import { once } from "node:events";
 if (process.argv.includes("--version")) {
-  console.log("relay-git-sync 0.0.0");
+  console.log("relay 0.0.0");
   process.exit(0);
 }
+if (process.argv.at(-1) !== "--git-sync-request") { process.exit(2); }
 const request = JSON.parse(await Bun.stdin.text());
 if (request.version !== 1 || request.action !== "request.get") { process.exit(2); }
 const probe = createConnection({ host: "127.0.0.1", port: Number(process.env.RELAY_TEST_PROBE_PORT) });
@@ -276,7 +277,7 @@ describe("Shutdown самостоятельного Nest Server", () => {
           mode: "foreground",
           port: 0,
         });
-        const helper = await controlledGitBinary(directory);
+        const helper = await controlledCliBinary(directory);
         const probe = await openProbe();
         let child: ServerChild | undefined;
         let request: Promise<unknown> | undefined;
@@ -285,7 +286,7 @@ describe("Shutdown самостоятельного Nest Server", () => {
             ...process.env,
             HOME: directory,
             RELAY_HOME: runtime.home,
-            RELAY_GIT_SYNC_BIN: helper,
+            RELAY_CLI_BIN: helper,
             RELAY_TEST_PROBE_PORT: String(probe.port),
           });
           request = fetch(

@@ -11,7 +11,7 @@ export interface CliRuntime {
   readonly env: Readonly<Record<string, string | undefined>>;
   /* Готовый текст либо ленивый читатель; maxBytes ограничивает поток до накопления полного ввода. */
   readonly stdin: string | ((maxBytes?: number) => string | Promise<string>);
-  /* Процессный порт Git Sync; отсутствие использует ленивый production client Runtime. */
+  /* Порт обмена для адаптерных тестов; отсутствие подключает @relay/git-sync напрямую. */
   readonly gitSync?: GitSyncClient;
   /* Процессный порт Server; отсутствие использует ленивый production client Runtime. */
   readonly server?: ServerClient;
@@ -21,8 +21,8 @@ export interface CliRuntime {
   readonly signal?: AbortSignal;
   /* Процессный вход подключает сигналы только после ввода process-action и снимает их после сценария. */
   readonly withProcessSignals?: <T>(operation: (signal: AbortSignal) => Promise<T>) => Promise<T>;
-  /* Потоковый вывод foreground supervisor, подключённый runCli/runProcessCli. */
+  /* Поток вывода текущего запуска, подключённый runCli/runProcessCli. */
   readonly stdout?: (text: string) => void;
-  /* Потоковая диагностика foreground supervisor. */
+  /* Диагностика текущего запуска и отдельные предупреждения автоматического обмена. */
   readonly stderr?: (text: string) => void;
 }

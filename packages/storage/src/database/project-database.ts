@@ -101,6 +101,17 @@ import {
 } from "./project-file";
 import type { ProjectGenerationRow, ProjectMetadata } from "./project-database.types";
 import { projectDatabaseMessages } from "./project-database.messages";
+import {
+  completeSynchronizationAttempt,
+  readSynchronizationSchedule,
+  resetSynchronizationSchedule,
+  setSynchronizationMode,
+} from "../synchronization/schedule";
+import type {
+  SynchronizationAttempt,
+  SynchronizationMode,
+  SynchronizationSchedule,
+} from "../synchronization/schedule.types";
 
 /**
  * Владеет одним синхронным соединением проекта, границами транзакций и переводом ошибок SQLite.
@@ -178,7 +189,7 @@ export class ProjectDatabase implements ReplicationStore {
 
   /**
    * Открывает существующую совместимую базу, проверяя приложение, версию и корневую сущность.
-   * Технические схемы v1/v2/v3 атомарно обновляются до v4 с сохранением данных и исходной очереди.
+   * Технические схемы v1…v4 атомарно обновляются до v5 с сохранением данных и исходной очереди.
    * Не создаёт отсутствующий файл; при отказе освобождает временно открытое соединение.
    */
   static open(path: string): ProjectDatabase {
@@ -224,7 +235,8 @@ export class ProjectDatabase implements ReplicationStore {
 
   /**
    * Создаёт специальную пустую реплику для последующего bootstrap в Core.
-   * Файл эксклюзивен; до bootstrap содержит лишь техническую корневую карточку.
+   * Файл эксклюзивен; до bootstrap содержит лишь техническую корневую карточку,
+   * без начального outbox и отметок локальной мутации в расписании обмена.
    */
   static createReplica(path: string, projectId: string): ProjectDatabase {
     const db = ProjectDatabase.create(path, { id: projectId, name: "Replica", slug: "replica" });
@@ -242,6 +254,7 @@ export class ProjectDatabase implements ReplicationStore {
         db.connection.exec(
           "DELETE FROM replication_outbox; DELETE FROM replication_owner_heads; DELETE FROM replication_entity_queue; DELETE FROM replication_address_queue; DELETE FROM replication_comment_queue; DELETE FROM replication_receipt_queue; DELETE FROM replication_read_queue; DELETE FROM replication_transition_queue; DELETE FROM component_changes; DELETE FROM component_events; UPDATE replication_state SET sequence=0,importing=0 WHERE singleton=1;",
         );
+        resetSynchronizationSchedule(db.connection);
       });
       return db;
     } catch (error) {
@@ -809,6 +822,30 @@ export class ProjectDatabase implements ReplicationStore {
    */
   getReplicationStatus(): ReplicationStatus {
     return this.snapshot(() => readReplicationStatus(this.connection));
+  }
+
+  /**
+   * Читает общее расписание одноразового обмена без Git и без загрузки очереди.
+   */
+  getSynchronizationSchedule(): SynchronizationSchedule {
+    return this.withOpenConnection(() => readSynchronizationSchedule(this.connection));
+  }
+
+  /**
+   * Атомарно сохраняет локальный auto/manual даже без remote и transport connection.
+   * Повторный режим — no-op; outbox, generation, dirty-отметки и backoff не меняются.
+   * Режим переживает reopen и не экспортируется; неизвестное значение даёт INVALID_ARGUMENT.
+   */
+  setSynchronizationMode(mode: SynchronizationMode): void {
+    this.transaction(() => setSynchronizationMode(this.connection, mode));
+  }
+
+  /**
+   * Сохраняет исход сетевой попытки короткой технической транзакцией, не создавая outbox.
+   * Вызывающий удерживает отдельный transport mutex; сеть до этого метода уже завершена.
+   */
+  completeSynchronizationAttempt(attempt: SynchronizationAttempt): void {
+    this.transaction(() => completeSynchronizationAttempt(this.connection, attempt));
   }
 
   /**

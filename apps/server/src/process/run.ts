@@ -13,6 +13,13 @@ async function stdout(text: string): Promise<void> {
 }
 
 /**
+ * Записывает процессную диагностику с ожиданием flush, независимо от выключенного Nest logger.
+ */
+async function stderr(text: string): Promise<void> {
+  await Bun.write(Bun.stderr, text);
+}
+
+/**
  * Владеет только своими signals/stdin listeners на время одного foreground запуска.
  */
 async function runForeground(
@@ -40,7 +47,7 @@ async function runForeground(
     await bootstrapServer(
       invocation,
       environment,
-      { signal: controller.signal, stop, stdout },
+      { signal: controller.signal, stop, stdout, stderr },
       manifest.version,
     );
   } finally {

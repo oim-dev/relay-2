@@ -110,7 +110,13 @@ describe("Инертный private SHM после SQLite DELETE-barrier", () => 
         throw new Error("Materializer fixture не сохранил исходное состояние");
       }
       expect(readPreservedState(location.databasePath)).toEqual(expected);
-      expect(existsSync(`${location.databasePath}-wal`)).toBe(false);
+      // Private SHM убран под DELETE-barrier; публичная БД уже должна быть снова рабочей WAL.
+      const publicReader = new Database(location.databasePath, { readonly: true });
+      try {
+        expect(publicReader.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
+      } finally {
+        publicReader.close();
+      }
       expect(existsSync(dirname(stagedPath))).toBe(false);
       expect(existsSync(join(dirname(location.databasePath), ".restore-publication.json"))).toBe(
         false,

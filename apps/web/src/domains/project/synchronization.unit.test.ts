@@ -23,6 +23,39 @@ const identity = {
   acceptedAt: "2026-10-26T00:00:00Z",
   startedAt: null,
 };
+const activeQueues = [
+  { name: "с локальной очередью", changesets: 2 },
+  { name: "без локальной очереди", changesets: 0 },
+];
+const inactivePhases = [
+  { name: "idle", phase: "idle" },
+  { name: "неизвестная фаза", phase: null },
+];
+const deliveryPriorities = [
+  { name: "нет подключения", input: { connected: false }, expectedState: "local" },
+  {
+    name: "есть конфликт",
+    input: { conflicts: { ...cached.conflicts, count: 1 } },
+    expectedState: "conflict",
+  },
+  {
+    name: "есть ошибка обмена",
+    input: { error: { code: "GIT_FAILED", message: "Origin недоступен" } },
+    expectedState: "offline",
+  },
+] as const;
+const unconfirmedDelivery = [
+  { name: "нет сведений fetch", input: { freshness: { ...cached.freshness, known: false } } },
+  { name: "нет успешного обмена", input: { lastSuccess: null } },
+  {
+    name: "проверка конфликтов неполная",
+    input: { conflicts: { ...cached.conflicts, freshness: "partial" } },
+  },
+  {
+    name: "проверка конфликтов устарела",
+    input: { conflicts: { ...cached.conflicts, freshness: "stale" } },
+  },
+] as const;
 
 /**
  * Отдаёт тестовый HTTP envelope через настоящий SDK без реального Git/Server.
@@ -42,6 +75,61 @@ function fixtureFetch(
 ): typeof fetch {
   return Object.assign(handler, { preconnect: () => {} });
 }
+
+describe("Cached-индикатор Git Sync", () => {
+  test.each(activeQueues)(
+    "живая фаза одноразового запроса $name отображается без постоянного worker",
+    ({ changesets }) => {
+      const input: HttpGitSyncStatus = {
+        ...cached,
+        phase: "fetching",
+        worker: { desired: "stopped", actual: "stopped", responsive: false },
+        pending: { changesets, unexported: null },
+      };
+
+      const status = projectSynchronization(input);
+
+      expect(status.state).toBe("syncing");
+      expect(status.queuedCommits).toBe(changesets);
+      expect(status.hasUncommittedChanges).toBeNull();
+      expect(status.requestState).toBeNull();
+    },
+  );
+
+  test.each(inactivePhases)("$name не становится syncing из живости worker", ({ phase }) => {
+    const input: HttpGitSyncStatus = {
+      ...cached,
+      phase,
+      worker: { desired: "running", actual: "running", responsive: true },
+      pending: { changesets: 2, unexported: null },
+    };
+
+    const status = projectSynchronization(input);
+
+    expect(status.state).toBe("pending");
+  });
+
+  test.each(deliveryPriorities)(
+    "$name имеет приоритет над активной фазой",
+    ({ input, expectedState }) => {
+      const status = projectSynchronization({ ...cached, phase: "fetching", ...input });
+
+      expect(status.state).toBe(expectedState);
+    },
+  );
+
+  test.each(unconfirmedDelivery)("$name не подтверждает доставку пустой очереди", ({ input }) => {
+    const status = projectSynchronization({ ...cached, ...input });
+
+    expect(status.state).toBe("unknown");
+  });
+
+  test("idle с подтверждённой доставкой и пустой очередью остаётся synced", () => {
+    const status = projectSynchronization(cached);
+
+    expect(status.state).toBe("synced");
+  });
+});
 
 describe("Наблюдение ручного Git Sync", () => {
   test("неизвестное число неэкспортированных изменений не становится synced или false", () => {

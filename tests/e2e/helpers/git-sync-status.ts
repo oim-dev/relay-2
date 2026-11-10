@@ -8,14 +8,19 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Декодирует существенные поля исходного статуса компонента, возвращаемого auto/worker.
+ * Декодирует существенные поля исходного статуса, возвращаемого status/now/auto.
  * Ожидаемые режим, живость, instance, конфликты и остановку проверяет сам маршрут.
  */
 export function readGitSyncStatus(value: unknown): GitSyncStatusResult {
-  if (!isObject(value) || !isObject(value.worker) || !isObject(value.conflicts)) {
+  if (
+    !isObject(value) ||
+    !isObject(value.worker) ||
+    !isObject(value.conflicts) ||
+    !isObject(value.pending)
+  ) {
     throw new Error("Ожидался статус Git Sync с worker и conflicts");
   }
-  const { mode, worker, conflicts, nextRetry } = value;
+  const { mode, worker, conflicts, pending, nextRetry } = value;
   if (
     (mode !== "manual" && mode !== "auto") ||
     (worker.desired !== "running" && worker.desired !== "stopped") ||
@@ -26,6 +31,9 @@ export function readGitSyncStatus(value: unknown): GitSyncStatusResult {
     typeof conflicts.count !== "number" ||
     !Number.isSafeInteger(conflicts.count) ||
     conflicts.count < 0 ||
+    typeof pending.changesets !== "number" ||
+    !Number.isSafeInteger(pending.changesets) ||
+    pending.changesets < 0 ||
     (nextRetry !== null && (typeof nextRetry !== "string" || nextRetry.length === 0))
   ) {
     throw new Error(
@@ -34,6 +42,7 @@ export function readGitSyncStatus(value: unknown): GitSyncStatusResult {
   }
   return {
     mode,
+    pending: { changesets: pending.changesets },
     worker: {
       desired: worker.desired,
       actual: worker.actual,

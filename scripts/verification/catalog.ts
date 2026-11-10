@@ -44,7 +44,6 @@ export const artifacts: readonly BuildArtifact[] = [
   { id: "web", component: "web", directory: "apps/web/dist", portable: true },
   { id: "cli", component: "cli", directory: "apps/cli/dist", portable: false },
   { id: "server", component: "server", directory: "apps/server/dist", portable: false },
-  { id: "git-sync", component: "git-sync", directory: "apps/git-sync/dist", portable: false },
 ];
 
 /**
@@ -120,10 +119,11 @@ export function requiredArtifacts(component: string, task: string): readonly str
     return [];
   }
   if (task === "test:e2e:product") {
-    return ["sdk", "cli", "server", "git-sync"];
+    return ["sdk", "cli", "server"];
   }
-  if (task === "test:native-service") {
-    return ["cli", "git-sync"];
+  if (component === "git-sync" && task === "test:process") {
+    // Библиотека входит в CLI; собственного исполняемого артефакта у неё нет.
+    return ["cli"];
   }
   if (task === "test:process" || task === "test:e2e") {
     return component === "server" ? ["sdk", "web", "server"] : [component];

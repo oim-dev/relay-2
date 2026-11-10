@@ -5,27 +5,27 @@ export const gitSyncCommandMessages = {
   group: {
     description: "Git-синхронизация локальных данных проекта",
     details:
-      "Подключите remote через connect, выполните now или включите auto enable. Обычные локальные изменения не ждут Git и сети. Отдельный relay-git-sync выполняет обмен; его запуском после входа пользователя управляет git-sync service enable. Для внешнего supervisor и контейнера доступен foreground git-sync supervise.",
+      "При обмене используется текущий origin Git-репозитория проекта и ветка relay-data в linked worktree data/ рядом с проектной SQLite внутри RELAY_HOME. Все worktree одного репозитория используют общее хранилище проекта. Созревший debounce подхватывает очередное предметное обращение CLI/Web; постоянный процесс не требуется. now выполняет явный обмен без задержки, status показывает локально известный исход.",
     examples: [
       {
         description: "Подключить и синхронизировать проект",
-        command: "relay git-sync connect --remote origin\nrelay git-sync now",
+        command: "relay git-sync now\nrelay git-sync status",
       },
     ],
   },
   connect: {
     description: "Подключить remote и ветку данных",
     details:
-      "--remote принимает имя remote (например origin), URL или путь Git-репозитория. Ветка по умолчанию relay-data-v2. Подключение относится к выбранному локальному проекту; в workspace укажите --project.",
+      "--remote принимает origin, URL или путь Git-репозитория. Ветка по умолчанию relay-data. Origin наследуется из Git выбранного проекта; явный URL сохраняется как подключение. Connect проверяет ветку без публикации и импорта. В workspace укажите --project.",
     examples: [
       {
         description: "Подключить origin",
-        command: "relay git-sync connect --remote origin --branch relay-data-v2",
+        command: "relay git-sync connect --remote origin --branch relay-data",
       },
     ],
   },
   status: {
-    description: "Состояние обмена и отдельное состояние worker",
+    description: "Состояние одноразового обмена и локальной очереди",
     details:
       "Без --refresh читает локально известное состояние; неизвестные счётчики сохраняют null в JSON. --refresh обновляет сведения remote отдельной операцией с requestId. --wait-ms задаёт ожидание этой операции, а --refresh --request-id ID только ждёт прежний исход без нового submit. Параметры ожидания требуют --refresh; requestId адресует только выбранный проект.\n\nИз корня workspace без --project показывается каждая регистрация, включая недоступные; --all выбирает все явно. При --refresh --all у каждой регистрации собственный requestId и отдельный wait budget. Ошибка одного проекта не скрывает остальные, но общий код завершения ненулевой. --all несовместим с --project и с ожиданием одного --request-id.",
     examples: [
@@ -38,7 +38,7 @@ export const gitSyncCommandMessages = {
   now: {
     description: "Выполнить один обмен сейчас",
     details:
-      "Без --request-id отправляет один новый запрос обмена; Runtime назначает operationId до запуска компонента. --request-id ID только ждёт исход прежнего запроса и не отправляет новую операцию. --wait-ms: 1–90000 мс, по умолчанию 60000; это budget ожидания, а не отмена принятой работы.\n\nОдин обмен рассматривает ограниченное окно очереди. pending.changesets показывает фактический остаток, publication.window.deferred — ожидавшие зависимости ID этого окна, hasMore — наличие следующих пакетов при подготовке. Успех окна не обещает доставку всей очереди. Следующий now продолжает durable cursor; auto назначает следующие окна самостоятельно.\n\nGIT_SYNC_WAIT_TIMEOUT (код 4) сохраняет requestId и queued/running state: проверьте git-sync request get ID или продолжите ожидание now --request-id ID. Runtime process timeout (GIT_SYNC_TIMEOUT, код 124) сохраняет ID с state:unknown; принятие операции может быть неизвестно. GIT_SYNC_OUTCOME_UNKNOWN (код 4) означает потерю/истечение достоверного исхода, а не успех или отмену. Новая операция автоматически не отправляется.\n\nОставшиеся действительные конфликты дают exit 4 / SYNC_CONFLICT; pending из-за budget или dependencies сам по себе этой ошибкой не является. Сетевой отказ не отменяет ранее сохранённые локальные предметные изменения. Для постоянной работы включите auto enable.",
+      "Без --request-id отправляет новый запрос обмена, обходя debounce и manual-режим. Параллельный обмен ждёт освобождения владельца. Runtime назначает operationId до запуска компонента. --request-id ID только ждёт прежний исход и не отправляет новую операцию. --wait-ms: 1–90000 мс, по умолчанию 60000.\n\nОдин обмен рассматривает ограниченное окно очереди. pending.changesets показывает фактический остаток, publication.window.deferred — ожидавшие зависимости ID этого окна, hasMore — наличие следующих пакетов при подготовке. Успех окна не обещает доставку всей очереди. Следующий now продолжает cursor; auto подхватывает продолжение при очередном обращении CLI/Web.\n\nGIT_SYNC_WAIT_TIMEOUT (код 4) сохраняет requestId и queued/running state: проверьте git-sync request get ID или продолжите ожидание now --request-id ID. Runtime process timeout (GIT_SYNC_TIMEOUT, код 124) сохраняет ID с state:unknown. GIT_SYNC_OUTCOME_UNKNOWN (код 4) означает потерю/истечение достоверного исхода, а не успех или отсутствие эффектов.\n\nНеразрешённые конфликты дают exit 4 / SYNC_CONFLICT; pending из-за budget или dependencies сам по себе этой ошибкой не является. Сетевой отказ не отменяет ранее сохранённые локальные изменения.",
     examples: [
       { description: "Синхронизировать выбранный проект", command: "relay git-sync now" },
       {
@@ -76,15 +76,15 @@ export const gitSyncCommandMessages = {
   auto: {
     description: "Автоматический обмен проекта",
     details:
-      "enable обращается к уже работающему supervisor, сохраняет автоматический режим и ждёт готовности worker. Supervisor запускается явно через service enable либо foreground supervise и обнаруживает изменения storage самостоятельно. disable отключает автоматический обмен проекта; установка login-службы управляется отдельно через service.",
+      "Новые проекты сохраняют режим в SQLite. Enable разрешает ленивый обмен при предметных обращениях CLI/Web; disable запрещает автоматические попытки, включая работу до появления origin. Чтения не продлевают debounce. Без следующего обращения отложенная доставка не запускается; now остаётся явным запросом.",
     examples: [
       { description: "Включить автоматический обмен", command: "relay git-sync auto enable" },
     ],
   },
   autoEnable: {
-    description: "Включить автоматический обмен и запустить процесс",
+    description: "Включить обмен при обращениях CLI/Web",
     details:
-      "Обращается к уже работающему supervisor, сохраняет автоматический режим выбранного проекта и ждёт готовности worker. Сначала запустите supervisor через git-sync service enable либо отдельный foreground git-sync supervise. Если supervisor отсутствует, возвращает SUPERVISOR_REQUIRED (код 4).",
+      "Сохраняет auto в SQLite выбранного проекта. Созревшую попытку выполнит следующее предметное обращение CLI/Web. Настройка доступна и до появления origin.",
     examples: [{ description: "Включить обмен", command: "relay git-sync auto enable" }],
   },
   autoDisable: {
@@ -92,29 +92,6 @@ export const gitSyncCommandMessages = {
     details:
       "Сохраняет отключённый автоматический режим; локальные данные и remote остаются доступными для git-sync now.",
     examples: [{ description: "Отключить обмен", command: "relay git-sync auto disable" }],
-  },
-  worker: {
-    description: "Процесс обмена выбранного проекта",
-    details:
-      "start, stop и restart управляют worker проекта. Наличие процесса отдельно от результата последнего обмена показывается в status.",
-    examples: [{ description: "Запустить worker", command: "relay git-sync worker start" }],
-  },
-  workerStart: {
-    description: "Запустить worker проекта",
-    details:
-      "Запрашивает worker у уже работающего supervisor; повтор не создаёт второго владельца. Supervisor запускается явно через git-sync service enable либо git-sync supervise. Его отсутствие даёт SUPERVISOR_REQUIRED (код 4).",
-    examples: [{ description: "Запустить", command: "relay git-sync worker start" }],
-  },
-  workerStop: {
-    description: "Остановить worker проекта",
-    details: "Ожидает остановки процесса выбранного проекта, сохраняя его данные и подключение.",
-    examples: [{ description: "Остановить", command: "relay git-sync worker stop" }],
-  },
-  workerRestart: {
-    description: "Перезапустить worker проекта",
-    details:
-      "Запрашивает у работающего supervisor остановку текущего worker и готовность нового владельца. Без supervisor возвращает SUPERVISOR_REQUIRED (код 4); запустите его через service enable либо supervise.",
-    examples: [{ description: "Перезапустить", command: "relay git-sync worker restart" }],
   },
   conflicts: {
     description: "Просмотр и разрешение конфликтов",
@@ -164,7 +141,7 @@ export const gitSyncCommandMessages = {
       {
         description: "Получить реплику из ветки данных",
         command:
-          "relay git-sync restore --remote https://example.org/team/project.git --branch relay-data-v2",
+          "relay git-sync restore --remote https://example.org/team/project.git --branch relay-data",
       },
       {
         description: "Завершить сохранённую привязку без config; подставьте ID из recovery details",
@@ -176,47 +153,8 @@ export const gitSyncCommandMessages = {
       },
     ],
   },
-  service: {
-    description: "Пользовательский автозапуск supervisor",
-    details:
-      "Linux использует user-systemd, macOS — LaunchAgent, Windows — Task Scheduler текущего пользователя. service enable явно устанавливает конфигурацию и запускает supervisor с точным binary и home. disable удаляет только свою службу, сохраняя данные проектов.",
-    examples: [
-      { description: "Установить и запустить службу", command: "relay git-sync service enable" },
-    ],
-  },
-  serviceEnable: {
-    description: "Установить и запустить пользовательскую службу",
-    details:
-      "Linux: запуск при login; работа до login и после logout требует отдельно настроенного linger. macOS: LaunchAgent графической сессии после login. Windows: одна task текущего пользователя поддерживает supervisor до service disable, включая выход с кодом 0; каждый из триггеров регистрации и login повторяется с интервалом в одну минуту. Это не глобальный лимит одного старта в минуту и не конечный счётчик рестартов. Relay не включает linger и не вызывает sudo/admin. Бинарник должен оставаться по сохранённому абсолютному пути.",
-    examples: [{ description: "Включить автозапуск", command: "relay git-sync service enable" }],
-  },
-  serviceDisable: {
-    description: "Остановить и удалить только службу Relay",
-    details:
-      "Удаляет только принадлежащую Relay служебную конфигурацию текущего RELAY_HOME. Проекты, подключения и локальные базы сохраняются.",
-    examples: [{ description: "Убрать автозапуск", command: "relay git-sync service disable" }],
-  },
-  serviceStatus: {
-    description: "Проверить системную службу supervisor",
-    details:
-      "Показывает состояние native manager отдельно от состояния синхронизации проектов. Для проектов используйте git-sync status.",
-    examples: [
-      { description: "Проверить службу", command: "relay git-sync service status --format json" },
-    ],
-  },
-  supervise: {
-    description: "Запустить supervisor на переднем плане",
-    details:
-      "Foreground-вход для внешнего supervisor или контейнера. Команда ждёт завершения, передаёт SIGINT/SIGTERM дочернему дереву и выводит его потоки непосредственно. Корень данных задаётся RELAY_HOME либо --home; login-служба для этого режима не требуется.",
-    examples: [
-      {
-        description: "Запустить под внешним supervisor",
-        command: "relay git-sync supervise --home /var/lib/relay",
-      },
-    ],
-  },
-  remote: "Имя remote, URL или путь Git-репозитория",
-  branch: "Ветка данных; по умолчанию relay-data-v2",
+  remote: "Origin, URL или путь Git-репозитория",
+  branch: "Ветка данных; по умолчанию relay-data",
   resume: "Явно завершить привязку сохранённой БД по локальному intent, без fetch",
   resumeProjectId: "Постоянный ID для --resume; без existing config обязателен",
   resumeSourceConflict:
@@ -230,7 +168,8 @@ export const gitSyncCommandMessages = {
   restoreTextRequired: (name: string): string => `--${name} должен содержать строку`,
   refresh: "Обновить сведения remote перед чтением статуса",
   requestId: "ID прежнего запроса из ответа или error.details.requestId; нового submit не создаёт",
-  waitMs: "Ожидание исхода: 1–90000 мс, по умолчанию 60000; истечение ожидания не означает отмену",
+  waitMs:
+    "Ожидание исхода: 1–90000 мс, по умолчанию 60000; истечение не доказывает отсутствие эффектов",
   requestIdRequired: "--request-id должен быть непустым ID прежнего запроса",
   invalidWaitMs: "--wait-ms должен быть целым числом от 1 до 90000 миллисекунд",
   waitRequiresRefresh: "--request-id и --wait-ms для status требуют --refresh",
@@ -243,7 +182,6 @@ export const gitSyncCommandMessages = {
   all: "Все регистрации выбранного workspace",
   id: "Постоянный ID changeset из conflicts или blocked в conflicts list",
   input: "JSON решения, @UTF-8-файл либо - для stdin",
-  home: "Корень локальных данных supervisor; приоритет над RELAY_HOME",
   inputRequired: "Передайте --input: JSON, @файл либо -",
   filePathRequired: "После @ требуется путь файла решения",
   inputTooLarge: "Решение конфликта превышает 8 MiB",
@@ -266,6 +204,7 @@ export const gitSyncCommandMessages = {
     auto: "Автоматический обмен",
     autoEnabled: "Автоматический обмен",
     worker: "Процесс worker",
+    request: "Текущий обмен",
     sync: "Синхронизация",
     phase: "Фаза обмена",
     attemptId: "Попытка обмена",

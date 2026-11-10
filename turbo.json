@@ -6,7 +6,6 @@
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "@relay/cli#build": { "cache": false, "outputs": ["dist/**"] },
-    "@relay/git-sync#build": { "cache": false, "outputs": ["dist/**"] },
     "@relay/server#build": {
       "dependsOn": ["@relay/web#build"],
       "cache": false,
@@ -26,6 +25,7 @@
     "test:integration": { "cache": false, "passThroughEnv": ["CI_LOG_DIR"] },
     "@relay/server#test:integration": { "dependsOn": ["@relay/rest-sdk#build"], "cache": false },
     "test:process": { "dependsOn": ["build"], "cache": false },
+    "@relay/git-sync#test:process": { "dependsOn": ["@relay/cli#build"], "cache": false },
     "@relay/server#test:process": {
       "dependsOn": ["@relay/server#build", "@relay/rest-sdk#build"],
       "cache": false
@@ -37,12 +37,7 @@
     "//#verify:configuration": { "cache": false },
     "//#test:unit:repo": { "cache": false },
     "//#test:e2e:product": {
-      "dependsOn": [
-        "@relay/cli#build",
-        "@relay/server#build",
-        "@relay/git-sync#build",
-        "@relay/rest-sdk#build"
-      ],
+      "dependsOn": ["@relay/cli#build", "@relay/server#build", "@relay/rest-sdk#build"],
       "cache": false
     },
     "@relay/web#dev": {

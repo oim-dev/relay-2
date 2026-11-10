@@ -87,7 +87,12 @@ describe("Nest Runtime scope", () => {
         });
         await writeFile(
           location.configPath,
-          JSON.stringify({ version: 1, projectId: other.projectId }),
+          // Перепривязка ведёт к настоящей чужой БД, а не к отсутствующему legacy-пути в RELAY_HOME.
+          JSON.stringify({
+            version: 1,
+            projectId: other.projectId,
+            databasePath: other.databasePath,
+          }),
         );
 
         await apiError(() => client.gitSyncNow(location.projectId), "PROJECT_CHANGED", 409);
@@ -95,6 +100,9 @@ describe("Nest Runtime scope", () => {
       },
       {
         gitSync: {
+          /**
+           * Фиксирует недопустимый вызов порта после изменения выбранного проекта.
+           */
           request: async () => {
             requests += 1;
             return {};

@@ -8,7 +8,7 @@ import { checkReleaseVersions, releaseBuildArtifacts } from "./release-plan";
 import { releaseMessages } from "./release.messages";
 
 /**
- * Готовит по одному tar.gz с тремя бинарниками на target и общий SHA256SUMS.
+ * Готовит по одному tar.gz с CLI и Server на target и общий SHA256SUMS.
  * Не исполняет чужие бинарники и не собирает приложение. Все bundles проходят тот же
  * декодер metadata, hash и whitelist архива, что CI restore, но без ограничения host.
  * Output должен быть пустым; временный staging удаляется при любом исходе.

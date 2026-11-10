@@ -98,7 +98,10 @@ describe("Владение рабочим соединением CLI", () => {
       try {
         const response = await cli.success(["config", "get"]);
 
-        expect(response.data).toEqual({ version: 1, projectId: project.projectId });
+        expect(response.data).toEqual({
+          version: 1,
+          projectId: project.projectId,
+        });
         expect(response.meta).toEqual({ ...project });
         expect(open).toHaveBeenCalledTimes(1);
         expect(close).toHaveBeenCalledTimes(1);

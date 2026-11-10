@@ -52,14 +52,6 @@ runs:
         path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts).cli }}
         run-id: ${{ inputs.run-id || github.run_id }}
         github-token: ${{ github.token }}
-    - name: Получить Git Sync
-      if: ${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] != '' }}
-      uses: actions/download-artifact@v6
-      with:
-        name: ${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] }}
-        path: ${{ inputs.directory }}/${{ fromJSON(steps.plan.outputs.artifacts)['git-sync'] }}
-        run-id: ${{ inputs.run-id || github.run_id }}
-        github-token: ${{ github.token }}
     - name: Получить Server
       if: ${{ fromJSON(steps.plan.outputs.artifacts).server != '' }}
       uses: actions/download-artifact@v6

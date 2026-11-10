@@ -5,8 +5,9 @@ import { PROJECT_WRITE_TRIGGERS } from "./entity-triggers";
 import { COMPONENTS_SCHEMA } from "./components-schema";
 import { COMMAND_SCHEMA } from "./command-schema";
 import { COMMENT_TEXT_GUARDS } from "../entities/comment-text";
+import { SYNCHRONIZATION_SCHEMA } from "../synchronization/schedule";
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 export const APPLICATION_ID = 0x524c5932;
 
 // ID, текущие ключи и алиасы делят одно пространство ссылок: старый адрес нельзя выдать другой записи.
@@ -77,4 +78,5 @@ export const SCHEMA =
   "DROP TABLE entity_refs;\n" +
   COMPONENTS_SCHEMA +
   COMMENT_TEXT_GUARDS +
-  COMMAND_SCHEMA;
+  COMMAND_SCHEMA +
+  SYNCHRONIZATION_SCHEMA;

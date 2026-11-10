@@ -43,10 +43,14 @@ export class ProjectsController {
    */
   @Operation("projectStatus")
   async status(@Param("projectId") projectId: string): Promise<HttpApiSchemas["projectStatus"]> {
-    return this.projects.run(projectId, (db) => ({
-      ok: true,
-      data: new QueryService(db).status(),
-    }));
+    return this.projects.run(
+      projectId,
+      (db) => ({
+        ok: true,
+        data: new QueryService(db).status(),
+      }),
+      "local",
+    );
   }
 
   /**
@@ -54,6 +58,10 @@ export class ProjectsController {
    */
   @Operation("projectCheck")
   async check(@Param("projectId") projectId: string): Promise<HttpApiSchemas["projectCheck"]> {
-    return this.projects.run(projectId, (db) => ({ ok: true, data: new QueryService(db).check() }));
+    return this.projects.run(
+      projectId,
+      (db) => ({ ok: true, data: new QueryService(db).check() }),
+      "local",
+    );
   }
 }

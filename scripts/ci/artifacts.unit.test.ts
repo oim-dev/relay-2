@@ -144,35 +144,38 @@ describe("Граница tar", () => {
 });
 
 describe("Передача готовых output без пересборки", () => {
-  test("native round-trip сохраняет байты и permissions, удаляя прежние файлы только output", async () => {
-    await withArtifactFixture(async ({ context, downloads, target, cliBinary }) => {
-      const binary = join(context.root, cliBinary);
-      await writeArtifactFixtureFile(binary, "compiled cli\n", 0o751);
-      await writeArtifactFixtureFile(
-        join(context.root, "apps/cli/src/source.ts"),
-        "source remains",
-      );
-      const mode = (await lstat(binary)).mode & 0o777;
-      const packed = await packArtifact(context, "cli", target, downloads);
-      await rm(dirname(binary), { recursive: true });
-      await writeArtifactFixtureFile(join(dirname(binary), "stale-file"), "obsolete output");
-      // Посторонний сломанный bundle не является prerequisite CLI и не должен читаться.
-      await writeArtifactFixtureFile(
-        join(downloads, `sdk-portable-${context.sha}`, "manifest.json"),
-        "not JSON",
-      );
+  test.each([{ component: "cli" }, { component: "git-sync" }])(
+    "$component: процессный набор получает готовый CLI с его байтами и permissions",
+    async ({ component }) => {
+      await withArtifactFixture(async ({ context, downloads, target, cliBinary }) => {
+        const binary = join(context.root, cliBinary);
+        await writeArtifactFixtureFile(binary, "compiled cli\n", 0o751);
+        await writeArtifactFixtureFile(
+          join(context.root, "apps/cli/src/source.ts"),
+          "source remains",
+        );
+        const mode = (await lstat(binary)).mode & 0o777;
+        const packed = await packArtifact(context, "cli", target, downloads);
+        await rm(dirname(binary), { recursive: true });
+        await writeArtifactFixtureFile(join(dirname(binary), "stale-file"), "obsolete output");
+        // Посторонний сломанный bundle не является prerequisite CLI и не должен читаться.
+        await writeArtifactFixtureFile(
+          join(downloads, `sdk-portable-${context.sha}`, "manifest.json"),
+          "not JSON",
+        );
 
-      await restoreArtifacts(context, "cli", "test:process", target, downloads);
+        await restoreArtifacts(context, component, "test:process", target, downloads);
 
-      expect(packed.name).toBe(`cli-${target}-${"a".repeat(40)}`);
-      expect(await Bun.file(binary).text()).toBe("compiled cli\n");
-      expect((await lstat(binary)).mode & 0o777).toBe(mode);
-      expect(await readdir(dirname(binary))).toEqual([basename(binary)]);
-      expect(await Bun.file(join(context.root, "apps/cli/src/source.ts")).text()).toBe(
-        "source remains",
-      );
-    });
-  });
+        expect(packed.name).toBe(`cli-${target}-${"a".repeat(40)}`);
+        expect(await Bun.file(binary).text()).toBe("compiled cli\n");
+        expect((await lstat(binary)).mode & 0o777).toBe(mode);
+        expect(await readdir(dirname(binary))).toEqual([basename(binary)]);
+        expect(await Bun.file(join(context.root, "apps/cli/src/source.ts")).text()).toBe(
+          "source remains",
+        );
+      });
+    },
+  );
 
   test("rest-sdk упаковывается как sdk-portable и восстанавливается на нативном consumer", async () => {
     await withArtifactFixture(async ({ context, downloads, target }) => {

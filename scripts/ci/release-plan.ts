@@ -9,7 +9,7 @@ import type { ReleaseArtifact, ReleaseRun, ReleaseVersion } from "./release.type
  * Определяет состав поставки; каталоги и target принадлежат общему каталогу проверок.
  */
 export function releaseBuildArtifacts(): readonly BuildArtifact[] {
-  return ["cli", "server", "git-sync"].map(buildArtifact);
+  return ["cli", "server"].map(buildArtifact);
 }
 
 /**

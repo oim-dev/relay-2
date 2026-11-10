@@ -55,4 +55,6 @@ export interface ServerControl {
   readonly stop: () => void;
   /* Ожидает flush ready-сообщения либо сообщает отказ. */
   readonly stdout: (text: string) => Promise<void>;
+  /* Ожидает запись отдельной диагностики; отсутствие оставляет встраиваемый запуск без stderr. */
+  readonly stderr?: (text: string) => Promise<void>;
 }

@@ -80,9 +80,9 @@ export async function bootstrapServer(
       userHome: environment.userHome,
       version,
       signal: requests.signal,
-      ...(environment.env.RELAY_GIT_SYNC_BIN === undefined
+      ...(environment.env.RELAY_CLI_BIN === undefined
         ? {}
-        : { binary: environment.env.RELAY_GIT_SYNC_BIN }),
+        : { binary: environment.env.RELAY_CLI_BIN }),
       ...(environment.standalone
         ? { runner: createNativeProcessRunner([environment.executablePath]) }
         : {}),
@@ -94,6 +94,14 @@ export async function bootstrapServer(
       port: launch.port,
       hostname: "127.0.0.1",
       gitSync,
+      /**
+       * Отделяет исход доставки от HTTP mutation и использует явный процессный поток.
+       */
+      synchronizationWarning: async (error): Promise<void> => {
+        await control.stderr?.(
+          `${JSON.stringify({ type: "git-sync", level: "warning", error })}\n`,
+        );
+      },
       staticHandler: createWebHandler(),
       allowedOrigins: "allowedOrigins" in invocation ? invocation.allowedOrigins : [],
     });

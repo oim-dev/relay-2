@@ -18,10 +18,13 @@ import {
 import type { PlannedTask } from "./verification.test.types";
 
 /**
- * Читает настоящий Turbo dry-run без исполнения тестов, сборок и записи отчётов.
+ * Читает настоящий Turbo dry-run выбранной корневой команды без исполнения тестов и сборок.
+ * По умолчанию проверяет полный check; переданный argv должен поддерживать --dry-run=json.
  */
-async function plannedTasks(): Promise<readonly PlannedTask[]> {
-  const child = Bun.spawn([...checkCommand(4), "--dry-run=json"], {
+async function plannedTasks(
+  command: readonly string[] = checkCommand(4),
+): Promise<readonly PlannedTask[]> {
+  const child = Bun.spawn([...command, "--dry-run=json"], {
     cwd: repository,
     stdout: "pipe",
     stderr: "pipe",
@@ -109,20 +112,48 @@ describe("Единый граф check и CI", () => {
     expect(tasks.find((task) => task.id === "@relay/cli#test:e2e")?.dependencies).toEqual([
       "@relay/cli#build",
     ]);
+    expect(tasks.find((task) => task.id === "@relay/git-sync#test:process")?.dependencies).toEqual([
+      "@relay/cli#build",
+    ]);
     expect(
       tasks.find((task) => task.id === "//#test:e2e:product")?.dependencies.toSorted(),
-    ).toEqual([
-      "@relay/cli#build",
-      "@relay/git-sync#build",
-      "@relay/rest-sdk#build",
-      "@relay/server#build",
-    ]);
+    ).toEqual(["@relay/cli#build", "@relay/rest-sdk#build", "@relay/server#build"]);
     expect(tasks.find((task) => task.id === "@relay/server#build")?.dependencies).toEqual([
       "@relay/web#build",
     ]);
     expect(tasks.find((task) => task.id === "@relay/web#build")?.dependencies).toEqual([
       "@relay/rest-sdk#build",
     ]);
+  });
+
+  test("build:cli готовит только CLI и Server со своими переносимыми prerequisites", async () => {
+    const tasks = await plannedTasks([process.execPath, "run", "build:cli"]);
+
+    expect(tasks.map((task) => task.id).sort()).toEqual([
+      "@relay/cli#build",
+      "@relay/rest-sdk#build",
+      "@relay/server#build",
+      "@relay/web#build",
+    ]);
+  });
+
+  test("Git Sync сохраняет библиотечные проверки без отдельной сборки и службы в CI", async () => {
+    const components = await readComponents();
+    const component = components.find((entry) => entry.id === "git-sync");
+
+    const jobs = ciJobs(components);
+
+    expect(component).toMatchObject({ name: "@relay/git-sync", directory: "packages/git-sync" });
+    expect(Object.keys(component?.scripts ?? {}).sort()).toEqual([
+      "lint",
+      "test:extended-replication",
+      "test:integration",
+      "test:process",
+      "test:unit",
+      "typecheck",
+    ]);
+    expect(artifacts.map((artifact) => artifact.id)).not.toContain("git-sync");
+    expect(Object.keys(jobs).some((id) => id.startsWith("native_services_"))).toBe(false);
   });
 
   test("каждый набор компонента и продуктовый E2E исполняются ровно один раз на каждой поддержанной ОС", async () => {
@@ -179,6 +210,7 @@ describe("Единый граф check и CI", () => {
       }
     }
     expect(jobs.cli_test_process_linux_x64?.needs).toEqual(["cli_build_linux_x64"]);
+    expect(jobs.git_sync_test_process_linux_x64?.needs).toEqual(["cli_build_linux_x64"]);
     expect(jobs.product_e2e_linux_x64?.needs).not.toContain("cli_build_windows_x64");
     expect(jobs.result?.needs?.length).toBe(Object.keys(jobs).length - 1);
   });

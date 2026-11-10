@@ -2,32 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelayError, type GitSyncRequest } from "@relay/contracts";
-import type { GitSyncClient } from "@relay/project-runtime";
+import { requestClient as operationPort } from "../../../tests/helpers/git-sync-client";
 import { withCliFixture } from "../../../tests/integration/helpers/cli-fixture";
 import { invokeIsolatedCli } from "../../../tests/helpers/help";
 
 const group = "git-sync-implementation/cli-runtime/request-correlation";
-
-/**
- * Подменяет только процессный порт; API восстановления ожидания не запускает service/foreground fallback.
- */
-function operationPort(request: GitSyncClient["request"]): GitSyncClient {
-  return {
-    request,
-    /**
-     * Обнаруживает недопустимую установку службы при timeout/query.
-     */
-    service: async (): Promise<never> => {
-      throw new Error("Неожиданный service fallback");
-    },
-    /**
-     * Обнаруживает недопустимый запуск нового supervisor вместо чтения outcome.
-     */
-    supervise: async (): Promise<never> => {
-      throw new Error("Неожиданный foreground fallback");
-    },
-  };
-}
 
 describe("CLI correlation явных Git Sync запросов", () => {
   test.each([

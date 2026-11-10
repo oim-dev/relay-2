@@ -19,6 +19,7 @@ import {
   requireVersionPrecondition,
 } from "../input/version-precondition";
 import type { VersionFlagPair } from "../input/version-precondition.types";
+import { synchronizeInvocation } from "./synchronization";
 
 /**
  * Ожидает async writer Core без внешней транзакции; чтение выполняет строго синхронно в снимке.
@@ -147,6 +148,19 @@ export class CommandRegistry {
                 };
           const invocation = new Invocation(context, this.runtime, input, execution);
           try {
+            action.beforeProject?.(invocation);
+            if (action.mode !== undefined) {
+              void invocation.actor;
+            }
+            if (
+              !action.local &&
+              invocation.values.check !== true &&
+              path !== "storage status" &&
+              path !== "doctor check" &&
+              path !== "batch result"
+            ) {
+              await synchronizeInvocation(invocation);
+            }
             const result = await runAction(action, invocation);
             if (result.failure) {
               this.outcome.failure = result.failure;

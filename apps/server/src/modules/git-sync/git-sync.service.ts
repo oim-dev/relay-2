@@ -34,13 +34,16 @@ export class GitSyncService {
     if (client === undefined) {
       throw new RelayError("GIT_SYNC_UNAVAILABLE", httpMessages.gitUnavailable);
     }
-    return this.projects.run(projectId, () =>
-      client.request({
-        version: 1,
-        action,
-        input,
-        options: this.projects.target(projectId).options,
-      }),
+    return this.projects.run(
+      projectId,
+      () =>
+        client.request({
+          version: 1,
+          action,
+          input,
+          options: this.projects.target(projectId).options,
+        }),
+      "local",
     );
   }
 

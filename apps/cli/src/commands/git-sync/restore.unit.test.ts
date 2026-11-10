@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { RelayError, type GitSyncRequest } from "@relay/contracts";
-import type { GitSyncClient } from "@relay/project-runtime";
+import { requestClient as restorePort } from "../../../tests/helpers/git-sync-client";
 import { withCliFixture } from "../../../tests/integration/helpers/cli-fixture";
 import { invokeIsolatedCli } from "../../../tests/helpers/help";
 
@@ -61,27 +61,6 @@ const failures = [
     details: { projectId: "project-id" },
   },
 ] as const;
-
-/**
- * Подменяет только одноразовый process port; скрытый service/foreground fallback запрещён.
- */
-function restorePort(request: GitSyncClient["request"]): GitSyncClient {
-  return {
-    request,
-    /**
-     * Restore не устанавливает пользовательскую службу.
-     */
-    service: async (): Promise<never> => {
-      throw new Error("Restore не должен вызывать native service");
-    },
-    /**
-     * Resume не запускает supervisor как замену завершению привязки.
-     */
-    supervise: async (): Promise<never> => {
-      throw new Error("Restore не должен запускать supervisor");
-    },
-  };
-}
 
 describe("Явный restore resume CLI", () => {
   test.each(invocations)(

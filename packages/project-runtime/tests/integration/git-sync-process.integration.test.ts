@@ -12,9 +12,12 @@ import {
 import { RuntimeFixture } from "./helpers/runtime-fixture";
 import { linuxProcessRunning } from "./helpers/native/linux/process-observation";
 
-const group = "git-sync-implementation/cli-runtime";
+const group = "project-local-sync/cli-port-review";
 const protocolScript = `
-if (process.argv.includes('--version')) { console.log('0.0.0'); process.exit(0); }
+if (process.argv.includes('--version')) { console.log('relay 0.0.0'); process.exit(0); }
+if (!process.argv.includes('--git-sync-request') || process.argv.includes('--request')) {
+  throw new Error('fixture: ожидался только CLI private request entrypoint');
+}
 const request = JSON.parse(await Bun.stdin.text());
 if (request.action === 'large') {
   process.stderr.write('diagnostic '.repeat(100000));
@@ -34,7 +37,7 @@ describe("Процессный протокол Runtime", () => {
     const fixture = new RuntimeFixture("git-sync-implementation/review-runtime");
     const binDirectory = join(fixture.root, "свой PATH");
     mkdirSync(binDirectory);
-    const binary = join(binDirectory, nativeExecutableName("relay-git-sync"));
+    const binary = join(binDirectory, nativeExecutableName("relay"));
     writeFileSync(binary, "fixture");
     chmodSync(binary, 0o700);
     const originalPath = process.env.PATH;
@@ -42,7 +45,7 @@ describe("Процессный протокол Runtime", () => {
       const selected = await discoverGitSyncBinary({
         cwd: fixture.cwd,
         env: { [process.platform === "win32" ? "Path" : "PATH"]: binDirectory },
-        executablePath: join(fixture.cwd, "relay"),
+        executablePath: join(fixture.cwd, "relay-server"),
         version: "0.0.0",
         userHome: fixture.root,
         /**
@@ -222,14 +225,14 @@ describe("Процессный протокол Runtime", () => {
     const fixture = new RuntimeFixture(group);
     const sibling = join(fixture.cwd, "Компоненты с пробелами");
     mkdirSync(sibling);
-    const binary = join(sibling, nativeExecutableName("relay-git-sync"));
+    const binary = join(sibling, nativeExecutableName("relay"));
     writeFileSync(binary, "fixture");
     chmodSync(binary, 0o700);
     try {
       const selected = await discoverGitSyncBinary({
         cwd: fixture.cwd,
         env: {},
-        executablePath: join(sibling, "relay"),
+        executablePath: join(sibling, "relay-server"),
         version: "0.0.0",
         userHome: fixture.root,
         /**
@@ -238,7 +241,7 @@ describe("Процессный протокол Runtime", () => {
         runner: async (command): Promise<ProcessResult> => {
           expect(command.executable).toBe(binary);
           expect(command.args).toEqual(["--version"]);
-          return { exitCode: 0, stdout: "relay-git-sync 0.0.0\n", stderr: "" };
+          return { exitCode: 0, stdout: "relay 0.0.0\n", stderr: "" };
         },
       });
       expect(selected).toBe(binary);
@@ -247,23 +250,23 @@ describe("Процессный протокол Runtime", () => {
     }
   });
 
-  test("собранная CLI в checkout находит отдельную apps/git-sync/dist без import.meta пути Bun bundle", async () => {
+  test("собранный Server в checkout находит apps/cli/dist без import.meta пути Bun bundle", async () => {
     const fixture = new RuntimeFixture(group);
     const cliDirectory = join(fixture.root, "apps/cli/dist");
-    const syncDirectory = join(fixture.root, "apps/git-sync/dist");
+    const serverDirectory = join(fixture.root, "apps/server/dist");
     mkdirSync(cliDirectory, { recursive: true });
-    mkdirSync(syncDirectory, { recursive: true });
-    const cli = join(cliDirectory, nativeExecutableName("relay"));
-    const binary = join(syncDirectory, nativeExecutableName("relay-git-sync"));
-    writeFileSync(cli, "fixture");
+    mkdirSync(serverDirectory, { recursive: true });
+    const caller = join(serverDirectory, nativeExecutableName("relay-server"));
+    const binary = join(cliDirectory, nativeExecutableName("relay"));
+    writeFileSync(caller, "fixture");
     writeFileSync(binary, "fixture");
-    chmodSync(cli, 0o700);
+    chmodSync(caller, 0o700);
     chmodSync(binary, 0o700);
     try {
       const selected = await discoverGitSyncBinary({
         cwd: fixture.cwd,
         env: {},
-        executablePath: cli,
+        executablePath: caller,
         version: "0.0.0",
         userHome: fixture.root,
         /**

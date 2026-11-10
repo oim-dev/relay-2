@@ -1,5 +1,5 @@
 /**
- * Версионированный процессный запрос CLI к бинарнику Git Sync.
+ * Версионированный запрос Server → CLI и CLI → библиотека Git Sync.
  * input проверяет владелец конкретного action до предметного вызова Core.
  */
 export interface GitSyncRequest {

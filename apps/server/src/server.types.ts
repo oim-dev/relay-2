@@ -1,5 +1,6 @@
 import type { NestFastifyApplication } from "@nestjs/platform-fastify";
 import type { GitSyncClient, RuntimeOptions } from "@relay/project-runtime";
+import type { HttpError } from "@relay/contracts";
 
 /**
  * Явная граница статики или встраиваемого HTTP handler; null продолжает обычный routing.
@@ -18,6 +19,8 @@ export interface RelayServerOptions {
   readonly actor: string;
   /* Процессный клиент Git Sync; отсутствие означает GIT_SYNC_UNAVAILABLE. */
   readonly gitSync?: Pick<GitSyncClient, "request">;
+  /* Отдельная диагностика отложенного auto; процессный запуск пишет JSON warning в stderr. */
+  readonly synchronizationWarning?: (error: HttpError) => void | Promise<void>;
   /* Каталог готового Web, подключённый вызывающим приложением. */
   readonly staticHandler?: ServerStaticHandler;
   /* Необязательный handler после policy, перед обычным маршрутом. */

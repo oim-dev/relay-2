@@ -1,6 +1,18 @@
 import type { ProjectLocation } from "./location.types";
 
 /**
+ * Выбор восстановления до чтения удалённого snapshot; SQLite не открывается и файлы не создаются.
+ */
+export interface ProjectRestorationContext {
+  /* Физический путь выбранного либо будущего проектного конфига, с учётом workspace и symlink. */
+  readonly configPath: string;
+  /* Путь существующей привязки; null до получения ID нового проекта из snapshot. */
+  readonly databasePath: string | null;
+  /* ID прочитанного конфига; null только у нового проекта без конфига. */
+  readonly projectId: string | null;
+}
+
+/**
  * Выбранная цель восстановления до материализации; фиксирует способ публикации config.
  */
 export interface RestorationTarget {

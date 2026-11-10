@@ -127,7 +127,7 @@ async function readServerOutput(
 }
 
 /**
- * Копирует только бинарник в отдельный каталог и запускает его с изолированным HOME.
+ * Копирует Server в отдельный каталог и запускает с изолированным HOME и явным CLI той же сборки.
  * Готовность определяется опубликованными URL и UUID, а не произвольной задержкой.
  * При отказе запуска самостоятельно завершает процесс; после успеха close обязателен.
  * Нештатный exit, принудительное завершение и незакрытые потоки не становятся успешным cleanup.
@@ -143,7 +143,7 @@ export async function startWorkflowServer(
   await chmod(executable, 0o755);
   const child = Bun.spawn([executable, "--port", "0"], {
     cwd,
-    env: environment.variables,
+    env: { ...environment.variables, RELAY_CLI_BIN: environment.binary },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",

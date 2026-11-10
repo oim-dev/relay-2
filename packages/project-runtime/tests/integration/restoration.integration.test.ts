@@ -79,9 +79,12 @@ describe("Восстановление независимой реплики", (
     }
   });
 
-  test.each(["-wal", "-shm"])(
-    "появившийся во время подготовки %s сохраняется без публикации новой БД",
-    async (suffix) => {
+  test.each([
+    { name: "WAL", suffix: "-wal" },
+    { name: "SHM", suffix: "-shm" },
+  ])(
+    "появившийся во время подготовки $name сохраняется без публикации новой БД",
+    async ({ suffix }) => {
       const fixture = new RuntimeFixture(group);
       const databasePath = join(fixture.home, "projects", "restored", "project.sqlite");
       try {
@@ -317,7 +320,7 @@ describe("Восстановление независимой реплики", (
       );
 
       expect(location.databasePath).toBe(
-        join(fixture.home, "projects/project-restored/project.sqlite"),
+        join(fixture.home, "projects", "project-restored", "project.sqlite"),
       );
       expect(JSON.parse(readFileSync(location.configPath, "utf8"))).toEqual({
         version: 1,
@@ -387,8 +390,8 @@ describe("Восстановление независимой реплики", (
 
       expect(code).toBe("PROJECT_ID_MISMATCH");
       expect(existsSync(join(fixture.cwd, "relay.config.json"))).toBe(false);
-      expect(existsSync(join(fixture.home, "projects/expected/project.sqlite"))).toBe(false);
-      expect(readdirSync(join(fixture.home, "projects/expected"))).toEqual([
+      expect(existsSync(join(fixture.home, "projects", "expected", "project.sqlite"))).toBe(false);
+      expect(readdirSync(join(fixture.home, "projects", "expected"))).toEqual([
         ".restore.lock.sqlite",
       ]);
     } finally {
@@ -411,7 +414,7 @@ describe("Восстановление независимой реплики", (
 
       expect(code).toBe("RESTORE_RECOVERY_REQUIRED");
       expect(readFileSync(configPath, "utf8")).toBe(foreign);
-      const directory = join(fixture.home, "projects/candidate");
+      const directory = join(fixture.home, "projects", "candidate");
       const database = ProjectDatabase.open(join(directory, "project.sqlite"));
       try {
         expect(database.projectId).toBe("candidate");

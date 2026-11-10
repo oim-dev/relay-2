@@ -9,28 +9,31 @@ import type { GitSyncEnvironment } from "./client.types";
 import { gitSyncMessages as messages } from "./git-sync.messages";
 import { runNativeProcess } from "./process";
 
+const VERSION_PROBE_TIMEOUT_MS = 10_000;
+
 /**
- * Ищет explicit override, sibling, PATH и сборку dev-checkout в этом порядке.
+ * Ищет relay CLI: explicit override, sibling, PATH и apps/cli/dist dev-checkout в этом порядке.
  * Каждый выбранный binary проверяется по версии выпуска; явный override никогда не обходится молча.
  */
 export async function discoverGitSyncBinary(environment: GitSyncEnvironment): Promise<string> {
-  const name = nativeExecutableName("relay-git-sync");
-  const cliPath = resolve(environment.cwd, environment.executablePath);
-  const cliDirectory = dirname(executable(cliPath) ?? cliPath);
+  const name = nativeExecutableName("relay");
+  const callerPath = resolve(environment.cwd, environment.executablePath);
+  const callerDirectory = dirname(executable(callerPath) ?? callerPath);
   const searchPath = nativeExecutableSearchPath(environment.env);
   const checkout =
-    basename(dirname(cliDirectory)) === "cli" && basename(dirname(dirname(cliDirectory))) === "apps"
-      ? [resolve(cliDirectory, "../../git-sync/dist", name)]
+    ["cli", "server"].includes(basename(dirname(callerDirectory))) &&
+    basename(dirname(dirname(callerDirectory))) === "apps"
+      ? [resolve(callerDirectory, "../../cli/dist", name)]
       : [];
   const candidates =
     environment.binary !== undefined
       ? [resolve(environment.cwd, environment.binary)]
       : [
-          resolve(dirname(cliPath), name),
-          resolve(cliDirectory, name),
+          resolve(dirname(callerPath), name),
+          resolve(callerDirectory, name),
           ...searchPath.map((directory) => resolve(environment.cwd, directory, name)),
           ...checkout,
-          resolve(import.meta.dir, "../../../../apps/git-sync/dist", name),
+          resolve(import.meta.dir, "../../../../apps/cli/dist", name),
         ];
   if (environment.binary !== undefined && !environment.binary.trim()) {
     throw new RelayError("GIT_SYNC_BINARY_NOT_FOUND", messages.invalidBinary, 3);
@@ -47,12 +50,12 @@ export async function discoverGitSyncBinary(environment: GitSyncEnvironment): Pr
       cwd: environment.cwd,
       env: environment.env,
       strictStdout: true,
-      timeoutMs: environment.timeoutMs ?? 10_000,
+      timeoutMs: environment.timeoutMs ?? VERSION_PROBE_TIMEOUT_MS,
       ...(environment.signal ? { signal: environment.signal } : {}),
     });
     if (
       version.exitCode === 0 &&
-      [environment.version, `relay-git-sync ${environment.version}`].includes(version.stdout.trim())
+      [environment.version, `relay ${environment.version}`].includes(version.stdout.trim())
     ) {
       return path;
     }

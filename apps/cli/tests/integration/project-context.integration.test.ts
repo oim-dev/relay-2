@@ -1,9 +1,9 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { KnowledgeService } from "@relay/core";
-import { initializeProject, initializeWorkspace, registerProject } from "@relay/project-runtime";
+import { initializeWorkspace, registerProject } from "@relay/project-runtime";
 import { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { entityValue, objectValue, stringValue } from "./helpers/responses";
@@ -51,7 +51,18 @@ describe("Локальный проект CLI", () => {
       });
       expect((await cli.entity(["project", "get"])).id).toBe(project.projectId);
       const config = await cli.success(["config", "get"]);
-      expect(config.data).toEqual({ version: 1, projectId: project.projectId });
+      expect(project.databasePath).toBe(
+        join(
+          stringValue(cli.runtime.env.RELAY_HOME),
+          "projects",
+          project.projectId,
+          "project.sqlite",
+        ),
+      );
+      expect(config.data).toEqual({
+        version: 1,
+        projectId: project.projectId,
+      });
       expect(config.meta).toMatchObject(project);
     });
   });
@@ -59,11 +70,23 @@ describe("Локальный проект CLI", () => {
   test("без RELAY_HOME конфиг без пути выбирает базу из HOME/.relay", async () => {
     await withCliFixture(async (cli) => {
       const home = join(cli.root, "user");
-      const project = initializeProject({ cwd: cli.runtime.cwd, home: join(home, ".relay") });
+      // База готовится независимо от init, чтобы проверить передачу HOME на границе CLI.
+      const projectId = crypto.randomUUID();
+      const databasePath = join(home, ".relay", "projects", projectId, "project.sqlite");
+      mkdirSync(dirname(databasePath), { recursive: true });
+      ProjectDatabase.create(databasePath, {
+        id: projectId,
+        name: "Legacy",
+        slug: "legacy",
+      }).close();
+      writeFileSync(
+        join(cli.runtime.cwd, "relay.config.json"),
+        JSON.stringify({ version: 1, projectId }),
+      );
 
       const selected = await cli.entity(["project", "get"], { env: { HOME: home } });
 
-      expect(selected.id).toBe(project.projectId);
+      expect(selected.id).toBe(projectId);
     });
   });
 
@@ -82,7 +105,7 @@ describe("Локальный проект CLI", () => {
     },
   );
 
-  test("относительный RELAY_HOME и явный config сохраняются при создании и выборе проекта", async () => {
+  test("init с явным config размещает БД в относительном RELAY_HOME, а не рядом с конфигом", async () => {
     await withCliFixture(async (cli) => {
       const env = {
         HOME: join(cli.root, "user"),

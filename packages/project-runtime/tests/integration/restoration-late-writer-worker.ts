@@ -76,7 +76,6 @@ if (process.argv.includes("--writer")) {
   process.exit(0);
 }
 
-const databasePath = join(home, "projects", projectId, "project.sqlite");
 const configPath = join(cwd, "relay.config.json");
 const nativeLink = files.linkSync;
 spyOn(files, "linkSync").mockImplementation((source, target) => {
@@ -99,7 +98,7 @@ spyOn(files, "linkSync").mockImplementation((source, target) => {
     process.exit(73);
   }
   // Второй worktree публикует правильный config; никакой подмены inode или внешнего злоумышленника нет.
-  files.writeFileSync(configPath, JSON.stringify({ version: 1, projectId, databasePath }), {
+  files.writeFileSync(configPath, JSON.stringify({ version: 1, projectId }), {
     flag: "wx",
   });
   nativeLink(source, target);

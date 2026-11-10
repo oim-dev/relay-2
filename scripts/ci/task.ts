@@ -19,15 +19,9 @@ import { ciMessages } from "./ci.messages";
  */
 async function runTask(componentId: string, task: string, target: string): Promise<number> {
   requireHostTarget(target);
-  const allowed =
-    componentId === "repository"
-      ? [...repositoryTasks]
-      : [...componentTasks, "test:native-service"];
+  const allowed = componentId === "repository" ? repositoryTasks : componentTasks;
   if (!allowed.some((value) => value === task)) {
     throw new Error(ciMessages.unknownTask(task));
-  }
-  if (task === "test:native-service" && componentId !== "project-runtime") {
-    throw new Error(ciMessages.nativeRuntimeOnly);
   }
   const component =
     componentId === "repository"

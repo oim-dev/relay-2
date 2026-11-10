@@ -26,7 +26,13 @@ async function interruptAfterLateWrite(
 ): Promise<ProcessResult> {
   const existingCwd = join(fixture.root, "existing-worktree");
   mkdirSync(existingCwd);
-  writeFileSync(join(existingCwd, "relay.config.json"), JSON.stringify({ version: 1, projectId }));
+  writeFileSync(
+    join(existingCwd, "relay.config.json"),
+    JSON.stringify({
+      version: 1,
+      projectId,
+    }),
+  );
   return runNativeProcess({
     executable: process.execPath,
     args: [join(import.meta.dir, "restoration-late-writer-worker.ts")],
@@ -97,7 +103,6 @@ describe("Restore после принятой записи другого про
       expect(JSON.parse(readFileSync(join(fixture.cwd, "relay.config.json"), "utf8"))).toEqual({
         version: 1,
         projectId,
-        databasePath: join(fixture.home, "projects", projectId, "project.sqlite"),
       });
     } finally {
       await fixture.dispose();

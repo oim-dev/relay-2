@@ -7,7 +7,7 @@ import { flag, integer, positional, string } from "../../input/arguments";
 import { gitSyncCommandMessages as messages } from "../../locales/commands/git-sync";
 import { result } from "../../output/output";
 import type { Result } from "../../output/output.types";
-import { gitSyncClient } from "./client";
+import { gitSyncClient } from "../../execution/git-sync-client";
 import { readGitSyncWaitInput, readResolutionInput, readRestoreInput } from "./input";
 
 const waitArgs = {
@@ -25,7 +25,7 @@ async function request(
 ): Promise<Result> {
   try {
     return result(
-      await gitSyncClient(invocation).request({
+      await gitSyncClient(invocation.runtime).request({
         version: 1,
         action,
         options: invocation.options,
@@ -66,7 +66,7 @@ async function status(invocation: LocalInvocation): Promise<Result> {
     if (wait.requestId !== undefined) {
       throw new CliUsageError(messages.waitRequiresProject);
     }
-    const client = gitSyncClient(invocation);
+    const client = gitSyncClient(invocation.runtime);
     const waitMs = wait.waitMs;
     const statusClient =
       waitMs === undefined
@@ -161,18 +161,14 @@ export function registerGitSyncCommands(registry: CommandRegistry): void {
     run: (i): Promise<Result> => request(i, "request.get", { ...readGitSyncWaitInput(i.values) }),
   });
   registry.group("git-sync auto", messages.auto);
-  registry.group("git-sync worker", messages.worker);
   for (const [path, action, help] of [
     ["auto enable", "auto.enable", messages.autoEnable],
     ["auto disable", "auto.disable", messages.autoDisable],
-    ["worker start", "worker.start", messages.workerStart],
-    ["worker stop", "worker.stop", messages.workerStop],
-    ["worker restart", "worker.restart", messages.workerRestart],
   ] as const) {
     registry.addProcess(`git-sync ${path}`, {
       ...help,
       /**
-       * Передаёт lifecycle выбранного проекта единственному владельцу Git Sync.
+       * Сохраняет режим автоматического обмена выбранного проекта через единый порт.
        */
       run: (i): Promise<Result> => request(i, action),
     });
@@ -218,34 +214,5 @@ export function registerGitSyncCommands(registry: CommandRegistry): void {
      * Передаёт отдельно новый snapshot либо local resume; выбор ID и состояние intent принадлежат Runtime.
      */
     run: (i): Promise<Result> => request(i, "restore", readRestoreInput(i.values)),
-  });
-  registry.group("git-sync service", messages.service);
-  for (const [action, help] of [
-    ["enable", messages.serviceEnable],
-    ["disable", messages.serviceDisable],
-    ["status", messages.serviceStatus],
-  ] as const) {
-    registry.addProcess(`git-sync service ${action}`, {
-      ...help,
-      presentation: "git-sync-status",
-      /**
-       * Native service lifecycle принадлежит Runtime и не открывает проектную БД.
-       */
-      run: async (i): Promise<Result> => result(await gitSyncClient(i).service(action, i.options)),
-    });
-  }
-  registry.addProcess("git-sync supervise", {
-    ...messages.supervise,
-    args: { home: string(messages.home) },
-    /**
-     * Ждёт foreground-процесс; сигналы и потоковый вывод подключены в process runtime.
-     */
-    run: async (i): Promise<Result> => {
-      await gitSyncClient(i).supervise({
-        ...i.options,
-        ...(i.values.home !== undefined ? { home: i.text("home") } : {}),
-      });
-      return { data: null, silent: true };
-    },
   });
 }

@@ -275,7 +275,7 @@ describe("Повторная валидация после WAL BUSY", () => {
       });
       expect(observed.value.details).toMatchObject({
         path: fixture.path,
-        expectedVersion: 4,
+        expectedVersion: 5,
         actualVersion: 1,
       });
       expect(readFileSync(fixture.path)).toEqual(beforeBytes);

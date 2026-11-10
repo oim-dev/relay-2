@@ -40,6 +40,35 @@ export function validateRestorationDatabase(path: string, location: ProjectLocat
 }
 
 /**
+ * После освобождения publication barrier готовит рабочий WAL только по публичному имени.
+ * Сверяет исходный datafile до/после открытия, закрывает своё соединение; поздние commits допустимы.
+ * Отказ не удаляет target/intent: вызывающий оставляет публикацию для явного повторного завершения.
+ */
+export function preparePublishedDatabase(
+  location: ProjectLocation,
+  identity: RestorationFileIdentity,
+): void {
+  if (!sameRestorationFile(identity, observeRestorationFile(location.databasePath).identity)) {
+    throw restorationOwnershipError(location.databasePath);
+  }
+  const database = ProjectDatabase.open(location.databasePath);
+  try {
+    if (database.projectId !== location.projectId) {
+      throw new RelayError(
+        "PROJECT_ID_MISMATCH",
+        projectMessages.projectIdMismatch(location.configPath),
+        4,
+      );
+    }
+  } finally {
+    database.close();
+  }
+  if (!sameRestorationFile(identity, observeRestorationFile(location.databasePath).identity)) {
+    throw restorationOwnershipError(location.databasePath);
+  }
+}
+
+/**
  * Наблюдает единственное private-имя обычного файла без symlink и неизвестных hardlink-алиасов.
  * Принадлежность staging-каталога до вызова доказывает fresh restore либо проверка intent resume.
  */

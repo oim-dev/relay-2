@@ -153,7 +153,7 @@ export class EventsService {
    * Проверяет проект до отправки headers; ошибки открытия остаются обычным JSON envelope.
    */
   async response(projectId: string, signal: AbortSignal): Promise<Response> {
-    const generation = await this.projects.run(projectId, (db) => db.getGeneration());
+    const generation = await this.projects.run(projectId, (db) => db.getGeneration(), "local");
     if (this.closing) {
       throw new RelayError("SERVER_CLOSING", httpMessages.closing);
     }
@@ -212,7 +212,7 @@ export class EventsService {
    */
   private async poll(projectId: string, watch: ProjectWatch): Promise<void> {
     try {
-      const generation = await this.projects.run(projectId, (db) => db.getGeneration());
+      const generation = await this.projects.run(projectId, (db) => db.getGeneration(), "local");
       const changed = watch.generation !== generation;
       if (changed || Date.now() - watch.timestamp >= (this.options.heartbeatIntervalMs ?? 15000)) {
         watch.generation = generation;

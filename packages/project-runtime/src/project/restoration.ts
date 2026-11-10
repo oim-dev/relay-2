@@ -2,11 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { withLocalFileLock } from "@relay/storage";
-import { fileExists, withFileErrors, writeJsonAtomic } from "../configuration/files";
+import { fileExists, withFileErrors } from "../configuration/files";
+import { publishProjectLocation } from "./local-layout";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import type { ProjectLocation } from "./location.types";
 import {
   validateRestorationDatabase,
+  preparePublishedDatabase,
   withRestorationDatabasePublication,
   requirePrivateRestorationFile,
 } from "./restoration-database";
@@ -23,6 +25,7 @@ import {
   selectRestorationTarget,
   requireMatchingRestorationConfig,
   validateRestorationProjectId,
+  withRestorationConfigurationLock,
 } from "./restoration-target";
 import {
   invokeRestorationCallback,
@@ -49,6 +52,22 @@ function requireVacantDatabase(databasePath: string): void {
 }
 
 /**
+ * Проверяет выбранную цель до внешней подготовки: существующие БД/журналы и pending intent дают отказ.
+ * БД не открывается, файлы не создаются и mutex не удерживается; restoreProject повторяет guards при публикации.
+ */
+export function resolveVacantRestorationTarget(
+  options: RuntimeOptions,
+  projectId: string,
+): ProjectLocation {
+  return withFileErrors(() => {
+    const { location } = selectRestorationTarget(options, projectId);
+    requireNoPendingRestoration(location);
+    requireVacantDatabase(location.databasePath);
+    return location;
+  });
+}
+
+/**
  * Материализует проверенный приложением portable snapshot в новую независимую локальную реплику.
  * Callback строго синхронен, создаёт SQLite в переданном staging-пути и закрывает все соединения.
  * Runtime проверяет совместимость/ID, эксклюзивно публикует БД и затем конфиг; готовая БД/WAL/SHM не заменяются.
@@ -57,6 +76,7 @@ function requireVacantDatabase(databasePath: string): void {
  * отказ сохраняет staging/intent и даёт RESTORE_RECOVERY_REQUIRED с расположением recovery-материалов.
  * Прежний intent также даёт эту ошибку до callback, без автоматического resume/adoption: успешный
  * ProjectLocation относится только к материализации текущего вызова, а не к старому fetched snapshot.
+ * Публикации одного config сериализованы независимо от ID, затем захватывается mutex каталога БД.
  */
 export function restoreProject(
   options: RuntimeOptions,
@@ -66,67 +86,70 @@ export function restoreProject(
   return withFileErrors(() => {
     requireSynchronousRestorationCallback(writeDatabase, messages.restoreSynchronous);
     validateRestorationProjectId(projectId);
-    const { location, existingConfig } = selectRestorationTarget(options, projectId);
-    const directory = dirname(location.databasePath);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    return withLocalFileLock(join(directory, ".restore"), () => {
-      requireNoPendingRestoration(location);
-      requireVacantDatabase(location.databasePath);
-      const staging = mkdtempSync(join(directory, ".restore-"));
-      const stagedDatabase = join(staging, "project.sqlite");
-      let publicationStarted = false;
-      let committed = false;
-      let preserveStaging = false;
-      try {
-        invokeRestorationCallback(writeDatabase, stagedDatabase, messages.restoreSynchronous);
-        const databaseIdentity = requirePrivateRestorationFile(stagedDatabase);
-        if (fileExists(`${stagedDatabase}-shm`)) {
-          // Даже readonly WAL-открытие может менять индекс: чужой SHM нельзя передавать SQLite.
-          requirePrivateRestorationFile(`${stagedDatabase}-shm`);
-        }
-        validateRestorationDatabase(stagedDatabase, location);
-        if (existingConfig) {
-          requireMatchingRestorationConfig(location, options);
-        }
+    return withRestorationConfigurationLock(options, () => {
+      const { location, existingConfig } = selectRestorationTarget(options, projectId);
+      const directory = dirname(location.databasePath);
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      return withLocalFileLock(join(directory, ".restore"), () => {
+        requireNoPendingRestoration(location);
         requireVacantDatabase(location.databasePath);
-        withRestorationDatabasePublication(stagedDatabase, () => {
-          requirePrivateRestorationFile(stagedDatabase);
-          requireNoRestorationJournals(stagedDatabase);
+        const staging = mkdtempSync(join(directory, ".restore-"));
+        const stagedDatabase = join(staging, "project.sqlite");
+        let publicationStarted = false;
+        let committed = false;
+        let preserveStaging = false;
+        try {
+          invokeRestorationCallback(writeDatabase, stagedDatabase, messages.restoreSynchronous);
+          const databaseIdentity = requirePrivateRestorationFile(stagedDatabase);
+          if (fileExists(`${stagedDatabase}-shm`)) {
+            // Даже readonly WAL-открытие может менять индекс: чужой SHM нельзя передавать SQLite.
+            requirePrivateRestorationFile(`${stagedDatabase}-shm`);
+          }
+          validateRestorationDatabase(stagedDatabase, location);
+          if (existingConfig) {
+            requireMatchingRestorationConfig(location, options);
+          }
           requireVacantDatabase(location.databasePath);
-          const publication = beginRestorationPublication(location, staging);
-          publicationStarted = true;
-          transferRestorationDatabase(publication);
-          requirePublishedRestorationDatabase(publication);
-        });
-        if (!existingConfig) {
-          mkdirSync(dirname(resolve(location.configPath)), { recursive: true });
-          writeJsonAtomic(location.configPath, { version: 1, projectId }, "create");
+          withRestorationDatabasePublication(stagedDatabase, () => {
+            requirePrivateRestorationFile(stagedDatabase);
+            requireNoRestorationJournals(stagedDatabase);
+            requireVacantDatabase(location.databasePath);
+            const publication = beginRestorationPublication(location, staging);
+            publicationStarted = true;
+            transferRestorationDatabase(publication);
+            requirePublishedRestorationDatabase(publication);
+          });
+          preparePublishedDatabase(location, databaseIdentity);
+          if (!existingConfig) {
+            mkdirSync(dirname(resolve(location.configPath)), { recursive: true });
+            publishProjectLocation(location);
+          }
+          if (
+            !sameRestorationFile(
+              databaseIdentity,
+              observeRestorationFile(location.databasePath).identity,
+            )
+          ) {
+            throw restorationOwnershipError(location.databasePath);
+          }
+          committed = true;
+          return location;
+        } catch (error) {
+          if (publicationStarted) {
+            throw restorationPublicationError(location, staging, "publication-failed", error);
+          }
+          preserveStaging =
+            error instanceof RelayError &&
+            (error.code === "RESTORE_RECOVERY_REQUIRED" || error.code === "RESTORE_DATABASE_OPEN");
+          throw error;
+        } finally {
+          if (committed) {
+            finishRestorationPublication(location, staging);
+          } else if (!publicationStarted && !preserveStaging) {
+            rmSync(staging, { recursive: true, force: true });
+          }
         }
-        if (
-          !sameRestorationFile(
-            databaseIdentity,
-            observeRestorationFile(location.databasePath).identity,
-          )
-        ) {
-          throw restorationOwnershipError(location.databasePath);
-        }
-        committed = true;
-        return location;
-      } catch (error) {
-        if (publicationStarted) {
-          throw restorationPublicationError(location, staging, "publication-failed", error);
-        }
-        preserveStaging =
-          error instanceof RelayError &&
-          (error.code === "RESTORE_RECOVERY_REQUIRED" || error.code === "RESTORE_DATABASE_OPEN");
-        throw error;
-      } finally {
-        if (committed) {
-          finishRestorationPublication(location, staging);
-        } else if (!publicationStarted && !preserveStaging) {
-          rmSync(staging, { recursive: true, force: true });
-        }
-      }
+      });
     });
   });
 }

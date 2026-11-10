@@ -48,7 +48,7 @@ describe("Инициализация и выбор локального прое
     },
   );
 
-  test("init публикует конфиг без databasePath и выбирает созданную базу через home", () => {
+  test("init создаёт БД в home по ID и публикует только переносимый ID в конфиге", () => {
     const { cwd, home } = fixture;
 
     const project = initializeProject({ cwd, home, name: "Первый проект", slug: "first" });
@@ -61,6 +61,7 @@ describe("Инициализация и выбор локального прое
     });
     expect(resolveProject({ cwd, home })).toEqual(project);
     expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
+    expect(readdirSync(join(home, "projects"))).toEqual([project.projectId]);
     withProjectDatabase(project, (database) => {
       expect(database.get("PROJECT")?.data).toEqual({ name: "Первый проект", slug: "first" });
     });
@@ -211,6 +212,8 @@ describe("Инициализация и выбор локального прое
     expect(child.projectId).not.toBe(project.projectId);
     expect(child.configPath).toBe(join(nested, "relay.config.json"));
     expect(readFileSync(project.configPath, "utf8")).toBe(original);
+    expect(child.databasePath).toBe(join(home, "projects", child.projectId, "project.sqlite"));
+    expect(project.databasePath).toBe(join(home, "projects", project.projectId, "project.sqlite"));
     expect(readdirSync(join(home, "projects")).sort()).toEqual(
       [project.projectId, child.projectId].sort(),
     );
@@ -238,7 +241,7 @@ describe("Инициализация и выбор локального прое
     expect(resolveProject({ cwd: nested, home })).toEqual(project);
   });
 
-  test("относительный home определяется cwd при отдельном расположении конфига", () => {
+  test("явный config не меняет размещение БД, а относительный home разрешается от cwd", () => {
     const { cwd, home } = fixture;
 
     const options = { cwd, home: relative(cwd, home), config: "settings/local.json" };
@@ -246,6 +249,7 @@ describe("Инициализация и выбор локального прое
 
     expect(project.configPath).toBe(join(cwd, "settings", "local.json"));
     expect(project.databasePath).toBe(join(home, "projects", project.projectId, "project.sqlite"));
+    expect(readdirSync(join(cwd, "settings"))).toEqual(["local.json"]);
     expect(resolveProject(options)).toEqual(project);
   });
 

@@ -28,7 +28,6 @@ const ciTaskLabels: Readonly<Record<string, string>> = {
   "test:unit:repo": "Тесты инфраструктуры",
   "format:check": "Форматирование",
   "verify:configuration": "Согласованность check и CI",
-  "test:native-service": "Нативные службы",
 };
 
 /**
@@ -50,7 +49,6 @@ export const ciMessages = {
   resultStep: "Проверить все обязательные результаты",
   resultColumns: ["Job", "Результат"],
   failedJobs: "Не прошли обязательные jobs: {jobs}",
-  nativeRuntimeOnly: "Native service принадлежит Runtime",
   taskUsage: "Использование: bun scripts/ci/task.ts <component> <task> <target>",
   taskArguments: "Не заданы component/task/target",
   consumerArguments: "Не заданы параметры потребителя артефактов CI",

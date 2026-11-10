@@ -22,24 +22,10 @@
         "@gunshi/plugin-i18n": "1.0.0-rc.1",
         "@relay/contracts": "workspace:*",
         "@relay/core": "workspace:*",
+        "@relay/git-sync": "workspace:*",
         "@relay/project-runtime": "workspace:*",
         "@relay/storage": "workspace:*",
         "gunshi": "1.0.0-rc.1",
-      },
-      "devDependencies": {
-        "@relay/typescript-config": "workspace:*",
-        "@types/bun": "1.4.3",
-        "typescript": "7.0.2",
-      },
-    },
-    "apps/git-sync": {
-      "name": "@relay/git-sync",
-      "version": "0.0.0",
-      "dependencies": {
-        "@relay/contracts": "workspace:*",
-        "@relay/core": "workspace:*",
-        "@relay/project-runtime": "workspace:*",
-        "@relay/storage": "workspace:*",
       },
       "devDependencies": {
         "@relay/typescript-config": "workspace:*",
@@ -132,6 +118,21 @@
       "version": "0.0.0",
       "dependencies": {
         "@relay/contracts": "workspace:*",
+        "@relay/storage": "workspace:*",
+      },
+      "devDependencies": {
+        "@relay/typescript-config": "workspace:*",
+        "@types/bun": "1.4.3",
+        "typescript": "7.0.2",
+      },
+    },
+    "packages/git-sync": {
+      "name": "@relay/git-sync",
+      "version": "0.0.0",
+      "dependencies": {
+        "@relay/contracts": "workspace:*",
+        "@relay/core": "workspace:*",
+        "@relay/project-runtime": "workspace:*",
         "@relay/storage": "workspace:*",
       },
       "devDependencies": {
@@ -359,7 +360,7 @@
 
     "@relay/core": ["@relay/core@workspace:packages/core"],
 
-    "@relay/git-sync": ["@relay/git-sync@workspace:apps/git-sync"],
+    "@relay/git-sync": ["@relay/git-sync@workspace:packages/git-sync"],
 
     "@relay/project-runtime": ["@relay/project-runtime@workspace:packages/project-runtime"],
 

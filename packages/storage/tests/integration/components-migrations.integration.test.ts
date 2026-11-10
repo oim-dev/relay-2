@@ -21,7 +21,7 @@ const corruptedVersionCases = [
   },
 ] as const;
 
-describe("Сохраняющие переходы к нормализованной v4", () => {
+describe("Сохраняющие переходы к нормализованной схеме с расписанием v5", () => {
   test.each(corruptedVersionCases)(
     "v3 отклоняет повреждение до normalization: $name",
     ({ sql }) => {
@@ -82,7 +82,16 @@ describe("Сохраняющие переходы к нормализованн�
           version === 3 ? raw.query("SELECT * FROM replication_outbox").all() : [];
         const migrated = ProjectDatabase.open(path);
         try {
-          expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+          expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
+          const schedule = migrated.getSynchronizationSchedule();
+          expect(schedule).toEqual({
+            mode: "auto",
+            dirtySince: version === 3 ? 0 : expect.any(Number),
+            lastMutationAt: version === 3 ? 0 : expect.any(Number),
+            nextAttemptAt: 0,
+            lastAttemptAt: null,
+            failures: 0,
+          });
           expect(migrated.getGeneration()).toBe(83);
           for (const record of records) {
             const actual = migrated.get(record.id);
@@ -135,6 +144,7 @@ describe("Сохраняющие переходы к нормализованн�
             expect(reopened.getComponents()).toEqual(parts);
             expect(raw.query("SELECT * FROM replication_outbox").all()).toEqual(outbox);
             expect(reopened.getGeneration()).toBe(83);
+            expect(reopened.getSynchronizationSchedule()).toEqual(schedule);
           } finally {
             reopened.close();
           }

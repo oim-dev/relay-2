@@ -6,11 +6,18 @@ import {
   type ServerContext,
   type ServerProjectStatus,
 } from "@relay/contracts";
-import { openProject, resolveServerScope } from "@relay/project-runtime";
+import {
+  hasProjectGit,
+  openProject,
+  resolveServerScope,
+  synchronizationDueAt,
+} from "@relay/project-runtime";
+import { dirname } from "node:path";
 import type { ProjectDatabase } from "@relay/storage";
 import type { RelayServerOptions } from "../../server.types";
 import { SERVER_OPTIONS } from "../../http/options";
 import { httpMessages } from "../../http/http.messages";
+import { publicError } from "../../http/errors";
 import type { ProjectTarget } from "./project.types";
 
 /**
@@ -41,7 +48,10 @@ export class ProjectsService {
   /**
    * Проверяет область Runtime до listener. Разные физические базы с одним ID отвергает Runtime.
    */
-  constructor(@Inject(SERVER_OPTIONS) options: RelayServerOptions) {
+  constructor(
+    /* Область проекта и необязательный процессный порт автоматического обмена. */
+    @Inject(SERVER_OPTIONS) private readonly options: RelayServerOptions,
+  ) {
     validateActor(options.actor);
     const scope = resolveServerScope(options.runtime);
     this.status = scope.projects.map(({ id, name, slug, path, available, error }) => ({
@@ -93,10 +103,13 @@ export class ProjectsService {
   /**
    * Удерживает проверенное соединение до завершения async операции, включая отказ.
    * SQLite callback-транзакция не охватывает Promise writer; snapshot выбирает конкретный reader.
+   * activity ожидает созревший обмен перед Core; local оставляет диагностику и фоновые чтения локальными.
+   * Ошибка доставки не препятствует предметной операции и не заменяет её исходные guards.
    */
   async run<T>(
     projectId: string,
     action: (database: ProjectDatabase) => T | Promise<T>,
+    mode: "activity" | "local" = "activity",
   ): Promise<T> {
     const target = this.target(projectId);
     const { location, database } = openProject(target.options);
@@ -107,6 +120,23 @@ export class ProjectsService {
           physicalIdentity(location.databasePath) !== target.identity
         ) {
           throw new RelayError("PROJECT_CHANGED", httpMessages.projectChanged, 4);
+        }
+        if (
+          mode === "activity" &&
+          this.options.gitSync !== undefined &&
+          hasProjectGit(dirname(location.configPath)) &&
+          Date.now() >= synchronizationDueAt(database.getSynchronizationSchedule())
+        ) {
+          try {
+            await this.options.gitSync.request({
+              version: 1,
+              action: "auto",
+              options: target.options,
+            });
+          } catch (error) {
+            // Ошибка доставки сохраняется транспортом; локальная предметная операция остаётся доступна.
+            await this.options.synchronizationWarning?.(publicError(error));
+          }
         }
         return await action(database);
       } finally {

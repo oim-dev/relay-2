@@ -7,7 +7,7 @@ import type { ProjectDatabase } from "@relay/storage";
 export interface ProjectLocation {
   /* Постоянный ID проекта, совпадающий в конфигурации и SQLite. */
   projectId: string;
-  /* Абсолютный путь SQLite: стандартный внутри home либо явно переопределённый в конфиге. */
+  /* Абсолютный путь SQLite: home/projects/<ID>/project.sqlite либо явный databasePath. */
   databasePath: string;
   /* Абсолютный путь выбранного конфига; явная символьная ссылка сохраняется. */
   configPath: string;

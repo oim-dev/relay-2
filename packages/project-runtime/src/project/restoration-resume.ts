@@ -2,14 +2,15 @@ import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { RelayError } from "@relay/contracts";
 import { withLocalFileLock } from "@relay/storage";
-import { fileExists, withFileErrors, writeJsonAtomic } from "../configuration/files";
+import { fileExists, withFileErrors } from "../configuration/files";
+import { publishProjectLocation } from "./local-layout";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import type { ProjectLocation } from "./location.types";
 import {
   validateRestorationDatabase,
+  preparePublishedDatabase,
   withRestorationDatabasePublication,
 } from "./restoration-database";
-import { defaultProjectDatabasePath } from "./database-path";
 import { requireMatchingRestorationConfig, selectRestorationTarget } from "./restoration-target";
 import {
   invokeRestorationCallback,
@@ -56,6 +57,7 @@ function requirePrivateStaging(publication: RestorationPublication): void {
  * Проверяет схему/ID и предметное состояние через строго синхронный read-only callback.
  * Живой target проверяется только под публичным именем; private staging проходит SQLite-barrier.
  * Callback обязан закрыть свои соединения и не запускать отложенные writers.
+ * После освобождения private barrier подготавливает WAL по public target, сохраняя intent при отказе.
  */
 function validatePreservedDatabase(
   publication: RestorationPublication,
@@ -90,6 +92,7 @@ function validatePreservedDatabase(
   if (publicTarget) {
     requireNoRestorationJournals(stagedPath);
     requirePublishedRestorationDatabase(publication);
+    preparePublishedDatabase(location, publication.databaseIdentity);
     return;
   }
   requirePrivateStaging(publication);
@@ -106,6 +109,7 @@ function validatePreservedDatabase(
     }
   });
   requirePublishedRestorationDatabase(publication);
+  preparePublishedDatabase(location, publication.databaseIdentity);
 }
 
 /**
@@ -119,17 +123,7 @@ function publishResumedConfiguration(location: ProjectLocation, options: Runtime
   }
   mkdirSync(dirname(location.configPath), { recursive: true });
   try {
-    writeJsonAtomic(
-      location.configPath,
-      {
-        version: 1,
-        projectId: location.projectId,
-        ...(location.databasePath === defaultProjectDatabasePath(options, location.projectId)
-          ? {}
-          : { databasePath: location.databasePath }),
-      },
-      "create",
-    );
+    publishProjectLocation(location);
   } catch (error) {
     if (!(error instanceof RelayError && error.code === "CONFIG_EXISTS")) {
       throw error;

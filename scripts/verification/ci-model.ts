@@ -115,17 +115,6 @@ export function ciJobs(components: readonly Component[]): Readonly<Record<string
   };
   for (const target of targets) {
     jobs[jobId("product", "e2e", target.id)] = taskJob("repository", "test:e2e:product", target);
-    const runnerVariable = { linux: "LINUX", darwin: "MACOS", win32: "WINDOWS" }[target.platform];
-    jobs[jobId("native_services", target.id)] = {
-      name: ciMessages.targetGroup(target.id),
-      needs: artifactNeeds("project-runtime", "test:native-service", target.id),
-      uses: "./.github/workflows/native-services.yml",
-      with: {
-        target: target.id,
-        runner: `\${{ vars.RELAY_NATIVE_${runnerVariable}_RUNNER || '${target.runner}' }}`,
-        "display-name": ciMessages.taskName("project-runtime", "test:native-service"),
-      },
-    };
   }
   jobs.result = {
     name: ciMessages.resultJob,

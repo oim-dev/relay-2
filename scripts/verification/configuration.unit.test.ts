@@ -27,6 +27,15 @@ const invalidLeafCommands = [
   },
 ];
 
+const unplannedSuites = [
+  { component: "core", task: "test:smoke", command: "bun test ./tests/smoke" },
+  {
+    component: "project-runtime",
+    task: "test:native-service",
+    command: "bun test ./tests/native/service.native.test.ts",
+  },
+];
+
 const workflowChanges = [
   {
     name: "Types повторно запускает lint вместо typecheck",
@@ -85,7 +94,7 @@ async function withWorkflowCopies(run: (root: string) => Promise<void>): Promise
   try {
     const directory = join(root, ".github/workflows");
     await mkdir(directory, { recursive: true });
-    for (const name of ["task.yml", "quality.yml", "native-services.yml"]) {
+    for (const name of ["task.yml", "quality.yml"]) {
       await copyFile(join(repository, ".github/workflows", name), join(directory, name));
     }
     await run(root);
@@ -111,18 +120,21 @@ describe("Отклонение расхождений обязательного
     },
   );
 
-  test("новый обычный набор не остаётся вне локального и CI-каталога", async () => {
-    const component = (await readComponents()).find((entry) => entry.id === "core");
-    if (!component) {
-      throw new Error("Отсутствует Core");
-    }
-    const changed = {
-      ...component,
-      scripts: { ...component.scripts, "test:smoke": "bun test ./tests/smoke" },
-    };
+  test.each(unplannedSuites)(
+    "$component/$task не разрешается вне локального и CI-каталога",
+    async ({ component: componentId, task, command }) => {
+      const component = (await readComponents()).find((entry) => entry.id === componentId);
+      if (!component) {
+        throw new Error(`Отсутствует ${componentId}`);
+      }
+      const changed = {
+        ...component,
+        scripts: { ...component.scripts, [task]: command },
+      };
 
-    await expect(verifyComponents([changed])).rejects.toThrow("нужно включить в общий план");
-  });
+      await expect(verifyComponents([changed])).rejects.toThrow("нужно включить в общий план");
+    },
+  );
 
   test.each(workflowChanges)("$name: локальная сверка отклоняет workflow", async (change) => {
     await withWorkflowCopies(async (root) => {

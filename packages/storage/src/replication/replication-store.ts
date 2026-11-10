@@ -16,6 +16,7 @@ import { readComponents, flushComponentVersions } from "../components/component-
 import { TASK_COMMENT_JSON, TASK_COMMENT_SOURCE } from "../entities/comment-text";
 import { readComponentChanges, readTransitionQueue } from "./replication-transitions";
 import { decodeOutboxChangeset } from "./replication-outbox";
+import { recordSynchronizationMutation } from "../synchronization/schedule";
 import type {
   EntityDeltaRow,
   ReplicationJsonRow,
@@ -282,6 +283,7 @@ export function flushReplicationQueue(connection: Database, baseline = false): v
   connection
     .query("INSERT INTO replication_outbox VALUES(?,?,?)")
     .run(id, sequence, JSON.stringify(changeset));
+  recordSynchronizationMutation(connection, Date.now());
   connection
     .query("UPDATE replication_state SET sequence=?,revision=revision+1 WHERE singleton=1")
     .run(sequence);

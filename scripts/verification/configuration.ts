@@ -46,7 +46,7 @@ function verifyLeafCommands(component: Component): void {
 
 /**
  * Проверяет наличие scripts у реально существующих наборов и запрещает скрытые сборки/чужие тесты.
- * Пустой набор не создаёт зелёный CI job; manual native/extended профили остаются отдельными.
+ * Пустой набор не создаёт зелёный CI job; расширенная репликация остаётся ручным профилем.
  */
 export async function verifyComponents(
   components: readonly Component[],
@@ -60,7 +60,7 @@ export async function verifyComponents(
       if (
         name.startsWith("test:") &&
         !componentTasks.some((task) => task === name) &&
-        !["test:native-service", "test:extended-replication"].includes(name)
+        name !== "test:extended-replication"
       ) {
         throw new Error(verificationMessages.unplannedSuite(component.id, name));
       }
@@ -227,7 +227,6 @@ function requireWorkflowExecution(name: string, workflow: unknown): void {
   const jobNames: Readonly<Record<string, string>> = {
     "task.yml": "execute",
     "quality.yml": "quality",
-    "native-services.yml": "native",
   };
   const jobId = jobNames[name];
   if (
@@ -250,7 +249,7 @@ function requireWorkflowExecution(name: string, workflow: unknown): void {
       TASK: "${{ inputs.task }}",
       TARGET: "${{ inputs.target }}",
     });
-  } else if (name === "quality.yml") {
+  } else {
     requireRunnerStep(job.steps, "name", "Lint", {
       COMPONENT: component,
       TASK: "${{ inputs.component == 'repository' && 'lint:repo' || 'lint' }}",
@@ -265,12 +264,6 @@ function requireWorkflowExecution(name: string, workflow: unknown): void {
       },
       "${{ !cancelled() && steps.setup.outcome == 'success' && steps.restore.outcome == 'success' }}",
     );
-  } else {
-    requireRunnerStep(job.steps, "name", "Проверить настоящий manager и lifecycle службы", {
-      TARGET: "${{ inputs.target }}",
-      CI: "true",
-      RELAY_NATIVE_SERVICE_TESTS: "disposable-runner",
-    });
   }
 }
 
@@ -288,7 +281,6 @@ export async function verifyWorkflowEntrypoints(root = repository): Promise<void
       'bun run ci:task "$COMPONENT" "$TASK" linux-x64',
       'bun run ci:task "$COMPONENT" "$TASK" linux-x64',
     ],
-    "native-services.yml": ['bun run ci:task project-runtime test:native-service "$TARGET"'],
   };
   for (const [name, commands] of Object.entries(expected)) {
     const workflow: unknown = Bun.YAML.parse(

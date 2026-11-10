@@ -42,3 +42,8 @@ export { migrateComponents, enqueueComponentBaseline } from "./components/compon
 export { applyComponentImportDelta } from "./components/component-store";
 export { adaptLegacyChangeset } from "./replication/replication-legacy";
 export { planReplicationImport } from "./replication/replication-import-plan";
+export type {
+  SynchronizationSchedule,
+  SynchronizationAttempt,
+  SynchronizationMode,
+} from "./synchronization/schedule.types";

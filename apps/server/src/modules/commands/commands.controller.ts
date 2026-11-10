@@ -54,10 +54,17 @@ export class CommandsController {
     ) {
       invalidInput("body");
     }
-    return this.projects.run(projectId, async (db) => ({
-      ok: true,
-      data: await new BatchService(db).execute({ version: 1, operations: body.commands }, options),
-    }));
+    return this.projects.run(
+      projectId,
+      async (db) => ({
+        ok: true,
+        data: await new BatchService(db).execute(
+          { version: 1, operations: body.commands },
+          options,
+        ),
+      }),
+      options.check === true ? "local" : "activity",
+    );
   }
 
   /**
@@ -72,9 +79,13 @@ export class CommandsController {
     if (key === null) {
       invalidInput("operationKey");
     }
-    return this.projects.run(projectId, (db) => ({
-      ok: true,
-      data: new BatchService(db).getResult(key),
-    }));
+    return this.projects.run(
+      projectId,
+      (db) => ({
+        ok: true,
+        data: new BatchService(db).getResult(key),
+      }),
+      "local",
+    );
   }
 }

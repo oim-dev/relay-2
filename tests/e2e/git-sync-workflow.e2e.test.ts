@@ -8,7 +8,7 @@ import {
 } from "../../apps/cli/tests/e2e/helpers/workflow-fixture";
 import type { RecordResult } from "../../apps/cli/tests/e2e/helpers/workflow-fixture.types";
 
-const branch = "relay-data-v2";
+const branch = "relay-data";
 const bodyA = "# Запись A\n\n  Значимые пробелы\n\n```sh\necho '$HOME'\n```\n";
 const bodyB = "# Запись B\n\nТочный текст: ё, λ, 🚀.\n\nСтрока с двумя пробелами.  \n";
 const mergedBody = "# Общий документ\n\nТело независимо изменено участником B.\n";
@@ -77,7 +77,6 @@ describe("Git-обмен через поставляемые бинарники"
         "--actor",
         "participant-a",
       ]);
-      fixture.ownWorker(a);
       await invokeSuccess(a, a.cwd, [
         "git-sync",
         "connect",
@@ -87,8 +86,8 @@ describe("Git-обмен через поставляемые бинарники"
         branch,
       ]);
       await invokeSuccess(a, a.cwd, ["git-sync", "now"]);
+      await invokeSuccess(a, a.cwd, ["git-sync", "auto", "disable"]);
       expect(await readdir(b.cwd)).toEqual([]);
-      fixture.ownWorker(b);
       await invokeSuccess(b, b.cwd, [
         "git-sync",
         "restore",
@@ -98,6 +97,7 @@ describe("Git-обмен через поставляемые бинарники"
         branch,
       ]);
       const restoredProject = await invokeRecord(b, b.cwd, ["project", "get"]);
+      await invokeSuccess(b, b.cwd, ["git-sync", "auto", "disable"]);
       expect(restoredProject.id).toBe(project.id);
       const commonA = await invokeRecord(a, a.cwd, ["document", "get", common.id]);
       const commonB = await invokeRecord(b, b.cwd, ["document", "get", common.id]);

@@ -1,8 +1,9 @@
 # Relay Server
 
 Server открывает локальный проект или workspace независимых SQLite-баз через REST API
-и Web. Записи выполняет текущий Core, а обмен с Git запускается отдельным клиентом
-Project Runtime. HTTP-приложение построено на NestJS 12 и Fastify 5 под Bun.
+и Web. Записи выполняет текущий Core. Созревший автоматический Git-обмен запускается
+через CLI процессным клиентом Runtime, используя общее SQLite-расписание и mutex.
+HTTP-приложение построено на NestJS 12 и Fastify 5 под Bun.
 
 ## Запуск
 
@@ -14,7 +15,8 @@ bun run build:server
 
 Сборка сначала получает Vite dist приложения `apps/web` под Node.js, затем упаковывает Server, guardian
 и все Web-ресурсы в `apps/server/dist/relay-server`. Для запуска бинарника Bun, Node.js
-и `node_modules` не нужны. Для Git-обмена нужен Git и совместимый `relay-git-sync`.
+и `node_modules` не нужны. Для Git-обмена нужны Git и совместимый `relay` со встроенным пакетом обмена.
+Server обнаруживает CLI рядом, через PATH или dev-checkout; явный override — `RELAY_CLI_BIN`.
 
 Из каталога уже инициализированного проекта или workspace:
 
@@ -126,6 +128,12 @@ SPA fallback разрешён только HTML navigation на известны
 - `.../events` — SSE `connected/changed/storage-error/heartbeat`. Общий watcher проекта
   читает только generation и замечает внешние commits CLI/Git Sync. Connected/reconnect
   требуют перечитать данные; поток не является журналом гарантированной доставки.
+
+Предметные REST-чтения и записи проверяют созревший debounce до Core snapshot/команды.
+Исходные guards формы сохраняются: принятый remote может вызвать обычный конфликт версии.
+Сетевой отказ не отменяет локальную мутацию; процессный Server пишет отдельный JSON warning
+в stderr. Встраиваемый Server может получить его через `synchronizationWarning`.
+Status/doctor, receipts, `batch check`, SSE и health автоматический обмен не запускают.
 
 Host/Origin guard защищает весь HTTP, включая статику и preflight. JSON pipe принимает
 только `application/json`, ограничивает тело 8 MiB до предметной записи, проверяет строгий

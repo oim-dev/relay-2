@@ -6,7 +6,7 @@ import {
   type GitSyncConflictResolutionResult,
   type GitSyncRequest,
 } from "@relay/contracts";
-import type { GitSyncClient } from "@relay/project-runtime";
+import { requestClient as diagnosticPort } from "../../../tests/helpers/git-sync-client";
 import { withCliFixture } from "../../../tests/integration/helpers/cli-fixture";
 import { invokeIsolatedCli } from "../../../tests/helpers/help";
 
@@ -29,27 +29,6 @@ const diagnostics: GitSyncConflictList = {
   ],
   blocked: [blocked],
 };
-
-/**
- * Подменяет только процессный порт: диагностика не вызывает lifecycle службы или foreground.
- */
-function diagnosticPort(request: GitSyncClient["request"]): GitSyncClient {
-  return {
-    request,
-    /**
-     * Обнаруживает неожиданный native service вызов.
-     */
-    service: async (): Promise<never> => {
-      throw new Error("Диагностика не устанавливает службу");
-    },
-    /**
-     * Обнаруживает неожиданный запуск supervisor.
-     */
-    supervise: async (): Promise<never> => {
-      throw new Error("Диагностика не запускает foreground");
-    },
-  };
-}
 
 describe("CLI: отдельная диагностика blocked", () => {
   test("list сохраняет оба явных массива в JSON и отдельные подписи в тексте", async () => {

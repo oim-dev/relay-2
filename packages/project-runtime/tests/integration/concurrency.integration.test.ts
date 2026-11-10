@@ -46,7 +46,7 @@ describe("Инициализация в отдельных процессах", 
   });
 
   test(
-    "без home используется homedir/.relay, а RELAY_HOME остаётся ответственностью CLI",
+    "без home init использует HOME/.relay и не читает RELAY_HOME напрямую",
     async () => {
       const { cwd, root } = fixture;
       const expectedHome = join(root, "user");
@@ -58,8 +58,13 @@ describe("Инициализация в отдельных процессах", 
           HOME: expectedHome,
           USERPROFILE: expectedHome,
           RELAY_HOME: join(root, "ignored"),
+          // Без XDG_CACHE_HOME Bun иначе создаёт ~/.bun/install/cache ещё до вызова Runtime.
+          XDG_CACHE_HOME: undefined,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
         },
       );
+      expect(existsSync(expectedHome)).toBe(false);
+      expect(existsSync(join(root, "ignored"))).toBe(false);
 
       worker.child.send("go");
       const { exit, stdout, stderr } = await worker.result;
@@ -73,6 +78,8 @@ describe("Инициализация в отдельных процессах", 
       expect(result.location.databasePath).toBe(
         join(expectedHome, ".relay", "projects", result.location.projectId, "project.sqlite"),
       );
+      expect(readdirSync(expectedHome)).toEqual([".relay"]);
+      expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
       expect(existsSync(join(root, "ignored"))).toBe(false);
     },
     INITIALIZATION_TEST_TIMEOUT_MS,
@@ -82,27 +89,34 @@ describe("Инициализация в отдельных процессах", 
     "два одновременных init публикуют один проект и не оставляют лишнюю базу",
     async () => {
       const { cwd, home } = fixture;
-      const workers = await Promise.all([
-        startInitializationWorker(fixture, { cwd, home, synchronizePublication: true }),
-        startInitializationWorker(fixture, { cwd, home, synchronizePublication: true }),
-      ]);
+      const first = await startInitializationWorker(fixture, {
+        cwd,
+        home,
+        synchronizePublication: true,
+      });
+      const second = await startInitializationWorker(fixture, { cwd, home });
+      const workers = [first, second];
 
-      // Обе базы уже созданы: проигрыш обязан произойти при публикации, а не ранней проверке пути.
-      expect(readdirSync(join(home, "projects"))).toHaveLength(2);
-      expect(existsSync(join(cwd, "relay.config.json"))).toBe(false);
-      for (const worker of workers) {
-        worker.child.stdin.write("g");
-        await worker.child.stdin.end();
+      // Первый участник уже создал private staging, но ещё не публиковал общий config.
+      const attempts = readdirSync(join(home, "projects"));
+      expect(attempts).toHaveLength(1);
+      const firstId = attempts[0];
+      if (!firstId) {
+        throw new Error("Не найден каталог первой попытки init");
       }
+      expect(
+        readdirSync(join(home, "projects", firstId)).filter((name) => name.startsWith(".restore-")),
+      ).toHaveLength(1);
+      expect(existsSync(join(cwd, "relay.config.json"))).toBe(false);
+      second.child.send("go");
+      first.child.stdin.write("g");
+      await first.child.stdin.end();
       const completed = await Promise.all(workers.map((worker) => worker.result));
 
       const results = completed.map(({ exit, stdout, stderr }) => {
         expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
         return readInitializationResult(stdout);
       });
-      expect(results.filter((result) => result.kind === "failure")).toEqual([
-        { kind: "failure", code: "CONFIG_EXISTS" },
-      ]);
       const successes = results.filter((result) => result.kind === "success");
       expect(successes).toHaveLength(1);
       const winner = successes[0];
@@ -110,8 +124,18 @@ describe("Инициализация в отдельных процессах", 
         throw new Error("Ни одна попытка init не создала проект");
       }
       const { location } = winner;
+      expect({
+        failures: results.filter((result) => result.kind === "failure"),
+        projectDirectories: readdirSync(join(home, "projects")).sort(),
+      }).toEqual({
+        failures: [{ kind: "failure", code: "CONFIG_EXISTS" }],
+        projectDirectories: [location.projectId],
+      });
       expect(resolveProject({ cwd, home })).toEqual(location);
-      expect(readdirSync(join(home, "projects"))).toEqual([location.projectId]);
+      expect(readdirSync(dirname(location.databasePath)).sort()).toEqual([
+        ".restore.lock.sqlite",
+        "project.sqlite",
+      ]);
       expect(readdirSync(cwd)).toEqual(["relay.config.json"]);
     },
     INITIALIZATION_TEST_TIMEOUT_MS,

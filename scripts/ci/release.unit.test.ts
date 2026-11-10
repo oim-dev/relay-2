@@ -24,13 +24,10 @@ const source = { repository: "owner/relay", sha };
 const expectedNames = [
   `cli-linux-x64-${sha}`,
   `server-linux-x64-${sha}`,
-  `git-sync-linux-x64-${sha}`,
   `cli-windows-x64-${sha}`,
   `server-windows-x64-${sha}`,
-  `git-sync-windows-x64-${sha}`,
   `cli-macos-arm64-${sha}`,
   `server-macos-arm64-${sha}`,
-  `git-sync-macos-arm64-${sha}`,
 ] as const;
 const completeArtifacts: readonly ReleaseArtifact[] = expectedNames.map((name, index) => ({
   id: index + 1,
@@ -142,7 +139,7 @@ async function createReleaseBundles(context: ArtifactContext, downloads: string)
 }
 
 describe("Источник release", () => {
-  test("поставка требует три бинарника для каждого закреплённого target без SDK и Web", () => {
+  test("поставка требует только CLI и Server для каждого закреплённого target", () => {
     const names = requiredReleaseNames(sha);
 
     expect(names).toEqual(expectedNames);
@@ -159,7 +156,7 @@ describe("Источник release", () => {
 
     const selected = selectReleaseArtifacts([log, ...completeArtifacts], sha, now);
 
-    expect(selected).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(selected).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   test.each(incompleteArtifacts)(
@@ -250,7 +247,7 @@ describe("Источник release", () => {
 
     const ids = await selectReleaseRunArtifacts(source, 55, 55, api, now);
 
-    expect(ids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(ids).toEqual([1, 2, 3, 4, 5, 6]);
     await expect(selectReleaseRunArtifacts(source, 55, 56, api, now)).rejects.toThrow(
       "Release требует успешный ci.yml",
     );
@@ -273,7 +270,7 @@ describe("Источник release", () => {
 
     const ids = await selectReleaseRunArtifacts(source, 42, 99, api, now);
 
-    expect(ids).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(ids).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   test("rerun producer во время выбора artifacts не выдаёт ещё не проверенные IDs для release", async () => {
@@ -339,14 +336,13 @@ describe("Согласованность выпуска", () => {
 
   // Release публикуется с ubuntu-24.04; Windows FS не моделирует executable mode POSIX-бинарников.
   test.skipIf(process.platform === "win32")(
-    "реальные tar bundles дают по три бинарника и проверяемые checksums без пересборки",
+    "реальные tar bundles дают CLI и Server с проверяемыми checksums без пересборки",
     async () => {
       await withArtifactFixture(async ({ context, downloads }) => {
         for (const path of [
           "package.json",
           "apps/cli/package.json",
           "apps/server/package.json",
-          "apps/git-sync/package.json",
           "apps/web/package.json",
         ]) {
           await writeArtifactFixtureFile(
@@ -372,13 +368,12 @@ describe("Согласованность выпуска", () => {
           const listing = await runArtifactTar(["-tzf", archive]);
           const expected =
             target.id === "windows-x64"
-              ? (["relay.exe", "relay-server.exe", "relay-git-sync.exe"] as const)
-              : (["relay", "relay-server", "relay-git-sync"] as const);
+              ? (["relay.exe", "relay-server.exe"] as const)
+              : (["relay", "relay-server"] as const);
           expect(listing.trim().split("\n")).toEqual([...expected]);
           const expectedContents = [
             { name: expected[0], content: `${target.id}/cli\n` },
             { name: expected[1], content: `${target.id}/server\n` },
-            { name: expected[2], content: `${target.id}/git-sync\n` },
           ];
           for (const entry of expectedContents) {
             expect(await runArtifactTar(["-xOzf", archive, entry.name])).toBe(entry.content);

@@ -421,7 +421,7 @@
       git_sync_test_process_linux_x64:
         {
           name: Linux x64,
-          needs: [git_sync_build_linux_x64],
+          needs: [cli_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -436,7 +436,7 @@
       git_sync_test_process_windows_x64:
         {
           name: Windows x64,
-          needs: [git_sync_build_windows_x64],
+          needs: [cli_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -451,7 +451,7 @@
       git_sync_test_process_macos_arm64:
         {
           name: macOS ARM64,
-          needs: [git_sync_build_macos_arm64],
+          needs: [cli_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -1005,48 +1005,6 @@
               display-name: Server · Сборка,
             },
         },
-      git_sync_build_linux_x64:
-        {
-          name: Linux x64,
-          uses: ./.github/workflows/task.yml,
-          with:
-            {
-              component: git-sync,
-              task: build,
-              target: linux-x64,
-              runner: ubuntu-24.04,
-              artifact-key: build,
-              display-name: Git Sync · Сборка,
-            },
-        },
-      git_sync_build_windows_x64:
-        {
-          name: Windows x64,
-          uses: ./.github/workflows/task.yml,
-          with:
-            {
-              component: git-sync,
-              task: build,
-              target: windows-x64,
-              runner: windows-2025,
-              artifact-key: build,
-              display-name: Git Sync · Сборка,
-            },
-        },
-      git_sync_build_macos_arm64:
-        {
-          name: macOS ARM64,
-          uses: ./.github/workflows/task.yml,
-          with:
-            {
-              component: git-sync,
-              task: build,
-              target: macos-arm64,
-              runner: macos-latest,
-              artifact-key: build,
-              display-name: Git Sync · Сборка,
-            },
-        },
       repository_format_check:
         {
           name: Общие,
@@ -1099,13 +1057,7 @@
       product_e2e_linux_x64:
         {
           name: Linux x64,
-          needs:
-            [
-              rest_sdk_build_portable,
-              cli_build_linux_x64,
-              server_build_linux_x64,
-              git_sync_build_linux_x64,
-            ],
+          needs: [rest_sdk_build_portable, cli_build_linux_x64, server_build_linux_x64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -1117,28 +1069,10 @@
               display-name: Repository · Сквозные тесты продукта,
             },
         },
-      native_services_linux_x64:
-        {
-          name: Linux x64,
-          needs: [cli_build_linux_x64, git_sync_build_linux_x64],
-          uses: ./.github/workflows/native-services.yml,
-          with:
-            {
-              target: linux-x64,
-              runner: "${{ vars.RELAY_NATIVE_LINUX_RUNNER || 'ubuntu-24.04' }}",
-              display-name: Project Runtime · Нативные службы,
-            },
-        },
       product_e2e_windows_x64:
         {
           name: Windows x64,
-          needs:
-            [
-              rest_sdk_build_portable,
-              cli_build_windows_x64,
-              server_build_windows_x64,
-              git_sync_build_windows_x64,
-            ],
+          needs: [rest_sdk_build_portable, cli_build_windows_x64, server_build_windows_x64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -1150,28 +1084,10 @@
               display-name: Repository · Сквозные тесты продукта,
             },
         },
-      native_services_windows_x64:
-        {
-          name: Windows x64,
-          needs: [cli_build_windows_x64, git_sync_build_windows_x64],
-          uses: ./.github/workflows/native-services.yml,
-          with:
-            {
-              target: windows-x64,
-              runner: "${{ vars.RELAY_NATIVE_WINDOWS_RUNNER || 'windows-2025' }}",
-              display-name: Project Runtime · Нативные службы,
-            },
-        },
       product_e2e_macos_arm64:
         {
           name: macOS ARM64,
-          needs:
-            [
-              rest_sdk_build_portable,
-              cli_build_macos_arm64,
-              server_build_macos_arm64,
-              git_sync_build_macos_arm64,
-            ],
+          needs: [rest_sdk_build_portable, cli_build_macos_arm64, server_build_macos_arm64],
           uses: ./.github/workflows/task.yml,
           with:
             {
@@ -1181,18 +1097,6 @@
               runner: macos-latest,
               artifact-key: test-e2e-product,
               display-name: Repository · Сквозные тесты продукта,
-            },
-        },
-      native_services_macos_arm64:
-        {
-          name: macOS ARM64,
-          needs: [cli_build_macos_arm64, git_sync_build_macos_arm64],
-          uses: ./.github/workflows/native-services.yml,
-          with:
-            {
-              target: macos-arm64,
-              runner: "${{ vars.RELAY_NATIVE_MACOS_RUNNER || 'macos-latest' }}",
-              display-name: Project Runtime · Нативные службы,
             },
         },
       result:
@@ -1274,19 +1178,13 @@
               server_build_linux_x64,
               server_build_windows_x64,
               server_build_macos_arm64,
-              git_sync_build_linux_x64,
-              git_sync_build_windows_x64,
-              git_sync_build_macos_arm64,
               repository_format_check,
               repository_verify_configuration,
               repository_test_unit_repo,
               repository_quality,
               product_e2e_linux_x64,
-              native_services_linux_x64,
               product_e2e_windows_x64,
-              native_services_windows_x64,
               product_e2e_macos_arm64,
-              native_services_macos_arm64,
             ],
           if: "${{ always() }}",
           runs-on: ubuntu-24.04,

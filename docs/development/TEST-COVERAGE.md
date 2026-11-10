@@ -48,7 +48,16 @@ ID и пути базы из конфига выбранного проекта.
 Для конфига без `databasePath` [Runtime](../../packages/project-runtime/tests/integration/runtime.integration.test.ts)
 проверяет стандартное размещение через `home`, относительный корень, перенос home,
 отказ без создания отсутствующей базы и приоритет явного пути. Новый init сохраняет
-только `version` и `projectId`. [Workspace](../../packages/project-runtime/tests/integration/workspace.integration.test.ts)
+только ID, размещая SQLite в home. [Домашнее хранилище](../../packages/project-runtime/tests/integration/home-layout.integration.test.ts)
+проверяет сохранность существующих файлов, общий путь БД при сохранении алиаса конфига
+и независимость локальных реплик в разных home.
+[Общее хранилище worktree](../../packages/git-sync/tests/integration/home-worktrees.integration.test.ts)
+проверяет одну SQLite/реплику и служебный checkout для разных worktree, конкурентный обмен,
+удаление вызывавшего worktree и отказ присвоения транспорта независимым клоном.
+[Восстановление в home](../../packages/git-sync/tests/integration/home-restoration.integration.test.ts)
+проверяет выбор пути после получения ID, независимый replicaId без echo и освобождение
+обоих владельцев со staging при отмене до публикации SQLite.
+[Workspace](../../packages/project-runtime/tests/integration/workspace.integration.test.ts)
 проверяет передачу относительного home при регистрации и выборе такого проекта;
 [конфигурация](../../packages/project-runtime/tests/integration/config.integration.test.ts)
 отвергает неверный явный путь и ID, который не может служить отдельным именем каталога.
@@ -77,10 +86,17 @@ ID и пути базы из конфига выбранного проекта.
 владельца, restore сохраняет точные части без echo, readonly не исправляет повреждение.
 [Миграции частей](../../packages/storage/tests/integration/components-migrations.integration.test.ts)
 сверяют карточки, scoped ID, алиасы, комментарии, квитанции и исходный outbox после
-перехода схем v2/v3 к v4 и повторного открытия.
+перехода схем v2/v3 к текущей v5 и повторного открытия.
 [Durable outbox](../../packages/storage/tests/integration/replication.integration.test.ts)
 защищает общий rollback записи и changeset, savepoint, receipt-only изменения и сохранение
 исходных bytes/digest исторических пакетов при миграции.
+
+[Расписание](../../packages/storage/tests/integration/synchronization-schedule.integration.test.ts)
+связывает отметки с commit/rollback changeset, receipt-only записью и повторным открытием;
+импорт не создаёт echo. [Режим](../../packages/storage/tests/integration/synchronization-mode.integration.test.ts)
+сохраняет auto/manual без изменения generation/outbox и проверяет локальность выбора при bootstrap.
+[Миграция v4](../../packages/storage/tests/integration/synchronization-migrations.integration.test.ts)
+сохраняет исходные payload/ID/digest и откатывает частичный DDL.
 
 ## Предметные сценарии Core
 
@@ -298,14 +314,6 @@ quiesce/readback Disabled до End, единый монотонный stop budge
 [Файловый формат службы](../../packages/project-runtime/src/native/user-service/files.unit.test.ts)
 проверяет реальные байты UTF-8/UTF-16LE и BOM независимо от наличия системного менеджера.
 
-[Native lifecycle](../../packages/project-runtime/tests/native/service.native.test.ts)
-защищает enable/re-enable, новый instance после самостоятельного restart native manager,
-disable и сохранность проекта до cleanup fixture. Windows-сценарий дополнительно проверяет
-восстановление после подтверждённого exit 0 и фактическую repetition-конфигурацию одной task.
-Это отдельный opt-in набор;
-условия запуска и границы проверки login/reboot — в
-[организации нативной приёмки](../../tests/README.md#отдельная-нативная-приёмка-служб).
-
 [Общий guardian](../../packages/project-runtime/tests/integration/process-guardian.integration.test.ts)
 проверяет bounded drain, deadline/отмену после выхода непосредственного ребёнка,
 передачу stdin lease, согласованность протокола и ограничения захвата вывода.
@@ -329,6 +337,10 @@ sync validator, чтение и следующая запись на том же
 после crash при удалении private marker или staging-каталога. Cleanup failure сохраняет
 причину и companion-файл; после полной уборки `RESTORE_NOT_PENDING` не вызывает validator
 и не меняет БД.
+
+[Готовность public WAL](../../packages/project-runtime/tests/integration/published-wal.integration.test.ts)
+проверяет init/restore/resume до healing-open и первое чтение при чужом writer-lock.
+Отказ подготовки WAL сохраняет БД и intent без config и допускает явный resume.
 
 ### Lifecycle Server
 
@@ -385,6 +397,11 @@ JSON 413 для обычного и потокового body без запис�
 [Git Sync](../../apps/server/tests/integration/git-sync.integration.test.ts) подтверждает
 `refresh:false`, unknown/null/partial, отдельное чтение исхода `now` и точную корреляцию requestId.
 
+[Lazy sync HTTP](../../apps/server/tests/integration/synchronization.integration.test.ts)
+подтверждает порядок auto → Core, сохранность исходного CAS и успешную mutation/receipt
+при отказе доставки. [Локальные исключения](../../apps/server/tests/integration/synchronization-local.integration.test.ts)
+защищают отсутствие обмена в status/doctor/receipt/check и настоящем SSE до heartbeat.
+
 [Генерация](../../apps/server/tests/integration/openapi-generation.integration.test.ts)
 сопоставляет OpenAPI с реальными Nest-маршрутами и защищает связи схем.
 [Команды](../../apps/server/tests/integration/openapi-commands.integration.test.ts) сверяют
@@ -424,79 +441,108 @@ HTTP-утверждения не означают автоматизирован
 перетаскивание, сохранение draft при навигации и работа поставляемых assets принимаются
 отдельно по [руководству Web](../../apps/web/docs/DEVELOPMENT.md#проверки-изменения).
 
-## Git-транспорт и постоянный обмен
+## Git-транспорт и одноразовый обмен
 
-[Snapshot codec](../../apps/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip
+[Project worktree](../../packages/git-sync/tests/integration/project-worktree.integration.test.ts)
+проверяет orphan-публикацию из пустого Git, сохранность code HEAD/index, две реальные
+SQLite-реплики, владеющий marker и отказ чужих/dirty/ignored файлов. Там же проверяются
+перенос, новый replicaId, отмена attempt, checkout filters/CRLF и реальный pushInsteadOf.
+[Одноразовые процессы](../../packages/git-sync/tests/process/local-sync.process.test.ts)
+связывают позднее добавление origin с доставкой outbox, bypass now, auto/manual до remote,
+межпроцессное объединение auto, сериализацию now и восстановление независимой реплики.
+[Формула срока](../../packages/project-runtime/src/git-sync/schedule.unit.test.ts)
+проверяет тишину, max-wait, polling пустой очереди и приоритет backoff/manual.
+
+[Библиотечный вход](../../packages/git-sync/tests/integration/library-execution.integration.test.ts)
+проверяет независимые снимки среды параллельных обращений, копирование запроса до I/O
+и сохранение корреляции при предварительной отмене.
+[Lifetime обращения](../../packages/git-sync/tests/integration/library-lifetime-review.integration.test.ts)
+защищает позднюю отмену чтения и discovery, захват исходного signal, прерывание control HTTP,
+завершение реального ребёнка и cleanup helper/endpoint до возврата, отказ публикации SQLite
+после отмены restore и закрытие соединения при ошибке setup. Дополнительные cases
+отделяют source cleanup failure от отмены и запрещают private Core bootstrap после abort.
+[Классификация отмены](../../packages/git-sync/src/execution/failure.unit.test.ts)
+сохраняет первую причину caller/deadline, исходный cause и защищённые ошибки транспорта,
+включая составной cleanup failure.
+[Очистка обращения](../../packages/git-sync/tests/integration/cleanup-lifecycle.integration.test.ts)
+сохраняет первичный и native cleanup-отказы staging/endpoint после отмены, проверяет
+закрытие listener, освобождение mutex и сохранность outbox.
+[Границы owner](../../packages/git-sync/tests/integration/owner-lifetime.integration.test.ts)
+не освобождают mutex до подтверждения stop при отказе публикации endpoint и не принимают
+новый operationId после отмены на границе получения владельца.
+[Source helper](../../packages/git-sync/tests/integration/source-runtime-errors.integration.test.ts)
+сохраняет compiler/cleanup causes отклонённой сборки и типизированный отказ подготовки
+guardian вместо обычной отмены.
+[Контекст и terminal outcome](../../packages/git-sync/tests/integration/exchange-state.integration.test.ts)
+различает физический transport context и config-алиас, останавливает auto по deadline
+и сохраняет установленный push-unknown с корреляцией вместо ошибки прерванного ожидания.
+
+[Snapshot codec](../../packages/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip
 первичных записей и частей, безопасные имена, exact Markdown и lossless JSON для
 непарных surrogate. Отдельно сохраняются исходный publication payload и исторические
 ревизии; неизвестный путь и несовместимый manifest отвергаются.
-[Markdown-дескрипторы](../../apps/git-sync/src/snapshot/codec-markdown.unit.test.ts)
+[Markdown-дескрипторы](../../packages/git-sync/src/snapshot/codec-markdown.unit.test.ts)
 проверяют точные bytes/SHA-256, BOM/CRLF/empty/noLF, lone-surrogate fallback и отказ
-неверных descriptors/UTF-8. [JSON layout](../../apps/git-sync/src/snapshot/json.unit.test.ts)
+неверных descriptors/UTF-8. [JSON layout](../../packages/git-sync/src/snapshot/json.unit.test.ts)
 защищает lex UTF-16 pretty bytes, numeric-like ключи и duplicate keys.
-[Смешанная история layout 1→2](../../apps/git-sync/tests/integration/snapshot-layout.integration.test.ts)
+[Смешанная история layout 1→2](../../packages/git-sync/tests/integration/snapshot-layout.integration.test.ts)
 сохраняет DTO, версии, source digests и прежние Git bytes без idle echo. Отказ Core
 для layout 1 либо byte digest для layout 2 не меняет SQLite, pending и accepted cursor.
-[История Git](../../apps/git-sync/tests/integration/git-history.integration.test.ts)
+[История Git](../../packages/git-sync/tests/integration/git-history.integration.test.ts)
 проверяет пакетное чтение промежуточных snapshots, общие неизменённые blobs и отказ
 нелинейной истории/symlink до применения.
 
-[Транспорт](../../apps/git-sync/tests/integration/transport.integration.test.ts)
+[Транспорт](../../packages/git-sync/tests/integration/transport.integration.test.ts)
 содержит проверки переиспользования неизменного HEAD, ограниченного числа Git-процессов
 для набора файлов, отказа подмены origin/общей истории и безопасного чтения дерева.
-[Гонки](../../apps/git-sync/tests/integration/races.integration.test.ts) согласуют
+[Гонки](../../packages/git-sync/tests/integration/races.integration.test.ts) согласуют
 два push одного HEAD и локальную запись во время fetch.
-[Обмен](../../apps/git-sync/tests/integration/exchange.integration.test.ts)
+[Обмен](../../packages/git-sync/tests/integration/exchange.integration.test.ts)
 проверяет потерянный push-ответ, точный набор ack, сохранение позднего pending,
 отсутствие echo, различие ahead и числа changeset, refresh без push/импорта.
-[Bounded transport](../../apps/git-sync/tests/integration/bounded-publication.integration.test.ts)
+[Bounded transport](../../packages/git-sync/tests/integration/bounded-publication.integration.test.ts)
 проверяет durable cursor через reopen, пустые окна без ACK, независимый хвост,
 реальный pending после одного успешного окна и full diagnostics без hot blocked scan.
-[Повторы окна](../../apps/git-sync/tests/integration/bounded-retry.integration.test.ts)
+[Повторы окна](../../packages/git-sync/tests/integration/bounded-retry.integration.test.ts)
 сохраняют исходный cursor/source IDs при non-FF и неизвестном push, а затем принимают
 только фактически опубликованные proofs.
-[Аварийное восстановление](../../apps/git-sync/tests/integration/crash-recovery.integration.test.ts)
+[Аварийное восстановление](../../packages/git-sync/tests/integration/crash-recovery.integration.test.ts)
 использует реальные выходы процессов после Git commit до push, после принятого push
 до локального ack и после SQLite accept до обновления Git cursor. Проверяются исходные
 IDs/digests, receipt/comment, поздний pending, локальные версии/части и отсутствие echo
 после нового открытия и replay.
 
-[SSH-профиль](../../apps/git-sync/tests/integration/ssh-profile.integration.test.ts)
+[SSH-профиль](../../packages/git-sync/tests/integration/ssh-profile.integration.test.ts)
 проверяет foreground-настройки стандартного клиента с сохранением identity/proxy,
 точный custom `core.sshCommand` и отсутствие записи maintenance overrides в config.
-[Платформенный Git-синтаксис](../../apps/git-sync/src/transport/native/select.unit.test.ts)
+[Private SSH-роль CLI](../../packages/git-sync/tests/process/ssh-profile.process.test.ts)
+проверяет встроенный dispatcher/guardian, точный scratch-dir, чистый JSON stdout
+и удаление probe-конфигураций с контролируемым SSH executable.
+[Платформенный Git-синтаксис](../../packages/git-sync/src/transport/native/select.unit.test.ts)
 различает drive/UNC-пути Windows и scp remote, проверяет точное sh-кодирование
 собственных argv с backslash, Unicode и апострофом. Чистые OS-варианты дополняют
 реальный Git/SSH, не подменяя его исполнение на целевой платформе.
-[Guardian компонента](../../apps/git-sync/tests/process/guardian.process.test.ts)
+[Guardian CLI](../../packages/git-sync/tests/process/guardian.process.test.ts)
 проверяет обычный exit, output budget, deadline, отмену и смерть владельца до cleanup
 fixture. На Linux/Windows отдельные случаи используют subreaper/Job Object;
 для macOS остаётся управляемая собственная process group без обещания atomic fork-barrier.
-[Foreground lease](../../apps/git-sync/tests/process/foreground-lease.process.test.ts)
-связывает SIGKILL прокси с остановкой supervisor/workers и сохранением desired state.
-[Resume компонента](../../apps/git-sync/tests/process/restore-resume.process.test.ts)
+[Resume](../../packages/git-sync/tests/process/restore-resume.process.test.ts)
 сохраняет поздний документ и исходный replication status в прежней БД. Git-trap
 проверяет отсутствие обращения к Git, результат содержит `sourceCheckpoint: null`;
 сочетание resume с remote отклоняется.
 
-[Процессный протокол](../../apps/git-sync/tests/process/protocol.process.test.ts)
-проверяет оболочку бинарника, отказ несовместимой версии, restore без предварительной
-БД и одного responsive worker, который получает remote при пустом локальном outbox.
-[Supervisor](../../apps/git-sync/tests/process/supervisor.process.test.ts)
-проверяет обслуживание независимых проектов при общем бюджете, недоступный соседний
-origin, новый instance после crash и сохранение desired `stopped`. После настоящего
-перезапуска supervisor барьер ждёт reconcile нового instance: остановленная БД
-не получает worker, другой проект продолжает публикацию без нового start/auto enable;
-настройки и данные сохранены.
+[Процессный протокол](../../packages/git-sync/tests/process/protocol.process.test.ts)
+проверяет CLI private envelope, отказ несовместимой версии, restore без предварительной
+БД и приём remote при пустом локальном outbox через одноразовый обмен.
 
-[Исход операции](../../apps/git-sync/tests/process/control-outcome.process.test.ts)
+[Исход операции](../../packages/git-sync/tests/integration/control-outcome.integration.test.ts)
 отделяет wait deadline от readiness, читает live и terminal состояния одного ID
-и не выполняет повторный submit после expiry. [Долгий now](../../apps/git-sync/tests/process/long-now.process.test.ts)
-удерживает реальный Git-запрос до барьера: worker остаётся отзывчивым, а request.get
-позже возвращает completed. Платформенные условия этого сценария не подменяются
+и не выполняет повторный submit после expiry. [Долгий now](../../packages/git-sync/tests/process/long-now.process.test.ts)
+удерживает реальный Git-запрос до барьера: deadline отдельного wait не отменяет owner,
+а request.get после его выхода читает completed. Платформенные условия не подменяются
 результатом запуска на другой ОС.
 
-[Штатный командный сценарий](../../apps/git-sync/tests/integration/team-replication.integration.test.ts)
+[Штатный командный сценарий](../../packages/git-sync/tests/integration/team-replication.integration.test.ts)
 проверяет обмен на трёх независимых SQLite/Git-репликах: два активных писателя и offline-return третьего
 участника. Он связывает коллизии ключей, настоящий non-FF, потерянный ответ push,
 crash с поздней записью, whole-batch конфликт с зависимым и независимым продолжением,
@@ -504,13 +550,13 @@ crash с поздней записью, whole-batch конфликт с зави
 первоначальные receipts, публичный порядок комментариев и полный набор source proofs.
 Idle всех участников сохраняет локальные CAS, поколения, очереди и Git HEAD без echo.
 Подробные варианты этих гарантий остаются в адресных двухрепличных проверках владельцев.
-Общая [волна recovery](../../apps/git-sync/tests/integration/team-helpers/team-recovery.ts)
+Общая [волна recovery](../../packages/git-sync/tests/integration/team-helpers/team-recovery.ts)
 сохраняет позднюю запись между materialization и push и исходный outbox после аварии;
 новый процесс публикует те же IDs/digests, которые затем входят в общий exact proof set.
 
 Расширенные сценарии на 50 репликах входят только в
 [ручной extended-набор](../../tests/README.md#расширенная-проверка-репликации):
-[Git Sync](../../apps/git-sync/tests/extended/team-replication.extended.test.ts) сохраняет
+[Git Sync](../../packages/git-sync/tests/extended/team-replication.extended.test.ts) сохраняет
 полные командные волны с конфликтом и recovery,
 [Core](../../packages/core/tests/extended/replication-team.extended.test.ts) — независимые
 offline-назначения, точный набор ID и отсутствие echo после приёма. Их размер не задаёт
@@ -554,10 +600,17 @@ offline-назначения, точный набор ID и отсутствие
 следующая страница сохраняет размер и возвращает оставшуюся регистрацию.
 
 [Контекст проекта CLI](../../apps/cli/tests/integration/project-context.integration.test.ts)
-проверяет выбор базы без `databasePath` через `RELAY_HOME` и резервный `HOME/.relay`,
+проверяет размещение по ID через `RELAY_HOME` и резервный `HOME/.relay`,
 а `config get` возвращает исходные поля и вычисленное расположение в метаданных.
 Тот же набор отвергает пустой/пробельный RELAY_HOME без создания файлов и проверяет
 относительный корень при явном расположении конфига.
+
+[Lazy sync CLI](../../apps/cli/tests/integration/synchronization.integration.test.ts)
+проверяет обмен до обычного/versioned чтения, исходный CAS одиночной команды и batch,
+отдельную warning при успешной локальной записи, раннюю валидацию get и отсутствие сети
+в диагностике/help/check. [Private wire](../../apps/cli/src/app/git-sync-request.unit.test.ts)
+сохраняет точные options/requestId и ошибки без recursive auto или повторного submit;
+процессная граница проверяется также в [бинарнике CLI](../../apps/cli/tests/process/git-sync.process.test.ts).
 
 [Фильтры знаний CLI](../../apps/cli/tests/integration/knowledge-filters.integration.test.ts)
 проверяют тип приложения, доску приложения, FI/SI выбранной фичи и документы без раздела.
@@ -694,8 +747,8 @@ JSON-файла, применение через stdin, локальные сс�
 - [Конфликт](../../tests/e2e/git-sync-conflict.e2e.test.ts) проверяет `now` с exit 4 /
   `SYNC_CONFLICT`, успешный status, полные base/local/remote и доставку решения
   с прочитанным fingerprint.
-- [Worker](../../tests/e2e/git-sync-worker.e2e.test.ts) проверяет readiness `auto enable`,
-  тот же instance из следующего CLI-процесса и сохранение stopped без ложного retry.
+- [Режим обмена](../../tests/e2e/git-sync-mode.e2e.test.ts) проверяет manual/auto,
+  явную доставку через now и отсутствие постоянного владельца после завершения команды.
 
 [CLI/Server/Web/Git Sync](../../tests/e2e/server-web-workflow.e2e.test.ts) запрашивает
 встроенный HTML и production JavaScript у копии `relay-server` вне каталога сборки.

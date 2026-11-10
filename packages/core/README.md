@@ -69,8 +69,8 @@ callback SQLite-транзакции строго синхронен. Испол
 Точные условия отдельных операций описаны в документации их публичного API.
 Предметные изменения для публикации проходят через этот executor. Обычная низкоуровневая
 Storage mutation без именованной ленты model 2 не считается публикуемой предметной
-командой; закрытый initial/legacy контракт описан в
-[разделе changeset ТЗ](../../GIT-SYNC-IMPLEMENTATION-SPEC.md#6-changeset-и-durable-outbox).
+командой. Формат рассчитанных переходов описан в
+[переносимых контрактах](../contracts/src/replication/replication.types.ts).
 
 Обычные `get`, `list`, `listPage` и расчёты прогресса возвращают результат синхронно.
 `QueryService.getMany` читает выбранные адреса из одного снимка,
@@ -172,8 +172,8 @@ overlay и возвращает ограниченный preview первого 
 `bootstrap(snapshot, options?)` восстанавливает новую базу, созданную через
 `ProjectDatabase.createReplica(path, projectId)`, с исходными ID и квитанциями.
 Точные условия проверки цепочки, результаты и ошибки описаны в
-[контрактах API](src/replication/replication.ts). Полные требования обмена и границы
-последующих адаптеров заданы в [ТЗ синхронизации](../../GIT-SYNC-IMPLEMENTATION-SPEC.md).
+[контрактах API](src/replication/replication.ts). Границы обмена и последующих адаптеров
+описаны в [архитектуре Relay](../../docs/ARCHITECTURE.md#git-обмен-и-идентичность-сущностей).
 
 ## Работа над пакетом
 

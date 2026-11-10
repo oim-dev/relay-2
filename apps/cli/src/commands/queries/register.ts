@@ -10,6 +10,23 @@ import { queryCommandMessages as messages } from "../../locales/commands/queries
 import { result } from "../../output/output";
 import type { Result } from "../../output/output.types";
 import type { CommandRegistry } from "../../execution/registry";
+import type { Invocation } from "../../execution/invocation";
+
+/**
+ * Проверяет весь адресный набор до выбора БД, включая адреса после разделителя --.
+ */
+function getReferences(invocation: Invocation): string[] {
+  const positionals = invocation.values.refs ?? [];
+  if (
+    !Array.isArray(positionals) ||
+    !positionals.every((ref): ref is string => typeof ref === "string")
+  ) {
+    throw new CliUsageError(messages.references);
+  }
+  const refs = [...positionals, ...invocation.context.rest];
+  validateEntityReadRequest(refs);
+  return refs;
+}
 
 /**
  * Добавляет адресное чтение, поиск и диагностику проекта в реестр без чтения базы.
@@ -37,20 +54,13 @@ export function registerQueryCommands(registry: CommandRegistry): void {
     },
     presentation: "entity-read",
     execution: "service-read",
+    beforeProject: getReferences,
     /**
      * Объединяет адреса до и после -- и проверяет общий размер до открытия БД.
      * Без metadata используется прежний sync read; versioned read возвращает projection и версии одного anchor.
      */
     run: async (i): Promise<Result> => {
-      const positionals = i.values.refs ?? [];
-      if (
-        !Array.isArray(positionals) ||
-        !positionals.every((ref): ref is string => typeof ref === "string")
-      ) {
-        throw new CliUsageError(messages.references);
-      }
-      const refs = [...positionals, ...i.context.rest];
-      validateEntityReadRequest(refs);
+      const refs = getReferences(i);
       const options = { summary: i.values.summary === true };
       let data: EntityReadResult;
       let versions: VersionedEntityReadResult["versions"] | undefined;

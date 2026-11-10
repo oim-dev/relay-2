@@ -25,7 +25,7 @@
 компонента указывается `"@relay/typescript-config": "workspace:*"` и TypeScript;
 для профиля Bun также нужен `@types/bun`.
 
-Например, [конфигурация Git Sync](../../apps/git-sync/tsconfig.json) подключает
+Например, [конфигурация Git Sync](../../packages/git-sync/tsconfig.json) подключает
 профиль Bun и выбирает свои исходники и тесты:
 
 ```json

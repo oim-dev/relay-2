@@ -9,7 +9,9 @@ import type { VersionFlagPair } from "../input/version-precondition.types";
 /**
  * Общая CLI-схема действия; предметный способ исполнения определяется отдельным вариантом Action.
  */
-export interface ActionDefinition extends CommandHelp {
+export interface ActionDefinition<TInvocation> extends CommandHelp {
+  /* Проверка адресного/локального ввода до выбора БД и автоматического обмена; без предметного I/O. */
+  readonly beforeProject?: (invocation: TInvocation) => void;
   /* Позиционные и управляющие параметры, не входящие в объект предметных полей. */
   readonly args?: Args;
   /* Источники предметных полей; их чтение заканчивается до открытия БД. */
@@ -23,7 +25,7 @@ export interface ActionDefinition extends CommandHelp {
 /**
  * Строго синхронное чтение в снимке либо локальный сценарий, самостоятельно владеющий ресурсами.
  */
-export interface SynchronousAction<TInvocation> extends ActionDefinition {
+export interface SynchronousAction<TInvocation> extends ActionDefinition<TInvocation> {
   /* Отсутствие режима отличает синхронное чтение/локальную операцию от предметного writer. */
   readonly mode?: never;
   /* Локальный сценарий не требует проектной БД и самостоятельно владеет своими ресурсами. */
@@ -37,7 +39,7 @@ export interface SynchronousAction<TInvocation> extends ActionDefinition {
 /**
  * Предметная мутация через async Core executor; внешней SQLite-транзакции у CLI нет.
  */
-export interface MutationAction<TInvocation> extends ActionDefinition {
+export interface MutationAction<TInvocation> extends ActionDefinition<TInvocation> {
   /* create проверяет автора; update требует хотя бы одно исходное предусловие владельца. */
   readonly mode: "create" | "update";
   /* Предметные writers используют проектное соединение и не являются локальными FS-сценариями. */
@@ -54,7 +56,7 @@ export interface MutationAction<TInvocation> extends ActionDefinition {
  * Асинхронное составное чтение с собственной согласованностью Core и рабочим Invocation.
  * Его Promise никогда не исполняется внутри синхронного SQLite snapshot CLI.
  */
-export interface ServiceReadAction<TInvocation> extends ActionDefinition {
+export interface ServiceReadAction<TInvocation> extends ActionDefinition<TInvocation> {
   /* Чтение не требует автора и не создаёт execution context записи. */
   readonly mode?: never;
   /* Ресурсом проектного соединения до settlement владеет Invocation. */

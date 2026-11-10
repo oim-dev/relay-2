@@ -24,15 +24,16 @@ export class ProjectDatabaseFixture {
   private readonly connections: ProjectDatabase[] = [];
 
   /**
-   * Резервирует изолированный каталог; вызывающий обязан вызвать close даже после отказа теста.
+   * Резервирует изолированный каталог в выбранной области артефактов текущей даты.
+   * Вызывающий обязан вызвать close даже после отказа теста.
    */
-  constructor(name = "database") {
+  constructor(name = "database", artifactsArea = "style-refactor") {
     const artifacts = resolve(
       import.meta.dir,
       "../../../../..",
       ".artifacts",
       new Date().toISOString().slice(0, 10),
-      "style-refactor",
+      artifactsArea,
     );
     mkdirSync(artifacts, { recursive: true });
     this.directory = mkdtempSync(join(artifacts, `storage-${name}-`));

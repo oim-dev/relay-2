@@ -429,7 +429,10 @@ describe("Явное продолжение публикации restore", () =>
       mkdirSync(existingCwd);
       writeFileSync(
         join(existingCwd, "relay.config.json"),
-        JSON.stringify({ version: 1, projectId }),
+        JSON.stringify({
+          version: 1,
+          projectId,
+        }),
       );
       const failed = await runNativeProcess({
         executable: process.execPath,

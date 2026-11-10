@@ -6,6 +6,7 @@ import {
   type HttpGitSyncStatus,
 } from "@relay/contracts";
 import { withServer, apiError } from "./fixture";
+import { prepareDueSynchronization } from "./synchronization-fixture";
 
 const status: HttpGitSyncStatus = {
   connected: true,
@@ -71,12 +72,17 @@ describe("Nest → текущий Git Sync Runtime", () => {
     const calls: GitSyncRequest[] = [];
     await withServer(
       async ({ client, location }) => {
+        prepareDueSynchronization(location);
+
         expect((await client.read(location.projectId, "gitSyncStatus", {})).data).toEqual(status);
         expect(calls).toHaveLength(1);
         expect(calls[0]).toMatchObject({ version: 1, action: "status", input: { refresh: false } });
       },
       {
         gitSync: {
+          /**
+           * Возвращает cached-статус, сохраняя весь список вызовов для обнаружения лишнего auto.
+           */
           request: async (request) => {
             calls.push(request);
             return structuredClone(status);
@@ -117,6 +123,8 @@ describe("Nest → текущий Git Sync Runtime", () => {
     const timestamp = "2026-10-25T00:00:00.000Z";
     await withServer(
       async ({ client, location }) => {
+        prepareDueSynchronization(location);
+
         const result = await client.gitSyncNow(location.projectId);
         expect(result.data).toEqual({
           version: 1,
@@ -139,6 +147,9 @@ describe("Nest → текущий Git Sync Runtime", () => {
       },
       {
         gitSync: {
+          /**
+           * Связывает явный now с retained outcome; незаявленный auto останется в calls.
+           */
           request: async (request) => {
             calls.push(request);
             if (request.action === "now") {

@@ -1,387 +1,354 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { KnowledgeService } from "@relay/core";
+import { initializeWorkspace, registerProject } from "@relay/project-runtime";
+import { arrayValue, objectValue, stringValue } from "../integration/helpers/responses";
 import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { join, resolve } from "node:path";
-import { nativeExecutableName, runNativeProcess } from "@relay/project-runtime";
-import type { GitSyncFixtureReady } from "./git-sync-process.types";
-import { waitForFixtureExit } from "./native/linux/process-observation";
-import { terminateLinuxGroup } from "./native/linux/process-tree";
+  addProjectOrigin,
+  makeProjectSyncDue,
+  withGitSyncCli,
+  withSyncDatabase,
+} from "./git-sync-process";
 
-const artifacts = resolve(
-  import.meta.dir,
-  "../../../../.artifacts",
-  new Date().toISOString().slice(0, 10),
-  "git-sync-implementation/cli-runtime",
-);
-const relay = resolve(import.meta.dir, "../../dist", nativeExecutableName("relay"));
-const componentSource = `
-import {writeFileSync} from 'node:fs';
-if (process.argv.includes('--version')) { console.log('0.0.0'); process.exit(0); }
-if (process.argv.includes('--request')) {
-  const request = JSON.parse(await Bun.stdin.text());
-  if (request.input?.requestId && request.input?.operationId) { console.log(JSON.stringify({version:1,ok:false,error:{code:'DUPLICATE_SUBMIT',message:'Повторный submit вместо wait',exitCode:2}})); process.exitCode=2; }
-  else if (request.action === 'request.get') { console.log(JSON.stringify({version:1,ok:true,data:{version:1,requestId:request.input.requestId,instance:null,state:'unknown'}})); }
-  else if (request.action === 'now' && request.input?.waitMs === 1) { const id=request.input.requestId ?? request.input.operationId; console.log(JSON.stringify({version:1,ok:false,error:{code:'GIT_SYNC_WAIT_TIMEOUT',message:'Запрос принят',exitCode:4,details:{requestId:id,state:'running'}}})); process.exitCode=4; }
-  else if (request.action === 'now') { console.log(JSON.stringify({version:1,ok:false,error:{code:'REMOTE_OFFLINE',message:'Нет сети',exitCode:7,details:{remote:'origin'}}})); process.exitCode=7; }
-  else { console.log(JSON.stringify({version:1,ok:true,data:request})); }
-} else if (process.argv.includes('supervise')) {
-  process.on('SIGTERM',()=>{writeFileSync(process.env.STOP_FILE,'SIGTERM');process.exit(0);});
-  const server=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return Response.json({pid:process.pid,lease:process.argv.includes('--parent-lease'),stdinEnded:process.stdin.readableEnded});}});
-  if(process.argv.includes('--parent-lease')) {
-    process.stdin.on('end',()=>{writeFileSync(process.env.STOP_FILE,JSON.stringify({reason:'stdin-eof',pid:process.pid,cwd:process.cwd(),argv:process.argv.slice(2),executable:process.execPath}));process.exit(0);});
-    process.stdin.resume();
-  }
-  console.log(JSON.stringify({ready:true,pid:process.pid,port:server.port}));
-}
-`;
+const entrances = [
+  { name: "публичная команда", wire: false },
+  { name: "private wire", wire: true },
+] as const;
 
 /**
- * Читает готовность из настоящего stdout прокси с deadline; не завершает процессы вместо сценария.
+ * Извлекает argv фактически запущенных Git-процессов из штатного trace2, не подменяя транспорт.
  */
-function proxyReadiness(child: ChildProcessWithoutNullStreams): Promise<GitSyncFixtureReady> {
-  return new Promise((resolveReady, reject) => {
-    let text = "";
-    const timeout = setTimeout(
-      () => reject(new Error("Не получена готовность fixture supervisor")),
-      5000,
-    );
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      text += chunk;
-      if (!text.includes("\n")) {
-        return;
-      }
-      clearTimeout(timeout);
-      try {
-        const value: unknown = JSON.parse(text.slice(0, text.indexOf("\n")));
-        if (
-          !value ||
-          typeof value !== "object" ||
-          !("pid" in value) ||
-          typeof value.pid !== "number" ||
-          !("port" in value) ||
-          typeof value.port !== "number"
-        ) {
-          throw new Error("Неверная готовность fixture");
-        }
-        resolveReady({ pid: value.pid, port: value.port });
-      } catch (error) {
-        reject(error);
-      }
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("exit", () => {
-      clearTimeout(timeout);
-      reject(new Error("CLI завершилась до проверки готовности"));
-    });
-  });
-}
-
-/**
- * Собирает неизменяемый fixture-компонент рядом с изолированным home; реальные службы не используются.
- */
-async function withComponentFixture(
-  run: (root: string, binary: string) => Promise<void>,
-): Promise<void> {
-  mkdirSync(artifacts, { recursive: true });
-  const root = mkdtempSync(join(artifacts, "cli-component-"));
-  const source = join(root, "fixture.ts");
-  const binary = join(root, nativeExecutableName("компонент sync"));
-  writeFileSync(source, componentSource);
-  try {
-    const build = await runNativeProcess({
-      executable: process.execPath,
-      args: ["build", "--compile", source, "--outfile", binary],
-      cwd: root,
-      env: process.env,
-      timeoutMs: 30_000,
-    });
-    expect(build.exitCode).toBe(0);
-    await run(root, binary);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+function gitCommands(path: string): readonly (readonly string[])[] {
+  if (!existsSync(path)) {
+    return [];
   }
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .flatMap((line) => {
+      const event = objectValue(JSON.parse(line));
+      return event.event === "start" ? [arrayValue(event.argv).map(stringValue)] : [];
+    });
 }
 
-describe("Git Sync в собранной CLI", () => {
-  test("timeout выдаёт заранее назначенный ID, recovery/query не добавляют новый submit", async () => {
-    await withComponentFixture(async (root, binary) => {
-      const env = {
-        ...process.env,
-        HOME: root,
-        USERPROFILE: root,
-        RELAY_HOME: join(root, "data"),
-        RELAY_GIT_SYNC_BIN: binary,
-      };
-      const first = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "now", "--wait-ms", "1", "--format", "json"],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
-      expect(first.exitCode).toBe(4);
-      const error = JSON.parse(first.stderr).error;
-      expect(error).toMatchObject({ code: "GIT_SYNC_WAIT_TIMEOUT", details: { state: "running" } });
-      const id: unknown = error.details.requestId;
-      if (typeof id !== "string" || !id) {
-        throw new Error("Потерян ID принятого запроса");
-      }
+describe("Git Sync внутри настоящего CLI", () => {
+  test("connect сохраняет буквальный remote из argv и создаёт linked worktree без публикации", async () => {
+    await withGitSyncCli(async (fixture) => {
+      const pending = await withSyncDatabase(
+        fixture.location,
+        (db) => db.getReplicationStatus().pending,
+      );
 
-      const waited = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "now", "--request-id", id, "--wait-ms", "1", "--format", "json"],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
-      const query = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "request", "get", id, "--format", "json"],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
+      const response = await fixture.invoke([
+        "git-sync",
+        "connect",
+        "--remote",
+        fixture.remote,
+        "--branch",
+        "relay-data",
+        "--format",
+        "json",
+      ]);
 
-      expect(waited).toMatchObject({ exitCode: 4, stdout: "" });
-      expect(JSON.parse(waited.stderr).error).toMatchObject({
-        code: "GIT_SYNC_WAIT_TIMEOUT",
-        details: { requestId: id, state: "running" },
-      });
-      expect(query).toMatchObject({ exitCode: 0, stderr: "" });
-      expect(JSON.parse(query.stdout)).toEqual({
+      expect(response).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(response.stdout)).toMatchObject({
         ok: true,
-        data: { version: 1, requestId: id, instance: null, state: "unknown" },
+        data: {
+          projectId: fixture.location.projectId,
+          connected: true,
+          branch: "relay-data",
+          pending: { changesets: pending },
+        },
       });
+      expect(await fixture.git(fixture.options.cwd, ["remote", "get-url", "origin"])).toBe(
+        fixture.remote,
+      );
+      expect(
+        await fixture.git(join(dirname(fixture.location.databasePath), "data"), [
+          "symbolic-ref",
+          "--short",
+          "HEAD",
+        ]),
+      ).toBe("relay-data");
+      expect(await fixture.git(fixture.options.cwd, ["symbolic-ref", "--short", "HEAD"])).toBe(
+        "main",
+      );
+      expect(
+        await fixture.git(fixture.remote, [
+          "for-each-ref",
+          "--format=%(objectname)",
+          "refs/heads/relay-data",
+        ]),
+      ).toBe("");
+      expect(
+        await withSyncDatabase(fixture.location, (db) => db.getReplicationStatus().pending),
+      ).toBe(pending);
     });
   }, 40_000);
 
-  test("бинарник передаёт stdin/argv без shell и сохраняет процессную ошибку в JSON stderr", async () => {
-    await withComponentFixture(async (root, binary) => {
-      const env = {
-        ...process.env,
-        HOME: root,
-        USERPROFILE: root,
-        RELAY_HOME: join(root, "data"),
-        RELAY_GIT_SYNC_BIN: binary,
-      };
-      const connected = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "connect", "--remote", "путь с пробелом $(literal)", "--format", "json"],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
-      const failed = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "now", "--format", "json"],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
-      const resumed = await runNativeProcess({
-        executable: relay,
-        args: [
-          "git-sync",
-          "restore",
-          "--resume",
-          "--project-id",
-          "saved-project",
-          "--format",
-          "json",
-        ],
-        cwd: root,
-        env,
-        timeoutMs: 5000,
-      });
-      const rejectedSources = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "restore", "--resume", "--remote", "origin", "--format", "json"],
-        cwd: root,
-        env: { ...env, RELAY_GIT_SYNC_BIN: join(root, "missing-component") },
-        timeoutMs: 5000,
-      });
-      const resumeHelp = await runNativeProcess({
-        executable: relay,
-        args: ["git-sync", "restore", "--resume", "--help"],
-        cwd: root,
-        env: { ...env, RELAY_GIT_SYNC_BIN: join(root, "missing-component") },
-        timeoutMs: 5000,
-      });
-
-      expect(connected.exitCode).toBe(0);
-      expect(connected.stderr).toBe("");
-      expect(JSON.parse(connected.stdout)).toEqual({
-        ok: true,
-        data: {
+  test.each(entrances)(
+    "$name: status выбирает workspace-проект и не запускает созревший auto",
+    async ({ wire }) => {
+      await withGitSyncCli(async (fixture) => {
+        await addProjectOrigin(fixture);
+        const workspace = join(fixture.root, "workspace");
+        const caller = join(fixture.root, "caller");
+        mkdirSync(caller);
+        initializeWorkspace({ ...fixture.options, cwd: workspace });
+        registerProject({ ...fixture.options, cwd: workspace }, "commerce", fixture.options.cwd);
+        makeProjectSyncDue(fixture.location);
+        const before = await withSyncDatabase(fixture.location, (db) => ({
+          pending: db.getReplicationStatus().pending,
+          schedule: db.getSynchronizationSchedule(),
+        }));
+        const request = {
           version: 1,
-          action: "connect",
-          options: { cwd: root, home: join(root, "data") },
-          input: { remote: "путь с пробелом $(literal)" },
-        },
-      });
-      expect(failed.exitCode).toBe(7);
-      expect(failed.stdout).toBe("");
-      expect(JSON.parse(failed.stderr)).toEqual({
-        ok: false,
-        error: { code: "REMOTE_OFFLINE", message: "Нет сети", details: { remote: "origin" } },
-      });
-      expect(resumed.exitCode).toBe(0);
-      expect(resumed.stderr).toBe("");
-      expect(JSON.parse(resumed.stdout)).toEqual({
-        ok: true,
-        data: {
-          version: 1,
-          action: "restore",
-          options: { cwd: root, home: join(root, "data") },
-          input: { resume: true, projectId: "saved-project" },
-        },
-      });
-      expect(rejectedSources).toMatchObject({ exitCode: 2, stdout: "" });
-      expect(JSON.parse(rejectedSources.stderr).error.code).toBe("INVALID_ARGUMENT");
-      expect(resumeHelp.exitCode).toBe(0);
-      expect(resumeHelp.stderr).toBe("");
-      expect(resumeHelp.stdout).toContain("--project-id");
-    });
-  }, 40_000);
-
-  // POSIX signal semantics проверяются на Linux. Общий child protocol выше выполняется и на Windows/macOS.
-  test.skipIf(process.platform !== "linux")(
-    "SIGTERM CLI доставляется отдельной группе foreground supervisor",
-    async () => {
-      await withComponentFixture(async (root, binary) => {
-        const stopFile = join(root, "stopped.txt");
-        const controller = new AbortController();
-        let componentPid: number | undefined;
-        try {
-          await expect(
-            runNativeProcess({
-              executable: relay,
-              args: ["git-sync", "supervise"],
-              cwd: root,
-              env: {
-                ...process.env,
-                HOME: root,
-                RELAY_HOME: join(root, "data"),
-                RELAY_GIT_SYNC_BIN: binary,
-                STOP_FILE: stopFile,
-              },
-              timeoutMs: 5000,
-              signal: controller.signal,
-              /**
-               * Отмена посылается только после установки обработчика SIGTERM у компонента.
-               */
-              stdout: (text): void => {
-                const ready: unknown = JSON.parse(text);
-                if (
-                  !ready ||
-                  typeof ready !== "object" ||
-                  !("pid" in ready) ||
-                  typeof ready.pid !== "number"
-                ) {
-                  throw new Error("Неверная готовность fixture");
-                }
-                componentPid = ready.pid;
-                controller.abort("SIGTERM");
-              },
-            }),
-          ).rejects.toMatchObject({ code: "GIT_SYNC_CANCELLED", exitCode: 143 });
-
-          expect(readFileSync(stopFile, "utf8")).toBe("SIGTERM");
-          expect(componentPid).toBeDefined();
-        } finally {
-          if (componentPid) {
-            await terminateLinuxGroup(componentPid);
-          }
-        }
-      });
-    },
-    40_000,
-  );
-
-  test.skipIf(process.platform !== "linux")(
-    "SIGKILL только CLI даёт kernel EOF, компонент сам завершает lease и сохраняет файлы",
-    async () => {
-      await withComponentFixture(async (root, binary) => {
-        const home = join(root, "данные supervisor");
-        mkdirSync(home);
-        const sentinel = join(home, "project-data.txt");
-        writeFileSync(sentinel, "Пользовательские данные\r\n  exact  ");
-        const binarySize = statSync(binary).size;
-        const stopFile = join(root, "eof.json");
-        // Нативный spawn без Bun --no-orphans. kill ниже адресует только PID CLI, не её группу/потомков.
-        const proxy = spawn(relay, ["git-sync", "supervise", "--home", home], {
-          cwd: root,
-          env: {
-            ...process.env,
-            HOME: root,
-            USERPROFILE: root,
-            RELAY_CONFIG: undefined,
-            RELAY_HOME: home,
-            RELAY_GIT_SYNC_BIN: binary,
-            STOP_FILE: stopFile,
+          action: "status",
+          options: {
+            ...fixture.options,
+            cwd: workspace,
+            config: "relay.workspace.json",
+            project: "commerce",
           },
-          stdio: ["pipe", "pipe", "pipe"],
-          detached: true,
-        });
-        proxy.stdin.end();
-        let stderr = "";
-        proxy.stderr.setEncoding("utf8");
-        proxy.stderr.on("data", (text: string) => {
-          stderr += text;
-        });
-        const exited = new Promise<NodeJS.Signals | null>((resolveExit, reject) => {
-          proxy.once("error", reject);
-          proxy.once("exit", (_code, signal) => resolveExit(signal));
-        });
-        let componentPid: number | undefined;
-        try {
-          const ready = await proxyReadiness(proxy);
-          componentPid = ready.pid;
-          const health = await fetch(`http://127.0.0.1:${ready.port}/`, {
-            signal: AbortSignal.timeout(2000),
-          });
-          expect(await health.json()).toEqual({ pid: ready.pid, lease: true, stdinEnded: false });
-          expect(existsSync(stopFile)).toBe(false);
+          input: { refresh: false },
+        };
 
-          expect(proxy.kill("SIGKILL")).toBe(true);
-          expect(await exited).toBe("SIGKILL");
-          await waitForFixtureExit(ready.pid);
+        const response = wire
+          ? await fixture.invoke(["--git-sync-request"], JSON.stringify(request), caller)
+          : await fixture.invoke(
+              [
+                "git-sync",
+                "status",
+                "--config",
+                join(workspace, "relay.workspace.json"),
+                "--project",
+                "commerce",
+                "--format",
+                "json",
+              ],
+              undefined,
+              caller,
+            );
 
-          expect(JSON.parse(readFileSync(stopFile, "utf8"))).toEqual({
-            reason: "stdin-eof",
-            pid: ready.pid,
-            cwd: root,
-            argv: ["supervise", "--home", home, "--parent-lease"],
-            executable: binary,
-          });
-          expect(stderr).toBe("");
-          expect(readFileSync(sentinel, "utf8")).toBe("Пользовательские данные\r\n  exact  ");
-          expect(readFileSync(join(root, "fixture.ts"), "utf8")).toBe(componentSource);
-          expect(statSync(binary).size).toBe(binarySize);
-        } finally {
-          // Уборка выполняется после утверждений/ошибки, поэтому не может замаскировать отсутствие EOF shutdown.
-          if (proxy.exitCode === null && proxy.signalCode === null) {
-            proxy.kill("SIGKILL");
-          }
-          await exited;
-          if (componentPid) {
-            await terminateLinuxGroup(componentPid);
-          }
+        expect(response).toMatchObject({ exitCode: 0, stderr: "" });
+        const envelope = objectValue(JSON.parse(response.stdout));
+        expect(envelope.ok).toBe(true);
+        const data = objectValue(envelope.data);
+        const status = wire ? data : objectValue(objectValue(arrayValue(data.items)[0]).data);
+        expect(status).toMatchObject({
+          projectId: fixture.location.projectId,
+          pending: { changesets: before.pending },
+          connected: false,
+        });
+        if (wire) {
+          expect(envelope.version).toBe(1);
+        } else {
+          expect(data).toMatchObject({ scope: "project", items: [{ name: "commerce", ok: true }] });
         }
+        expect(gitCommands(fixture.tracePath)).toEqual([]);
+        expect(existsSync(join(dirname(fixture.location.databasePath), "data"))).toBe(false);
+        expect(
+          await withSyncDatabase(fixture.location, (db) => ({
+            pending: db.getReplicationStatus().pending,
+            schedule: db.getSynchronizationSchedule(),
+          })),
+        ).toEqual(before);
       });
     },
     40_000,
   );
+
+  test("now публикует очередь и возвращает requestId, чтение исхода не отправляет позднюю запись", async () => {
+    await withGitSyncCli(async (fixture) => {
+      await addProjectOrigin(fixture);
+      const document = await withSyncDatabase(fixture.location, (db) =>
+        new KnowledgeService(db).create(
+          "document",
+          { name: "Правила", body: "  Точный Markdown\n\n" },
+          "author",
+        ),
+      );
+
+      const response = await fixture.invoke(["git-sync", "now", "--format", "json"]);
+
+      expect(response).toMatchObject({ exitCode: 0, stderr: "" });
+      const envelope = objectValue(JSON.parse(response.stdout));
+      expect(envelope.ok).toBe(true);
+      const original = objectValue(envelope.data);
+      const requestId = stringValue(original.requestId);
+      expect(requestId).not.toBe("");
+      expect(original).toMatchObject({ pending: { changesets: 0 } });
+      const head = await fixture.git(fixture.remote, ["rev-parse", "refs/heads/relay-data"]);
+      expect(
+        await fixture.git(fixture.remote, ["rev-list", "--count", "refs/heads/relay-data"]),
+      ).toBe("1");
+      expect(
+        await withSyncDatabase(
+          fixture.location,
+          (db) => new KnowledgeService(db).get("document", document.id).data.body,
+        ),
+      ).toBe("  Точный Markdown\n\n");
+
+      const late = await withSyncDatabase(fixture.location, (db) =>
+        new KnowledgeService(db).create(
+          "document",
+          { name: "Поздний", body: "Не публиковать при чтении outcome" },
+          "author",
+        ),
+      );
+      makeProjectSyncDue(fixture.location);
+      // Новая запись и dirty worktree делают любой ошибочный повтор обмена наблюдаемым.
+      const manifest = join(dirname(fixture.location.databasePath), "data", "manifest.json");
+      writeFileSync(manifest, "не перезаписывать\n");
+      rmSync(fixture.tracePath, { force: true });
+
+      const query = await fixture.invoke([
+        "git-sync",
+        "request",
+        "get",
+        requestId,
+        "--format",
+        "json",
+      ]);
+      const waited = await fixture.invoke([
+        "git-sync",
+        "now",
+        "--request-id",
+        requestId,
+        "--wait-ms",
+        "1000",
+        "--format",
+        "json",
+      ]);
+
+      expect(query).toMatchObject({ exitCode: 0, stderr: "" });
+      const { requestId: _requestId, ...summary } = original;
+      expect(JSON.parse(query.stdout)).toMatchObject({
+        ok: true,
+        data: { requestId, state: "completed", action: "now", result: summary },
+      });
+      expect(waited).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(waited.stdout)).toEqual({ ok: true, data: original });
+      expect(gitCommands(fixture.tracePath)).toEqual([]);
+      expect(await fixture.git(fixture.remote, ["rev-parse", "refs/heads/relay-data"])).toBe(head);
+      expect(readFileSync(manifest, "utf8")).toBe("не перезаписывать\n");
+      expect(
+        await withSyncDatabase(fixture.location, (db) => ({
+          pending: db.getReplicationStatus().pending,
+          document: new KnowledgeService(db).get("document", late.id),
+        })),
+      ).toMatchObject({
+        pending: 1,
+        document: { id: late.id, data: { body: "Не публиковать при чтении outcome" } },
+      });
+    });
+  }, 40_000);
+
+  test.each(entrances)(
+    "$name: неизвестный requestId сохраняется в ошибке без нового submit",
+    async ({ wire }) => {
+      await withGitSyncCli(async (fixture) => {
+        await addProjectOrigin(fixture);
+        makeProjectSyncDue(fixture.location);
+        const pending = await withSyncDatabase(
+          fixture.location,
+          (db) => db.getReplicationStatus().pending,
+        );
+        const requestId = "already-submitted-42";
+        const request = {
+          version: 1,
+          action: "now",
+          options: fixture.options,
+          input: { requestId, waitMs: 1 },
+        };
+
+        const response = wire
+          ? await fixture.invoke(["--git-sync-request"], JSON.stringify(request))
+          : await fixture.invoke([
+              "git-sync",
+              "now",
+              "--request-id",
+              requestId,
+              "--wait-ms",
+              "1",
+              "--format",
+              "json",
+            ]);
+
+        expect(response.exitCode).toBe(4);
+        expect(wire ? response.stderr : response.stdout).toBe("");
+        const error = objectValue(JSON.parse(wire ? response.stdout : response.stderr));
+        expect(error).toMatchObject({
+          ok: false,
+          error: {
+            code: "GIT_SYNC_OUTCOME_UNKNOWN",
+            details: { requestId, state: "unknown", instance: null },
+          },
+        });
+        if (wire) {
+          expect(error).toMatchObject({ version: 1, error: { exitCode: 4 } });
+        }
+        expect(gitCommands(fixture.tracePath)).toEqual([]);
+        expect(
+          await withSyncDatabase(fixture.location, (db) => db.getReplicationStatus().pending),
+        ).toBe(pending);
+        expect(
+          await fixture.git(fixture.remote, [
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/heads/relay-data",
+          ]),
+        ).toBe("");
+      });
+    },
+    40_000,
+  );
+
+  test("настоящий отказ Git сохраняет requestId и pending, а request get не повторяет сеть", async () => {
+    await withGitSyncCli(async (fixture) => {
+      await addProjectOrigin(fixture);
+      renameSync(fixture.remote, `${fixture.remote}.offline`);
+      const pending = await withSyncDatabase(
+        fixture.location,
+        (db) => db.getReplicationStatus().pending,
+      );
+
+      const response = await fixture.invoke(["git-sync", "now", "--format", "json"]);
+
+      expect(response).toMatchObject({ exitCode: 1, stdout: "" });
+      const envelope = objectValue(JSON.parse(response.stderr));
+      expect(envelope).toMatchObject({
+        ok: false,
+        error: { code: "GIT_FAILED", details: { state: "failed" } },
+      });
+      const requestId = stringValue(objectValue(objectValue(envelope.error).details).requestId);
+      expect(requestId).not.toBe("");
+      expect(
+        gitCommands(fixture.tracePath).filter(
+          (argv) => argv.includes("ls-remote") || argv.includes("fetch"),
+        ),
+      ).toHaveLength(1);
+      rmSync(fixture.tracePath, { force: true });
+
+      const query = await fixture.invoke([
+        "git-sync",
+        "request",
+        "get",
+        requestId,
+        "--format",
+        "json",
+      ]);
+
+      expect(query).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(query.stdout)).toMatchObject({
+        ok: true,
+        data: { requestId, state: "failed", error: { code: "GIT_FAILED", exitCode: 1 } },
+      });
+      expect(gitCommands(fixture.tracePath)).toEqual([]);
+      expect(
+        await withSyncDatabase(fixture.location, (db) => db.getReplicationStatus().pending),
+      ).toBe(pending);
+    });
+  }, 40_000);
 });

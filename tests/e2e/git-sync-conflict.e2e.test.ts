@@ -153,25 +153,25 @@ describe("Разрешение реального Git-конфликта чер�
         "--actor",
         "participant-a",
       ]);
-      fixture.ownWorker(a);
       await invokeSuccess(a, a.cwd, [
         "git-sync",
         "connect",
         "--remote",
         remote,
         "--branch",
-        "relay-data-v2",
+        "relay-data",
       ]);
       await invokeSuccess(a, a.cwd, ["git-sync", "now"]);
-      fixture.ownWorker(b);
+      await invokeSuccess(a, a.cwd, ["git-sync", "auto", "disable"]);
       await invokeSuccess(b, b.cwd, [
         "git-sync",
         "restore",
         "--remote",
         remote,
         "--branch",
-        "relay-data-v2",
+        "relay-data",
       ]);
+      await invokeSuccess(b, b.cwd, ["git-sync", "auto", "disable"]);
       const published = await invokeRecord(a, a.cwd, ["document", "get", initial.id]);
       const restored = await invokeRecord(b, b.cwd, ["document", "get", initial.id]);
       await Promise.all([

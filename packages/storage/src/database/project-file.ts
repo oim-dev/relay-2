@@ -23,6 +23,7 @@ import { upgradeCommentTextStorage } from "../entities/comment-text";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
 import { SQLITE_BUSY_TIMEOUT_MS, SQLITE_WAL_REOPEN_PAUSE_MS } from "../sqlite/sqlite.constants";
 import { projectDatabaseMessages } from "./project-database.messages";
+import { SYNCHRONIZATION_SCHEMA } from "../synchronization/schedule";
 import type {
   ApplicationIdRow,
   JournalModeRow,
@@ -170,7 +171,7 @@ export function openExistingProjectFile(
 /**
  * Проверяет заголовок и корневую сущность существующей базы без её переинициализации.
  * Возвращает постоянный ID проекта; чужая или несовместимая база отклоняется до включения WAL.
- * В режиме migrate совместимые v1/v2/v3 получают v4 в атомарной технической миграции.
+ * В режиме migrate совместимые v1…v4 получают v5 в атомарной технической миграции.
  * Режим readonly принимает только текущую схему, без миграций и изменения журнала.
  */
 export function readProjectId(
@@ -210,7 +211,7 @@ function requireSupportedSchema(
 ): void {
   if (
     version !== SCHEMA_VERSION &&
-    (mode === "readonly" || (version !== 1 && version !== 2 && version !== 3))
+    (mode === "readonly" || (version !== 1 && version !== 2 && version !== 3 && version !== 4))
   ) {
     throw new RelayError(
       "SCHEMA_VERSION_UNSUPPORTED",
@@ -226,7 +227,8 @@ function requireSupportedSchema(
 }
 
 /**
- * Под замком записи повторяет проверку версии и добавляет журнал/outbox без изменения данных v1/v2.
+ * Под замком записи повторяет проверку версии, нормализует v1…v3 и добавляет расписание для v1…v4.
+ * Исходный outbox v3/v4 сохраняется; для v1/v2 создаётся baseline после нормализации.
  * Конкурентный open может уже завершить миграцию; DDL и user_version откатываются вместе.
  */
 function migrateProjectSchema(connection: Database, path: string): void {
@@ -234,7 +236,7 @@ function migrateProjectSchema(connection: Database, path: string): void {
   try {
     const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
     requireSupportedSchema(version?.user_version, path);
-    if (version?.user_version !== SCHEMA_VERSION) {
+    if (version?.user_version !== SCHEMA_VERSION && version?.user_version !== 4) {
       assertLegacyTextEncoding(connection);
     }
     if (version?.user_version === 3) {
@@ -251,11 +253,14 @@ function migrateProjectSchema(connection: Database, path: string): void {
         connection.exec(sql);
       }
     }
-    if (previous !== SCHEMA_VERSION) {
+    if (previous !== SCHEMA_VERSION && previous !== 4) {
       migrateComponents(connection);
       upgradeReplicationV4(connection);
       upgradeCommentTextStorage(connection);
       connection.exec(COMMAND_SCHEMA);
+    }
+    if (previous !== SCHEMA_VERSION) {
+      connection.exec(SYNCHRONIZATION_SCHEMA);
       if (previous === 1 || previous === 2) {
         connection.exec(REPLICATION_BACKFILL);
         enqueueComponentBaseline(connection);

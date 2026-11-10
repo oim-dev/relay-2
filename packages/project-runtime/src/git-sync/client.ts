@@ -3,12 +3,13 @@ import type { GitSyncClient, GitSyncEnvironment } from "./client.types";
 import { discoverGitSyncBinary } from "./discovery";
 import { gitSyncMessages as messages } from "./git-sync.messages";
 import { runNativeProcess } from "./process";
-import { controlGitSyncService, gitSyncHome } from "./service";
 import { validateOptions } from "../configuration/paths";
-import type { GitSyncServiceStatus } from "./service.types";
 import { assertGitSyncJson, encodeGitSyncRequest } from "./request";
 import { correlateGitSyncRequest, correlatedTransportFailure } from "./request-correlation";
 import type { ProcessResult } from "./process.types";
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const AUTO_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Отказ проверки envelope отличается от одноимённого прикладного кода в корректном ответе компонента.
@@ -72,15 +73,21 @@ export function decodeGitSyncResponse(text: string, exitCode: number, stderr: st
 }
 
 /**
- * Создаёт ленивый процессный клиент: сама фабрика не запускает компонент и не выбирает проект.
+ * Создаёт ленивый request-порт к relay --git-sync-request, без daemon/service входов.
+ * Сама фабрика не запускает CLI и не выбирает проект; Git-сценарии выполняет CLI через @relay/git-sync.
  * Каждое обращение владеет своим ребёнком; один экземпляр кеширует только проверенный путь binary.
  */
 export function createGitSyncClient(environment: GitSyncEnvironment): GitSyncClient {
   let binary: Promise<string> | undefined;
   /**
-   * Разрешает совместимый компонент только перед первым действительным запуском.
+   * Разрешает совместимую CLI только перед первым действительным запросом.
+   * Отказ не кешируется: следующее явное обращение может увидеть установленную/обновлённую CLI.
    */
-  const resolveBinary = (): Promise<string> => (binary ??= discoverGitSyncBinary(environment));
+  const resolveBinary = (): Promise<string> =>
+    (binary ??= discoverGitSyncBinary(environment).catch((cause) => {
+      binary = undefined;
+      throw cause;
+    }));
   return {
     /**
      * Назначает correlation до первого spawn и передаёт один JSON-запрос без транзакций CLI.
@@ -94,12 +101,15 @@ export function createGitSyncClient(environment: GitSyncEnvironment): GitSyncCli
       try {
         result = await (environment.runner ?? runNativeProcess)({
           executable: await resolveBinary(),
-          args: ["--request"],
+          args: ["--git-sync-request"],
           cwd: environment.cwd,
           env: environment.env,
           input,
           strictStdout: true,
-          timeoutMs: environment.timeoutMs ?? 120_000,
+          timeoutMs:
+            request.action === "auto"
+              ? Math.min(environment.timeoutMs ?? AUTO_REQUEST_TIMEOUT_MS, AUTO_REQUEST_TIMEOUT_MS)
+              : (environment.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS),
           ...(environment.signal ? { signal: environment.signal } : {}),
         });
       } catch (cause) {
@@ -113,43 +123,6 @@ export function createGitSyncClient(environment: GitSyncEnvironment): GitSyncCli
         }
         throw cause;
       }
-    },
-    /**
-     * Установка требует совместимый executable; status/disable доступны после его удаления.
-     */
-    async service(action, options): Promise<GitSyncServiceStatus> {
-      return controlGitSyncService(
-        action,
-        options,
-        environment,
-        action === "enable" ? await resolveBinary() : undefined,
-      );
-    },
-    /**
-     * Запускает foreground supervisor с точным home и stdin-lease для аварийной смерти CLI.
-     */
-    async supervise(options): Promise<number> {
-      const home = gitSyncHome(options);
-      const result = await (environment.runner ?? runNativeProcess)({
-        executable: await resolveBinary(),
-        args: ["supervise", "--home", home, "--parent-lease"],
-        cwd: environment.cwd,
-        env: environment.env,
-        timeoutMs: null,
-        stdinLease: true,
-        ...(environment.signal ? { signal: environment.signal } : {}),
-        ...(environment.stdout ? { stdout: environment.stdout } : {}),
-        ...(environment.stderr ? { stderr: environment.stderr } : {}),
-      });
-      if (result.exitCode !== 0) {
-        throw new RelayError(
-          "GIT_SYNC_SUPERVISOR_FAILED",
-          messages.processFailed,
-          result.exitCode,
-          { stderr: result.stderr },
-        );
-      }
-      return result.exitCode;
     },
   };
 }

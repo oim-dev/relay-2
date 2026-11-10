@@ -1,27 +1,23 @@
 import type { GitSyncRequest } from "@relay/contracts";
-import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import type { ProcessRunner } from "./process.types";
 import type { GitSyncSupervisorStatus } from "./supervisor.types";
-import type {
-  GitSyncServiceAction,
-  GitSyncServiceStatus,
-  ServicePlatform,
-  ServiceFileStore,
-} from "./service.types";
+import type { ServicePlatform, ServiceFileStore } from "./service.types";
 
 /**
- * Изолированная среда локального компонента; переменные Relay извлекает вызывающий CLI.
+ * Изолированная среда request-порта CLI; переменные Relay извлекает вызывающее приложение.
+ * Поля native-служб/потоков сохраняются для общих Runtime helpers и ServerEnvironment,
+ * но createGitSyncClient использует только обнаружение CLI и короткий request runner.
  */
 export interface GitSyncEnvironment {
-  /* Каталог запуска CLI; используется для относительного override и поиска PATH. */
+  /* Каталог вызывающего приложения; используется для относительного override и поиска PATH. */
   readonly cwd: string;
   /* Полное окружение дочерних процессов. */
   readonly env: Readonly<Record<string, string | undefined>>;
-  /* Явный RELAY_GIT_SYNC_BIN; отсутствие включает sibling/PATH/dev-discovery. */
+  /* Override executable; createGitSyncClient получает CLI из RELAY_CLI_BIN, иначе использует discovery. */
   readonly binary?: string;
-  /* Исполняемый файл текущей CLI для поиска совместимого соседнего компонента. */
+  /* Исполняемый файл вызывающего приложения для поиска соседнего relay согласованного выпуска. */
   readonly executablePath: string;
-  /* Версия выпуска CLI для проверки --version компонента. */
+  /* Версия выпуска вызывающего приложения для проверки relay --version. */
   readonly version: string;
   /* Домашний каталог текущего пользователя для user-systemd/LaunchAgent/Task Scheduler. */
   readonly userHome: string;
@@ -44,27 +40,20 @@ export interface GitSyncEnvironment {
   readonly supervisorLockProbe?: (home: string) => "free" | "busy";
   /* Deadline готовности после service enable; по умолчанию 10 секунд. */
   readonly readinessTimeoutMs?: number;
-  /* Deadline запроса, по умолчанию 120 секунд; не ограничивает foreground supervise. */
+  /* Deadline subprocess: request по умолчанию 120 s, auto не более 10 s; native helpers используют свои defaults. */
   readonly timeoutMs?: number;
   /* Отмена запуска; listeners принадлежат отдельному процессному входу CLI. */
   readonly signal?: AbortSignal;
-  /* Потоковые получатели foreground supervisor. */
+  /* Потоковый stdout общих native helpers/Server foreground; request возвращает JSON, не поток. */
   readonly stdout?: (text: string) => void;
-  /* Потоковая диагностика foreground supervisor. */
+  /* Потоковый stderr общих native helpers/Server foreground; request сохраняет диагностику ошибки. */
   readonly stderr?: (text: string) => void;
 }
 
 /**
- * Процессный порт CLI; тесты ввода подменяют его без запуска процессов или системных служб.
+ * Только версионированный request-порт к relay --git-sync-request; службами и foreground не управляет.
  */
 export interface GitSyncClient {
-  /* Выполняет один версионированный запрос; ошибки компонента сохраняют code/exitCode/details. */
+  /* Выполняет один raw versioned envelope; ошибки CLI сохраняют code/exitCode/details. */
   readonly request: (request: GitSyncRequest) => Promise<unknown>;
-  /* Управляет пользовательской службой данного home, не меняя проекты. */
-  readonly service: (
-    action: GitSyncServiceAction,
-    options: RuntimeOptions,
-  ) => Promise<GitSyncServiceStatus>;
-  /* Проксирует foreground supervisor до его завершения или отмены. */
-  readonly supervise: (options: RuntimeOptions) => Promise<number>;
 }

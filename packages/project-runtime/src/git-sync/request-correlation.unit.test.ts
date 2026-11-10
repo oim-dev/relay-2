@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { RelayError, type GitSyncRequest } from "@relay/contracts";
 import { createGitSyncClient } from "./client";
+import { correlateGitSyncRequest } from "./request-correlation";
 import type { GitSyncEnvironment } from "./client.types";
 import type { ProcessRunner } from "./process.types";
 
@@ -37,6 +38,32 @@ async function rejectedRequest(operation: Promise<unknown>): Promise<RelayError>
 }
 
 describe("Correlation process request Git Sync", () => {
+  test.each([
+    { name: "now", action: "now", input: { waitMs: 7 } },
+    { name: "refresh", action: "status", input: { refresh: true } },
+  ])(
+    "повторная подготовка $name внутри библиотеки сохраняет ID, назначенный Server-портом",
+    ({ action, input }) => {
+      const original: GitSyncRequest = {
+        version: 1,
+        action,
+        input,
+        options: { cwd: environment.cwd },
+      };
+      const serverPrepared = correlateGitSyncRequest(original);
+
+      const libraryPrepared = correlateGitSyncRequest(serverPrepared.request);
+
+      expect(serverPrepared.correlation).toMatchObject({
+        mode: "submit",
+        requestId: expect.any(String),
+      });
+      expect(libraryPrepared).toEqual(serverPrepared);
+      expect(original.input).toEqual(input);
+      expect(original.input).not.toHaveProperty("operationId");
+    },
+  );
+
   test("ID нового now попадает в wire и process-timeout error без изменения входа", async () => {
     const original: GitSyncRequest = {
       version: 1,

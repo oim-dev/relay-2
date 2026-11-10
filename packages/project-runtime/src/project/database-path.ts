@@ -1,6 +1,6 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
+import { resolveRelayHome } from "../configuration/home";
 
 /**
  * Вычисляет стандартный путь SQLite без создания каталогов и чтения конфигурации.
@@ -8,7 +8,5 @@ import type { RuntimeOptions } from "../configuration/runtime-options.types";
  * projectId уже проверен как отдельное имя каталога либо создан через randomUUID.
  */
 export function defaultProjectDatabasePath(options: RuntimeOptions, projectId: string): string {
-  const home =
-    options.home === undefined ? join(homedir(), ".relay") : resolve(options.cwd, options.home);
-  return join(home, "projects", projectId, "project.sqlite");
+  return join(resolveRelayHome(options), "projects", projectId, "project.sqlite");
 }

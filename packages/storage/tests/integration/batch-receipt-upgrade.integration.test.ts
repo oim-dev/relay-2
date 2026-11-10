@@ -35,9 +35,9 @@ const rejectedDatabases = [
   },
   {
     name: "более новая версия схемы",
-    corrupt: "PRAGMA user_version = 5",
+    corrupt: "PRAGMA user_version = 6",
     expectedCode: "SCHEMA_VERSION_UNSUPPORTED",
-    expectedVersion: 5,
+    expectedVersion: 6,
   },
   {
     name: "отсутствующая обязательная строка project_state",
@@ -91,7 +91,7 @@ afterEach(() => {
 });
 
 describe("Обновление исторической файловой схемы v1 для batch-квитанций", () => {
-  test("open и reopen сохраняют исторические данные и добавляют квитанции и нормализованную очередь v4", () => {
+  test("open и reopen сохраняют исторические данные, добавляют квитанции, нормализованную очередь и расписание v5", () => {
     fixture.createV1();
     const legacyComments = fixture.withRaw((raw) => ({
       columns: raw.query<Record<string, unknown>, []>("PRAGMA table_info(task_comments)").all(),
@@ -120,20 +120,30 @@ describe("Обновление исторической файловой схе�
 
     expectLegacyRecords(migrated);
     expect(migrated.getBatchReceipt(receipt.operationKey)).toBeUndefined();
+    expect(migrated.getSynchronizationSchedule()).toEqual({
+      mode: "auto",
+      dirtySince: expect.any(Number),
+      lastMutationAt: expect.any(Number),
+      nextAttemptAt: 0,
+      lastAttemptAt: null,
+      failures: 0,
+    });
     migrated.insertBatchReceipt(receipt);
+    const schedule = migrated.getSynchronizationSchedule();
     expect(migrated.getGeneration()).toBe(batchUpgradeGeneration);
     migrated.close();
     const reopened = fixture.open();
     expectLegacyRecords(reopened);
     expect(reopened.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
+    expect(reopened.getSynchronizationSchedule()).toEqual(schedule);
     fixture.withRaw((raw) => {
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 4 });
+      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
       expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
       expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
       expect(
         raw
           .query(
-            "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name NOT IN ('batch_receipts','entity_refs','entity_components') AND NOT(type='table' AND name='task_comments') AND tbl_name NOT LIKE 'replication_%' AND tbl_name NOT LIKE 'component_%' AND tbl_name NOT LIKE 'command_%' ORDER BY type, name",
+            "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name NOT IN ('batch_receipts','entity_refs','entity_components','synchronization_schedule') AND NOT(type='table' AND name='task_comments') AND tbl_name NOT LIKE 'replication_%' AND tbl_name NOT LIKE 'component_%' AND tbl_name NOT LIKE 'command_%' ORDER BY type, name",
           )
           .all(),
       ).toEqual(legacyStructure);

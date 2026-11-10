@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RelayError, type GitSyncRequest } from "@relay/contracts";
-import type { GitSyncClient, GitSyncServiceStatus } from "@relay/project-runtime";
+import { requestClient } from "../../../tests/helpers/git-sync-client";
 import { withCliFixture } from "../../../tests/integration/helpers/cli-fixture";
 import { commandRoutes, helpRuntime, invokeIsolatedCli } from "../../../tests/helpers/help";
 import { createProgram } from "../../app/program";
@@ -18,9 +18,6 @@ const actions = [
   { argv: ["now"], action: "now" },
   { argv: ["auto", "enable"], action: "auto.enable" },
   { argv: ["auto", "disable"], action: "auto.disable" },
-  { argv: ["worker", "start"], action: "worker.start" },
-  { argv: ["worker", "stop"], action: "worker.stop" },
-  { argv: ["worker", "restart"], action: "worker.restart" },
   { argv: ["conflicts", "list"], action: "conflicts.list" },
   {
     argv: ["conflicts", "get", "conflict-1"],
@@ -54,47 +51,7 @@ const processFailures = [
   },
 ] as const;
 
-/**
- * Подменяет только процессный порт; попадание в незаявленную службу/foreground является отказом теста.
- */
-function requestClient(request: GitSyncClient["request"]): GitSyncClient {
-  return {
-    request,
-    /**
-     * Запрещает незаявленный доступ к native manager.
-     */
-    service: async (): Promise<never> => {
-      throw new Error("Неожиданный native manager");
-    },
-    /**
-     * Запрещает незаявленный запуск supervisor.
-     */
-    supervise: async (): Promise<never> => {
-      throw new Error("Неожиданный foreground");
-    },
-  };
-}
-
 describe("Пользовательский вход relay git-sync", () => {
-  test("SUPERVISOR_REQUIRED проходит без скрытого fallback установки службы", async () => {
-    await withCliFixture(async (cli) => {
-      const calls: GitSyncRequest[] = [];
-      const details = {
-        home: cli.root,
-        commands: ["relay git-sync service enable", "relay git-sync supervise"],
-      };
-      const failure = await cli.error(["git-sync", "auto", "enable"], 4, {
-        gitSync: requestClient(async (request) => {
-          calls.push(request);
-          throw new RelayError("SUPERVISOR_REQUIRED", "Сначала запустите supervisor", 4, details);
-        }),
-      });
-
-      expect(failure).toMatchObject({ code: "SUPERVISOR_REQUIRED", details });
-      expect(calls.map((request) => request.action)).toEqual(["auto.enable"]);
-    }, group);
-  });
-
   test("лимит пользовательского --input остаётся 8 MiB независимо от wire-limit 16 MiB", async () => {
     const input = JSON.stringify({ text: "x".repeat(8 * 1024 * 1024) });
 
@@ -396,83 +353,6 @@ describe("Пользовательский вход relay git-sync", () => {
         ok: false,
         error: { code: error.code, message: error.message, details: error.details },
       });
-    }, group);
-  });
-
-  test.each(["enable", "disable", "status"] as const)(
-    "service %s вызывает только Runtime lifecycle",
-    async (action) => {
-      await withCliFixture(async (cli) => {
-        const calls: unknown[] = [];
-        const gitSync = {
-          ...requestClient(async (): Promise<never> => {
-            throw new Error("Служба не обращается к проектной БД");
-          }),
-          /**
-           * Сохраняет явные service action/home вместо native manager.
-           */
-          service: async (
-            selected: "enable" | "disable" | "status",
-            options: { cwd: string; home?: string },
-          ): Promise<GitSyncServiceStatus> => {
-            calls.push({ selected, options });
-            return {
-              platform: "linux" as const,
-              id: "relay-fixture",
-              configPath: "/fixture/service",
-              home: "/fixture/home",
-              installed: action !== "disable",
-              desiredRegistration:
-                action === "disable" ? ("disabled" as const) : ("enabled" as const),
-              registered: action !== "disable",
-              enabled: action !== "disable",
-              state: "stopped" as const,
-              startup: "login",
-              managerExitCode: 0,
-              supervisor: {
-                actual: "stopped" as const,
-                responsive: false,
-                instance: null,
-                release: null,
-                pid: null,
-                heartbeat: null,
-              },
-            };
-          },
-        };
-
-        await cli.success(["git-sync", "service", action], { gitSync });
-
-        expect(calls).toEqual([
-          { selected: action, options: { cwd: cli.runtime.cwd, home: cli.runtime.env.RELAY_HOME } },
-        ]);
-      }, group);
-    },
-  );
-
-  test("foreground ожидает асинхронное завершение и не добавляет JSON envelope к потокам", async () => {
-    await withCliFixture(async (cli) => {
-      let completed = false;
-      const gitSync = {
-        ...requestClient(async () => null),
-        /**
-         * Имитирует только foreground-порт; async граница должна дождаться результата.
-         */
-        supervise: async (options: { home?: string }): Promise<number> => {
-          expect(options.home).toBe("other home");
-          await Promise.resolve();
-          completed = true;
-          return 0;
-        },
-      };
-
-      const answer = await cli.invoke(
-        ["git-sync", "supervise", "--home", "other home", "--format", "json"],
-        { gitSync },
-      );
-
-      expect(answer).toEqual({ code: 0, stdout: "", stderr: "" });
-      expect(completed).toBe(true);
     }, group);
   });
 
