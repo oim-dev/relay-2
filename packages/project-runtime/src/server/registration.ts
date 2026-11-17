@@ -45,6 +45,7 @@ function readyStatus(
     url: endpoint.url,
     version: endpoint.version,
     mode: launch.mode,
+    ...(launch.development === undefined ? {} : { development: launch.development }),
     scope: launch.scope,
     projects: projects.map((project) => ({
       id: project.id,
@@ -74,6 +75,7 @@ export function acquireServerInstance(source: ServerLaunch): ServerRegistration 
     if (
       launch.version !== source.version ||
       launch.mode !== source.mode ||
+      launch.development?.webUrl !== source.development?.webUrl ||
       launch.instanceId !== source.instanceId ||
       launch.home !== source.home ||
       launch.port !== source.port ||
@@ -139,6 +141,12 @@ export function acquireServerInstance(source: ServerLaunch): ServerRegistration 
             });
           }
           if (path === `${prefix}/stop` && request.method === "POST") {
+            if (launch.development !== undefined) {
+              return Response.json(
+                { code: "SERVER_DEVELOPMENT_MANAGED", message: messages.developmentManaged },
+                { status: 409 },
+              );
+            }
             if (!stopping) {
               stopping = true;
               // Возврат ответа предшествует teardown приложения и control listener.

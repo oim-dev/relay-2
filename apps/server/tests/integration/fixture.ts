@@ -9,16 +9,18 @@ import type { ServerFixture } from "./fixture.types";
 
 /**
  * Создаёт SQLite и реальный loopback listener; при любом исходе освобождает server и каталог.
+ * artifactDirectory выбирает подкаталог текущей даты для изолированных файлов набора.
  */
 export async function withServer(
   action: (fixture: ServerFixture) => Promise<void>,
   options: Partial<Omit<RelayServerOptions, "runtime">> = {},
+  artifactDirectory = "server-web/nest-server/fixtures",
 ): Promise<void> {
   const parent = resolve(
     import.meta.dir,
     "../../../../.artifacts",
     new Date().toISOString().slice(0, 10),
-    "server-web/nest-server/fixtures",
+    artifactDirectory,
   );
   await mkdir(parent, { recursive: true });
   const directory = await mkdtemp(join(parent, "http-"));
@@ -51,8 +53,11 @@ export async function withServer(
       },
     });
   } finally {
-    await server?.close();
-    await rm(directory, { recursive: true, force: true });
+    try {
+      await server?.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 }
 

@@ -34,7 +34,7 @@ export const serverCommandMessages = {
   list: {
     description: "Показать все регистрации и число готовых серверов",
     details:
-      "Работает без проекта и без установленного relay-server. running считает только совместимые ready health-ответы. stale означает оставшуюся запись без живого lease; unresponsive — занятый lease без подтверждённого health. Для каждого готового экземпляра показаны URL, PID, версия, область и все проекты с независимыми ошибками.",
+      "Работает без проекта и без установленного relay-server. running считает только совместимые ready health-ответы. stale означает оставшуюся запись без живого lease; unresponsive — занятый lease без подтверждённого health. Для каждого готового экземпляра показаны URL, PID, версия, область и все проекты с независимыми ошибками. Метка [dev] обозначает терминальную dev-сессию с отдельными адресами API и Web.",
     examples: [
       { description: "Получить машинный список", command: "relay server list --format json" },
     ],
@@ -53,7 +53,7 @@ export const serverCommandMessages = {
   stop: {
     description: "Остановить выбранный сервер и убрать его автозапуск",
     details:
-      "Требуется --instance UUID из list. Отправляет защищённый stop и останавливает принадлежащую этому UUID native-службу. Запись launch сохраняется для restart, данные проектов сохраняются. Чужой процесс не завершается по PID из реестра.",
+      "Требуется --instance UUID из list. Отправляет защищённый stop и останавливает принадлежащую этому UUID native-службу. Запись launch сохраняется для restart, данные проектов сохраняются. Чужой процесс не завершается по PID из реестра. Dev-сессия отклоняет команду: завершите её через Ctrl+C в терминале bun run dev.",
     examples: [
       {
         description: "Остановить сервер; подставьте UUID",
@@ -64,7 +64,7 @@ export const serverCommandMessages = {
   restart: {
     description: "Перезапустить сохранённую область выбранного сервера",
     details:
-      "Сохраняет instance UUID, cwd/config/home/actor/port. Новый процесс получает новые bootId и секрет control. После foreground restart запускает native-службу. Совместимый binary проверяется до остановки старого процесса.",
+      "Сохраняет instance UUID, cwd/config/home/actor/port. Новый процесс получает новые bootId и секрет control. После foreground restart запускает native-службу. Совместимый binary проверяется до остановки старого процесса. Dev-сессия отклоняет команду до поиска binary: перезапустите bun run dev в её терминале.",
     examples: [
       {
         description: "Перезапустить сервер; подставьте UUID",
@@ -75,7 +75,7 @@ export const serverCommandMessages = {
   open: {
     description: "Открыть Web готового сервера в браузере",
     details:
-      "Без --instance требуется ровно один ready сервер в текущем RELAY_HOME. При нескольких укажите UUID явно. Команда не создаёт дополнительный сервер.",
+      "Без --instance требуется ровно один ready сервер в текущем RELAY_HOME. При нескольких укажите UUID явно. Для dev открывает отдельный Vite Web URL вместо адреса API. Команда не создаёт дополнительный сервер.",
     examples: [
       { description: "Открыть единственный готовый сервер", command: "relay server open" },
     ],
@@ -87,6 +87,11 @@ export const serverCommandMessages = {
   projects: "Проекты",
   scope: "Область",
   version: "Версия",
+  developmentMarker: " [dev]",
+  apiLabel: "API",
+  urlLabel: "URL",
+  webLabel: "Web",
+  developmentManaged: "Управление: терминал dev-запуска (bun run dev)",
   states: {
     ready: "готов",
     stopped: "остановлен",

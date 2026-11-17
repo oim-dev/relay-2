@@ -1,5 +1,6 @@
 import { createLinuxTree } from "./linux-tree";
 import { terminateCommandGroup } from "./posix-group";
+import { capturePosixParent } from "./posix-parent";
 import type { ProcessLifetime } from "./lifetime.types";
 
 /**
@@ -9,6 +10,7 @@ export const linuxProcessLifetime: ProcessLifetime = {
   capability: "linux-subreaper",
   guardianSpawn: { detached: true },
   commandSpawn: {},
+  captureParent: capturePosixParent,
   ownTree: createLinuxTree,
   /**
    * Убирает собственную POSIX-группу при потере guardian.

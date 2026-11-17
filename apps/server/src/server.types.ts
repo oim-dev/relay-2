@@ -19,7 +19,7 @@ export interface RelayServerOptions {
   readonly actor: string;
   /* Процессный клиент Git Sync; отсутствие означает GIT_SYNC_UNAVAILABLE. */
   readonly gitSync?: Pick<GitSyncClient, "request">;
-  /* Отдельная диагностика отложенного auto; процессный запуск пишет JSON warning в stderr. */
+  /* Диагностика фонового auto после HTTP-ответа; процессный запуск пишет JSON warning в stderr. */
   readonly synchronizationWarning?: (error: HttpError) => void | Promise<void>;
   /* Каталог готового Web, подключённый вызывающим приложением. */
   readonly staticHandler?: ServerStaticHandler;
@@ -41,7 +41,7 @@ export interface RelayServerOptions {
 export interface RelayServerApplication {
   /* Настоящее Nest/Fastify приложение; бизнес-вызовы проходят контроллеры, pipes и guards. */
   readonly app: NestFastifyApplication;
-  /* Идемпотентно прекращает SSE и новые сценарии, ожидает writers, закрывает listener. */
+  /* Прекращает SSE и новые сценарии, ожидает writers и активный auto, закрывает listener; идемпотентен. */
   readonly close: () => Promise<void>;
 }
 

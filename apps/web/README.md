@@ -14,7 +14,14 @@
 relay server run
 ```
 
-Для разработки с отдельным Vite используйте из корня репозитория:
+Общий [dev-запуск](../../docs/development/DEV.md) из корня репозитория подготавливает
+CLI, API и Vite с внешним playground:
+
+```sh
+bun run dev -- --playground ../playground
+```
+
+Для отдельного Vite при уже работающем API:
 
 ```sh
 RELAY_API_URL=http://127.0.0.1:3210 bun run dev:web

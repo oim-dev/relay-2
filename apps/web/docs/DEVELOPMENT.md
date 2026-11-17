@@ -6,6 +6,9 @@ Web использует React, Mantine, React Router, SWR, CodeMirror, dnd-kit 
 
 ## Запуск
 
+Для полного цикла CLI/Server/Web используйте
+[общий dev-запуск с внешним playground](../../../docs/development/DEV.md).
+
 Установите workspace через `bun install --frozen-lockfile`. Для Vite нужен Node.js 24+.
 Из корня репозитория при работающем Server на собственных данных:
 

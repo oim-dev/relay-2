@@ -4,6 +4,7 @@ import { BatchService, KnowledgeService } from "@relay/core";
 import { ProjectDatabase } from "@relay/storage";
 import { HTTP_BODY_MAX_BYTES } from "../../src/http/json-body.pipe";
 import { withServer } from "./fixture";
+import { events } from "./events-fixture";
 
 /**
  * Посылает wire path дословно: Fetch и inject нормализуют encoded dot segments ещё до сервера.
@@ -24,37 +25,6 @@ function rawRequest(url: string, path: string): Promise<string> {
       socket.write(`GET ${path} HTTP/1.1\r\nHost: ${address.host}\r\nConnection: close\r\n\r\n`),
     );
   });
-}
-
-/**
- * Читает один SSE кадр, сохраняя остальные кадры того же chunk; deadline задаёт исходный fetch.
- */
-function events(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): () => Promise<Record<string, unknown>> {
-  let buffer = "";
-  const decoder = new TextDecoder();
-  return async () => {
-    for (;;) {
-      const boundary = buffer.indexOf("\n\n");
-      if (boundary >= 0) {
-        const frame = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const data = frame.split("\n").find((line) => line.startsWith("data: "));
-        const value: unknown = JSON.parse(data?.slice(6) ?? "null");
-        if (value === null || typeof value !== "object" || Array.isArray(value)) {
-          throw new Error("Некорректный SSE кадр");
-        }
-        // Проверена форма JSON объекта; значения отдельных полей проверяет сценарий.
-        return value as Record<string, unknown>;
-      }
-      const chunk = await reader.read();
-      if (chunk.done) {
-        throw new Error("SSE завершился до ожидаемого события");
-      }
-      buffer += decoder.decode(chunk.value, { stream: true });
-    }
-  };
 }
 
 describe("Nest transport boundary", () => {

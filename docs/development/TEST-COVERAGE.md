@@ -95,6 +95,7 @@ ID и пути базы из конфига выбранного проекта.
 связывает отметки с commit/rollback changeset, receipt-only записью и повторным открытием;
 импорт не создаёт echo. [Режим](../../packages/storage/tests/integration/synchronization-mode.integration.test.ts)
 сохраняет auto/manual без изменения generation/outbox и проверяет локальность выбора при bootstrap.
+Неизвестный сохранённый mode отклоняется readonly-чтением без исправления повреждённой строки.
 [Миграция v4](../../packages/storage/tests/integration/synchronization-migrations.integration.test.ts)
 сохраняет исходные payload/ID/digest и откатывает частичный DDL.
 
@@ -319,6 +320,13 @@ quiesce/readback Disabled до End, единый монотонный stop budge
 передачу stdin lease, согласованность протокола и ограничения захвата вывода.
 Условия платформ в тесте существенны: escaped-потомки не объявлены частью групповой
 гарантии macOS.
+
+[Наблюдение родителя](../../packages/project-runtime/tests/integration/parent-observation.integration.test.ts)
+использует настоящее родство wrapper → child: SIGKILL wrapper даёт `parent-exited`, ребёнок
+сам завершает cleanup без orphan. Короткие процессы проверяют unref и безопасный dispose
+при живом родителе. [Владение probe](../../packages/project-runtime/src/parent-process/observation.unit.test.ts)
+отдельно защищает однократное освобождение native-ресурса без отмены signal.
+
 [Восстановление](../../packages/project-runtime/tests/integration/restoration.integration.test.ts)
 проверяет staging и эксклюзивную публикацию новой БД/конфига, совпадение projectId,
 отказ замены рабочей БД, сохранность WAL/SHM и чужого файла при гонке или recovery.
@@ -344,6 +352,17 @@ sync validator, чтение и следующая запись на том же
 
 ### Lifecycle Server
 
+[Глобальная сводка Runtime](../../packages/project-runtime/tests/integration/status.integration.test.ts)
+проверяет полный набор баз home независимо от cwd, подсветку вложенного проекта,
+изоляцию другого home, конфиги известных workspace (включая относительные к явному cwd), независимые ошибки и отсутствие
+создания пустого home. Выбор workspace не фильтрует набор; внешний `databasePath` того же
+ID остаётся отдельной БД. Проверяются отказ чужого ID, сохранность старой схемы без
+миграции и отсутствие создания утраченной базы.
+[Команда status](../../apps/cli/tests/integration/status.integration.test.ts) соединяет
+эту сводку с серверным health, путём CLI и text/JSON: ready/dev, stopped и invalid остаются
+в списке; `--home` выбирает и базы, и серверы независимо от ошибки `--config`.
+Whitelist окружения не раскрывает посторонние переменные; Git-порт не вызывается.
+
 [Discovery Server](../../packages/project-runtime/src/server/discovery.unit.test.ts)
 отвергает несовместимый явный binary без fallback на другой выпуск.
 [Конфигурация службы](../../packages/project-runtime/src/server/service-configuration.unit.test.ts)
@@ -362,6 +381,24 @@ systemd, LaunchAgent и Task Scheduler. Эти unit-проверки не зап
 контекста и новым bootId. Native manager в этом сценарии подменён. Отдельный foreground
 случай использует production guardian и проверяет остановку при отмене CLI.
 Эти тесты не заменяют проверку поставляемого HTTP/SPA-бинарника или настоящей login-службы ОС.
+
+[Dev lifecycle](../../apps/cli/tests/integration/server-development.integration.test.ts)
+проверяет text/JSON метаданных dev, передачу Vite URL desktop launcher и отказ stop/restart
+до discovery и чтения endpoint без изменения регистрации.
+[Dev registration](../../packages/project-runtime/tests/integration/server-development.integration.test.ts)
+защищает валидацию metadata, отказ authenticated control-stop с сохранением ready/lease
+и несовместимость health при изменившемся Vite URL.
+[Source Server](../../apps/server/tests/integration/development.integration.test.ts) запускает
+копию исходников без Web dist под настоящим Bun watch: HTTP доступен из разрешённого origin,
+reload сохраняет launch UUID и меняет bootId, EOF освобождает listener/lease со статусом stopped,
+а crash оставляет stale. Эти проверки не запускают полный root launcher и Node/Vite.
+[Параметры dev](../../scripts/dev/arguments.unit.test.ts) защищают пути внешнего playground/home,
+приоритет окружения и фиксированные разные порты.
+[Предварительная отмена](../../scripts/dev/session.unit.test.ts) завершается без существующего
+playground или checkout, не выполняя подготовку сессии.
+[Процессный dev-вход](../../scripts/dev/entry.unit.test.ts) при одновременном отказе наблюдения
+родителя и session cleanup сохраняет обе ошибки и native cause, освобождает наблюдение
+и завершает процесс с кодом 1. Инъекция выполняется в отдельном child без CLI/Vite bootstrap.
 
 ## Server, REST SDK и HTTP-контракты
 
@@ -398,8 +435,18 @@ JSON 413 для обычного и потокового body без запис�
 `refresh:false`, unknown/null/partial, отдельное чтение исхода `now` и точную корреляцию requestId.
 
 [Lazy sync HTTP](../../apps/server/tests/integration/synchronization.integration.test.ts)
-подтверждает порядок auto → Core, сохранность исходного CAS и успешную mutation/receipt
-при отказе доставки. [Локальные исключения](../../apps/server/tests/integration/synchronization-local.integration.test.ts)
+подтверждает ответ по локальной базе до завершения фонового auto, объединение параллельных
+чтений, последующий импорт, исходный CAS, успешную mutation/receipt при отказе доставки
+и ожидание фоновой работы при close.
+[Очередь Server](../../apps/server/src/modules/projects/automatic-synchronization.unit.test.ts)
+проверяет бюджет параллельности, дедупликацию, снятие очереди и ошибки диагностики.
+[Отложенный запуск](../../apps/server/tests/integration/synchronization-queue.integration.test.ts)
+повторно проверяет режим, срок и физическую привязку queued-проекта перед RPC.
+[Фоновый импорт](../../apps/server/tests/integration/synchronization-events.integration.test.ts)
+соединяет две SQLite через ReplicationService с настоящим SSE changed и перечитыванием.
+[Отказ reporter](../../apps/server/tests/integration/synchronization-reporting.integration.test.ts)
+сохраняет успешный HTTP-результат и проверяет ошибку close при освобождённом listener.
+[Локальные исключения](../../apps/server/tests/integration/synchronization-local.integration.test.ts)
 защищают отсутствие обмена в status/doctor/receipt/check и настоящем SSE до heartbeat.
 
 [Генерация](../../apps/server/tests/integration/openapi-generation.integration.test.ts)

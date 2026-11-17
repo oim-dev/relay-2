@@ -10,6 +10,7 @@ import { hasCode } from "../configuration/files";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
 import {
   isServerInstanceId,
+  isServerDevelopment,
   isServerScope,
   probeServerLease,
   readServerEndpoint,
@@ -133,6 +134,7 @@ export async function probeServerInstance(
     url: endpoint?.url ?? null,
     version: endpoint?.version ?? launch.version,
     mode: launch.mode,
+    ...(launch.development === undefined ? {} : { development: launch.development }),
     scope: launch.scope,
     projects: [],
     startedAt: endpoint?.startedAt ?? null,
@@ -164,6 +166,9 @@ export async function probeServerInstance(
     data.url !== endpoint.url ||
     data.state !== "ready" ||
     data.mode !== launch.mode ||
+    (data.development !== undefined && !isServerDevelopment(data.development)) ||
+    (serverObject(data.development) ? data.development.webUrl : undefined) !==
+      launch.development?.webUrl ||
     data.startedAt !== endpoint.startedAt ||
     !isServerScope(data.scope) ||
     data.scope.kind !== launch.scope.kind ||

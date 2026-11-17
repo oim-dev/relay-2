@@ -10,6 +10,8 @@ export type { NativePlatform } from "./native/platform.types";
 export { nativeExecutableName } from "./native/executable/select";
 export { nativeProcessTreeCapability } from "./native/process-lifetime/select";
 export type { ProcessTreeCapability } from "./native/process-lifetime/lifetime.types";
+export { observeParentProcess } from "./parent-process/observation";
+export type { ParentProcessObservation } from "./parent-process/observation.types";
 export { replaceLocalFile } from "./local-files/replace";
 export { restoreProject, resolveVacantRestorationTarget } from "./project/restoration";
 export { resolveProjectRestoration } from "./project/restoration-target";
@@ -24,6 +26,13 @@ export {
 export type { OpenedProject, ProjectLocation } from "./project/location.types";
 export type { RuntimeOptions } from "./configuration/runtime-options.types";
 export { resolveRelayHome } from "./configuration/home";
+export { inspectRelayHome } from "./status/home";
+export type {
+  RelayHomeStatus,
+  RelayProjectStatus,
+  RelayConfigurationStatus,
+  RelayStatusContext,
+} from "./status/status.types";
 export { createGitSyncClient, decodeGitSyncResponse } from "./git-sync/client";
 export {
   correlateGitSyncRequest,

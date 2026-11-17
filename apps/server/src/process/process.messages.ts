@@ -18,7 +18,7 @@ relay-server run --launch PATH [--parent-lease]
 --port 0 выделяет свободный loopback-порт. Автор: --actor, RELAY_ACTOR, затем web.
 Конфигурация: --config, RELAY_CONFIG; home: --home, RELAY_HOME.
 Dev frontend: --allow-origin (повторяемый) либо RELAY_WEB_ORIGIN, например
-http://127.0.0.1:5173. Vite proxy использует changeOrigin:true.
+http://127.0.0.1:5174. Vite proxy использует changeOrigin:true.
 SIGINT/SIGTERM завершают SSE, ожидают текущие записи и свои процессные запросы.
 --parent-lease читает stdin только для foreground --launch; EOF означает остановку.
 Фоновый запуск и реестр: relay server start/list/stop/restart.

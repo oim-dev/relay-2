@@ -23,4 +23,6 @@ export const serverMessages = {
   processFailed: "Foreground Relay Server завершился с ошибкой",
   closed: "Регистрация Relay Server уже закрыта или опубликована",
   incompatible: "Health не подтвердил идентичность и совместимую версию сервера",
+  developmentManaged:
+    "Сервер запущен в dev-режиме. Управление выполняется в терминале bun run dev; для остановки нажмите Ctrl+C.",
 } as const;

@@ -33,10 +33,10 @@ Server печатает JSON-сообщение `ready` с URL. `--port 0` вы�
 `RELAY_HOME` применяются только на процессной границе. Автор выбирается из `--actor`,
 `RELAY_ACTOR`, затем `web`. Неверное авторство отклоняется без нормализации.
 
-Для Vite на `http://127.0.0.1:5173` разрешите origin явно:
+Для Vite на `http://127.0.0.1:5174` разрешите origin явно:
 
 ```sh
-relay-server --port 3210 --allow-origin http://127.0.0.1:5173
+relay-server --port 3210 --allow-origin http://127.0.0.1:5174
 ```
 
 Альтернатива флагу — `RELAY_WEB_ORIGIN`. Vite proxy использует `changeOrigin:true`;
@@ -129,10 +129,15 @@ SPA fallback разрешён только HTML navigation на известны
   читает только generation и замечает внешние commits CLI/Git Sync. Connected/reconnect
   требуют перечитать данные; поток не является журналом гарантированной доставки.
 
-Предметные REST-чтения и записи проверяют созревший debounce до Core snapshot/команды.
-Исходные guards формы сохраняются: принятый remote может вызвать обычный конфликт версии.
-Сетевой отказ не отменяет локальную мутацию; процессный Server пишет отдельный JSON warning
-в stderr. Встраиваемый Server может получить его через `synchronizationWarning`.
+Предметные REST-чтения и записи работают с текущей локальной SQLite и не ожидают Git.
+Успешное обращение при созревшем debounce ставит фоновую попытку: один queued/running
+обмен на проект, не более двух одновременно на Server. Перед запуском повторно проверяются
+scope и расписание; окончательное решение остаётся под общим mutex Git Sync.
+HTTP-ответ не гарантирует уже полученный remote: поздний импорт обновляет чтения через SSE,
+сохраняя исходные guards открытой формы. Сетевой отказ не меняет результат локальной
+операции; процессный Server пишет отдельный JSON warning в stderr, встраиваемый получает
+его через `synchronizationWarning`. Shutdown снимает очередь и ожидает активные попытки
+в рамках существующего grace/abort. Расписание остаётся ленивым: нового постоянного poll нет.
 Status/doctor, receipts, `batch check`, SSE и health автоматический обмен не запускают.
 
 Host/Origin guard защищает весь HTTP, включая статику и preflight. JSON pipe принимает
@@ -141,11 +146,14 @@ UTF-8 и сохраняет escaped UTF-16 code units. Streaming overflow воз
 
 ## Разработка
 
-Исходный запуск и импорт Server должны использовать его конфигурацию legacy decorators:
+Общий [dev-запуск с внешним playground](../../docs/development/DEV.md) запускает Server
+из исходников с Bun watch и Vite отдельно. Сохранённый dev-launch отключает загрузку
+`web/dist`, задаёт Origin Vite и сохраняет UUID при перезапусках. Исходный запуск
+и импорт Server должны использовать его конфигурацию legacy decorators:
 
 ```sh
-# Из apps/server:
-bun run dev -- --port 3210
+# Из корня checkout:
+bun run dev -- --playground ../playground
 # Для fixture, запускаемого из корня checkout:
 bun --tsconfig-override apps/server/tsconfig.json path/to/fixture.ts
 ```

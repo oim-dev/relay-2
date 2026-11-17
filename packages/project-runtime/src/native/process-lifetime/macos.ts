@@ -1,4 +1,5 @@
 import { terminateCommandGroup } from "./posix-group";
+import { capturePosixParent } from "./posix-parent";
 import type { ProcessLifetime } from "./lifetime.types";
 import type { CommandTree } from "../../process-guardian/tree.types";
 
@@ -9,6 +10,7 @@ export const macosProcessLifetime: ProcessLifetime = {
   capability: "posix-group-foreground-only",
   guardianSpawn: { detached: true },
   commandSpawn: {},
+  captureParent: capturePosixParent,
   /**
    * Назначает группу якоря границей cleanup без обещания atomic fork-barrier.
    */

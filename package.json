@@ -13,7 +13,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun x --no-install turbo run dev",
+    "dev": "bun scripts/dev.ts",
     "dev:cli": "bun x --no-install turbo run dev --filter=@relay/cli",
     "dev:server": "bun x --no-install turbo run dev --filter=@relay/server",
     "dev:web": "bun x --no-install turbo run dev --filter=@relay/web",

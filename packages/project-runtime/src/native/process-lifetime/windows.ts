@@ -1,4 +1,5 @@
 import { createWindowsJob } from "./windows-job";
+import { captureWindowsParent } from "./windows-parent";
 import type { ProcessLifetime } from "./lifetime.types";
 
 /**
@@ -8,6 +9,7 @@ export const windowsProcessLifetime: ProcessLifetime = {
   capability: "windows-job",
   guardianSpawn: { detached: true, windowsHide: true },
   commandSpawn: { windowsHide: true },
+  captureParent: captureWindowsParent,
   ownTree: createWindowsJob,
   /**
    * Смерть guardian закрывает его единственный Job handle: KILL_ON_JOB_CLOSE выполняет ОС.

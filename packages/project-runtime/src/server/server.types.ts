@@ -1,5 +1,6 @@
 import type {
   ServerInstanceList,
+  ServerDevelopment,
   ServerInstanceStatus,
   ServerProjectStatus,
   ServerScope,
@@ -52,6 +53,8 @@ export interface ServerLaunch {
   readonly port: number;
   /* Владелец lifetime процесса. */
   readonly mode: "service" | "foreground";
+  /* Отдельный Vite и управление из dev-терминала; допустимо только для foreground. */
+  readonly development?: ServerDevelopment;
 }
 
 /**
@@ -72,6 +75,8 @@ export interface ServerLaunchInput extends ServerStartInput {
   readonly version: string;
   /* Владение процессом определяется явным run либо native start. */
   readonly mode: "service" | "foreground";
+  /* Явная dev-сессия; обычные CLI start/run это поле не задают. */
+  readonly development?: ServerDevelopment;
 }
 
 /**
@@ -92,11 +97,11 @@ export interface ServerClient {
   readonly run: (options: RuntimeOptions, input: ServerStartInput) => Promise<void>;
   /* Читает реестр home и проверяет health всех записей либо одного UUID. */
   readonly list: (options: RuntimeOptions, instanceId?: string) => Promise<ServerInstanceList>;
-  /* Останавливает выбранный UUID; никогда не использует сохранённый PID как kill target. */
+  /* Останавливает UUID без kill по сохранённому PID; dev отклоняется с SERVER_DEVELOPMENT_MANAGED. */
   readonly stop: (options: RuntimeOptions, instanceId: string) => Promise<ServerInstanceStatus>;
-  /* Перезапускает сохранённый контекст как native-службу с новым bootId/nonce. */
+  /* Перезапускает native-службу с новым bootId/nonce; dev отклоняется до discovery и остановки. */
   readonly restart: (options: RuntimeOptions, instanceId: string) => Promise<ServerInstanceStatus>;
-  /* Открывает URL единственного выбранного ready экземпляра системным браузером. */
+  /* Открывает Web ready экземпляра: development.webUrl для dev, иначе URL Server. */
   readonly open: (options: RuntimeOptions, instanceId?: string) => Promise<ServerInstanceStatus>;
 }
 

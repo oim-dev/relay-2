@@ -8,6 +8,13 @@ import type {
 } from "./schedule.types";
 
 /**
+ * Проверяет единый режим обмена и на входе setter, и при чтении потенциально повреждённой БД.
+ */
+function isSynchronizationMode(value: unknown): value is SynchronizationMode {
+  return value === "auto" || value === "manual";
+}
+
+/**
  * Добавляет локальное расписание; существующая очередь после миграции доступна следующему обращению.
  */
 export const SYNCHRONIZATION_SCHEMA = `
@@ -48,6 +55,7 @@ export function resetSynchronizationSchedule(connection: Database): void {
 
 /**
  * Читает одну техническую строку без outbox payload, карточек и Git.
+ * Отсутствие строки или неизвестный сохранённый mode даёт DATABASE_INVALID, без исправления БД.
  */
 export function readSynchronizationSchedule(connection: Database): SynchronizationSchedule {
   const result = connection
@@ -61,6 +69,9 @@ export function readSynchronizationSchedule(connection: Database): Synchronizati
   if (result === null) {
     throw new RelayError("DATABASE_INVALID", synchronizationMessages.stateMissing, 1);
   }
+  if (!isSynchronizationMode(result.mode)) {
+    throw new RelayError("DATABASE_INVALID", synchronizationMessages.invalidMode, 1);
+  }
   return result;
 }
 
@@ -69,7 +80,7 @@ export function readSynchronizationSchedule(connection: Database): Synchronizati
  * Тот же режим не выполняет UPDATE; неизвестное значение отклоняется как INVALID_ARGUMENT.
  */
 export function setSynchronizationMode(connection: Database, mode: SynchronizationMode): void {
-  if (mode !== "auto" && mode !== "manual") {
+  if (!isSynchronizationMode(mode)) {
     throw new RelayError("INVALID_ARGUMENT", synchronizationMessages.invalidMode, 2);
   }
   connection

@@ -1,5 +1,6 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { CommandTree } from "../../process-guardian/tree.types";
+import type { ParentProcessProbe } from "../../parent-process/observation.types";
 
 /**
  * Реальная граница удержания потомков, используемая также в диагностике Git Sync.
@@ -33,6 +34,10 @@ export interface ProcessLifetime {
   readonly guardianSpawn: Readonly<Pick<SpawnOptions, "detached" | "windowsHide">>;
   /* Native flags команды внутри уже назначенного контейнера. */
   readonly commandSpawn: Readonly<Pick<SpawnOptions, "windowsHide">>;
+  /**
+   * Захватывает наблюдение непосредственного родителя текущего процесса, не получая права kill.
+   */
+  captureParent(parentPid: number): ParentProcessProbe;
   /**
    * Привязывает созданный якорь к контейнеру до разрешения запуска команды.
    */

@@ -3,14 +3,18 @@ import { once } from "node:events";
 import { createConnection, type Socket } from "node:net";
 import {
   acquireServerInstance,
+  createGitSyncClient,
   createServerLaunch,
+  type ProcessResult,
   type ServerLaunch,
 } from "@relay/project-runtime";
+import { RelayError } from "@relay/contracts";
 import { BatchService, KnowledgeService } from "@relay/core";
 import { createRelayServer } from "../../src/server";
 import { REQUEST_GRACE_MS, SHUTDOWN_DEADLINE_MS, shutdown } from "../../src/process/shutdown";
 import type { ShutdownClock } from "../../src/process/shutdown.types";
 import { withServer } from "./fixture";
+import { prepareDueSynchronization } from "./synchronization-fixture";
 
 /**
  * Ограничивает ожидание события, не используется как sleep или performance assertion.
@@ -261,6 +265,118 @@ describe("Завершение HTTP-ввода и принятых writers", () 
 });
 
 describe("Grace, отмена Runtime и lifetime lease", () => {
+  test("фоновый auto после HTTP-ответа получает отмену по grace, lease ждёт его cleanup", async () => {
+    const clock = new ManualClock();
+    const requests = new AbortController();
+    const entered = Promise.withResolvers<void>();
+    const cancelled = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const warnings: string[] = [];
+    const gitSync = createGitSyncClient({
+      cwd: import.meta.dir,
+      env: {},
+      binary: process.execPath,
+      executablePath: process.execPath,
+      userHome: import.meta.dir,
+      version: "test",
+      signal: requests.signal,
+      /**
+       * Подменяет только native process. Настоящий Runtime передаёт lifetime signal в auto;
+       * отдельный барьер cleanup позволяет проверить lease после abort без реальных секунд ожидания.
+       */
+      runner: async (command): Promise<ProcessResult> => {
+        if (command.args[0] === "--version") {
+          return { exitCode: 0, stdout: "relay test", stderr: "" };
+        }
+        expect(command.args).toEqual(["--git-sync-request"]);
+        expect(JSON.parse(command.input ?? "null")).toMatchObject({ action: "auto" });
+        const signal = command.signal;
+        if (signal === undefined) {
+          throw new Error("Runtime не передал сигнал отмены auto");
+        }
+        /**
+         * Наблюдает только отмену, а не подменяет собственное завершение процессного runner.
+         */
+        const aborted = (): void => cancelled.resolve();
+        signal.addEventListener("abort", aborted, { once: true });
+        if (signal.aborted) {
+          aborted();
+        }
+        entered.resolve();
+        try {
+          await cancelled.promise;
+          await release.promise;
+          throw new RelayError("GIT_SYNC_CANCELLED", "Фоновый обмен отменён", 143);
+        } finally {
+          signal.removeEventListener("abort", aborted);
+        }
+      },
+    });
+    await withServer(
+      async ({ client, location, runtime, server }) => {
+        prepareDueSynchronization(location);
+        const launch = createServerLaunch(runtime, {
+          version: "test",
+          mode: "foreground",
+          port: 0,
+        });
+        const registration = acquireServerInstance(launch);
+        let stopping: Promise<void> | undefined;
+        let closed = false;
+        try {
+          const response = await bounded(client.entity(location.projectId, "PROJECT"));
+          await bounded(entered.promise);
+          expect(response.data.id).toBe(location.projectId);
+
+          stopping = shutdown(server, registration, requests, clock).then(() => {
+            closed = true;
+          });
+          const rejected = await server.app.inject({
+            method: "GET",
+            url: "/api/v2/context",
+            headers: { host: new URL(server.url).host },
+          });
+          clock.advance(REQUEST_GRACE_MS - 1);
+
+          expect(rejected.statusCode).toBe(503);
+          expect(closed).toBe(false);
+          expect(requests.signal.aborted).toBe(false);
+          expectBusy(launch);
+          clock.advance(1);
+          await bounded(cancelled.promise);
+          expect(requests.signal.reason).toBe("SIGTERM");
+          expect(closed).toBe(false);
+          expectBusy(launch);
+          release.resolve();
+          await bounded(stopping);
+
+          expect(closed).toBe(true);
+          expect(warnings).toEqual(["GIT_SYNC_CANCELLED"]);
+          expect(clock.size).toBe(0);
+          acquireServerInstance(launch).close();
+        } finally {
+          requests.abort("SIGTERM");
+          release.resolve();
+          try {
+            await stopping;
+          } finally {
+            registration.close();
+          }
+        }
+      },
+      {
+        gitSync,
+        /**
+         * Отмена принадлежит фоновому каналу, а не уже завершённому HTTP-запросу.
+         */
+        synchronizationWarning: (error): void => {
+          warnings.push(error.code);
+        },
+      },
+      "background-sync-tests/fixtures",
+    );
+  });
+
   test("grace не отменяет Runtime раньше срока; lease освобождается только после cleanup", async () => {
     await withServer(async ({ runtime }) => {
       const launch = createServerLaunch(runtime, { version: "test", mode: "foreground", port: 0 });

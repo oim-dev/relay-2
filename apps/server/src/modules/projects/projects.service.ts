@@ -11,6 +11,7 @@ import {
   openProject,
   resolveServerScope,
   synchronizationDueAt,
+  type OpenedProject,
 } from "@relay/project-runtime";
 import { dirname } from "node:path";
 import type { ProjectDatabase } from "@relay/storage";
@@ -19,6 +20,7 @@ import { SERVER_OPTIONS } from "../../http/options";
 import { httpMessages } from "../../http/http.messages";
 import { publicError } from "../../http/errors";
 import type { ProjectTarget } from "./project.types";
+import { AutomaticSynchronization } from "./automatic-synchronization";
 
 /**
  * Идентифицирует физическую БД без зависимости от имени/симлинка файла.
@@ -42,6 +44,8 @@ export class ProjectsService {
   private readonly targets = new Map<string, ProjectTarget>();
   /* Async writers и процессные вызовы, удерживающие открытое соединение. */
   private readonly pending = new Set<Promise<unknown>>();
+  /* Фоновый обмен имеет lifetime приложения, а не HTTP-запроса. */
+  private readonly synchronization: AutomaticSynchronization;
   /* Закрытие запрещает новые соединения после HTTP drain. */
   private closing = false;
 
@@ -53,6 +57,9 @@ export class ProjectsService {
     @Inject(SERVER_OPTIONS) private readonly options: RelayServerOptions,
   ) {
     validateActor(options.actor);
+    this.synchronization = new AutomaticSynchronization(async (error): Promise<void> => {
+      await options.synchronizationWarning?.(publicError(error));
+    });
     const scope = resolveServerScope(options.runtime);
     this.status = scope.projects.map(({ id, name, slug, path, available, error }) => ({
       id,
@@ -101,10 +108,52 @@ export class ProjectsService {
   }
 
   /**
+   * Открывает собственное соединение и сверяет startup anchor; ошибка всегда закрывает его.
+   */
+  private open(target: ProjectTarget): OpenedProject {
+    const project = openProject(target.options);
+    try {
+      if (
+        project.location.projectId !== target.projectId ||
+        physicalIdentity(project.location.databasePath) !== target.identity
+      ) {
+        throw new RelayError("PROJECT_CHANGED", httpMessages.projectChanged, 4);
+      }
+      return project;
+    } catch (error) {
+      project.database.close();
+      throw error;
+    }
+  }
+
+  /**
+   * Повторно проверяет выбранную БД и durable расписание после очереди, освобождая соединение
+   * до ожидания Git. Межпроцессный mutex и окончательное решение о попытке остаются у Git Sync.
+   */
+  private async exchange(target: ProjectTarget): Promise<void> {
+    if (this.closing || this.options.gitSync === undefined) {
+      return;
+    }
+    const { location, database } = this.open(target);
+    let due: boolean;
+    try {
+      due =
+        hasProjectGit(dirname(location.configPath)) &&
+        Date.now() >= synchronizationDueAt(database.getSynchronizationSchedule());
+    } finally {
+      database.close();
+    }
+    if (due) {
+      await this.options.gitSync.request({ version: 1, action: "auto", options: target.options });
+    }
+  }
+
+  /**
    * Удерживает проверенное соединение до завершения async операции, включая отказ.
    * SQLite callback-транзакция не охватывает Promise writer; snapshot выбирает конкретный reader.
-   * activity ожидает созревший обмен перед Core; local оставляет диагностику и фоновые чтения локальными.
-   * Ошибка доставки не препятствует предметной операции и не заменяет её исходные guards.
+   * activity после успешной операции сигналит о созревшем обмене, не ожидая его в HTTP.
+   * local оставляет диагностику и SSE локальными. Данные ответа принадлежат локальному snapshot;
+   * фоновый импорт не заменяет исходные guards формы и не повторяет пользовательскую запись.
    */
   async run<T>(
     projectId: string,
@@ -112,33 +161,19 @@ export class ProjectsService {
     mode: "activity" | "local" = "activity",
   ): Promise<T> {
     const target = this.target(projectId);
-    const { location, database } = openProject(target.options);
+    const { location, database } = this.open(target);
     const operation = (async (): Promise<T> => {
       try {
-        if (
-          location.projectId !== projectId ||
-          physicalIdentity(location.databasePath) !== target.identity
-        ) {
-          throw new RelayError("PROJECT_CHANGED", httpMessages.projectChanged, 4);
-        }
-        if (
+        const due =
           mode === "activity" &&
           this.options.gitSync !== undefined &&
           hasProjectGit(dirname(location.configPath)) &&
-          Date.now() >= synchronizationDueAt(database.getSynchronizationSchedule())
-        ) {
-          try {
-            await this.options.gitSync.request({
-              version: 1,
-              action: "auto",
-              options: target.options,
-            });
-          } catch (error) {
-            // Ошибка доставки сохраняется транспортом; локальная предметная операция остаётся доступна.
-            await this.options.synchronizationWarning?.(publicError(error));
-          }
+          Date.now() >= synchronizationDueAt(database.getSynchronizationSchedule());
+        const result = await action(database);
+        if (due) {
+          this.synchronization.request(projectId, () => this.exchange(target));
         }
-        return await action(database);
+        return result;
       } finally {
         database.close();
       }
@@ -152,10 +187,19 @@ export class ProjectsService {
   }
 
   /**
-   * Завершает принятые вызовы до освобождения последнего соединения.
+   * Прекращает приём фоновой работы до HTTP drain, сохраняя завершение уже принятых writers.
+   */
+  stopSynchronization(): void {
+    this.synchronization.stop();
+  }
+
+  /**
+   * Завершает принятые HTTP-вызовы и фоновый обмен до освобождения ресурсов приложения.
    */
   async close(): Promise<void> {
     this.closing = true;
+    this.stopSynchronization();
     await Promise.allSettled([...this.pending]);
+    await this.synchronization.close();
   }
 }

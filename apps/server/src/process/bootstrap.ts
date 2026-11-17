@@ -10,7 +10,6 @@ import {
 } from "@relay/project-runtime";
 import { startRelayServer } from "../server";
 import type { StartedRelayServer } from "../server.types";
-import { createWebHandler } from "../modules/assets/static-handler";
 import { ProjectsService } from "../modules/projects/projects.service";
 import type { ServerControl, ServerEnvironment, ServerInvocation } from "./process.types";
 import { processMessages as messages } from "./process.messages";
@@ -54,7 +53,7 @@ function stopped(signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Композирует реальный Nest HTTP, embedded Web, Runtime регистрацию и guarded Git Sync.
+ * Композирует Nest HTTP, Runtime регистрацию и guarded Git Sync; dev получает Web от Vite.
  * Заканчивается только после освобождения lease; при fatal shutdown main обязан выйти из процесса.
  */
 export async function bootstrapServer(
@@ -102,8 +101,13 @@ export async function bootstrapServer(
           `${JSON.stringify({ type: "git-sync", level: "warning", error })}\n`,
         );
       },
-      staticHandler: createWebHandler(),
-      allowedOrigins: "allowedOrigins" in invocation ? invocation.allowedOrigins : [],
+      ...(launch.development === undefined
+        ? { staticHandler: (await import("../modules/assets/static-handler")).createWebHandler() }
+        : {}),
+      allowedOrigins: [
+        ...("allowedOrigins" in invocation ? invocation.allowedOrigins : []),
+        ...(launch.development === undefined ? [] : [new URL(launch.development.webUrl).origin]),
+      ],
     });
     if (!control.signal.aborted) {
       registration.ready({

@@ -32,6 +32,7 @@ export type {
   ServerScope,
   ServerProjectStatus,
   ServerInstanceStatus,
+  ServerDevelopment,
   ServerInstanceList,
 } from "./server/lifecycle.types";
 export type * from "./commands/command-store.types";

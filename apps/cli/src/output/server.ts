@@ -9,6 +9,7 @@ function instance(value: unknown): string {
     return renderFullValue(value);
   }
   const states: Readonly<Record<string, string>> = messages.states;
+  const development = isObject(value.development) ? value.development : undefined;
   const scope = isObject(value.scope)
     ? `${value.scope.kind}: ${value.scope.configPath}${value.scope.project ? ` (${value.scope.project})` : ""}`
     : messages.unknown;
@@ -34,8 +35,11 @@ function instance(value: unknown): string {
       ).size
     : 0;
   return [
-    `${value.instanceId}: ${states[String(value.state)] ?? value.state}`,
-    `  PID: ${value.pid ?? messages.unknown}; URL: ${value.url ?? messages.unknown}`,
+    `${value.instanceId}: ${states[String(value.state)] ?? value.state}${development ? messages.developmentMarker : ""}`,
+    `  PID: ${value.pid ?? messages.unknown}; ${development ? messages.apiLabel : messages.urlLabel}: ${value.url ?? messages.unknown}`,
+    ...(development
+      ? [`  ${messages.webLabel}: ${development.webUrl}`, `  ${messages.developmentManaged}`]
+      : []),
     `  ${messages.version}: ${value.version ?? messages.unknown}; ${value.mode ?? messages.unknown}`,
     `  ${messages.scope}: ${scope}`,
     value.state === "ready"

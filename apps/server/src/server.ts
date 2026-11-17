@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { RelayError } from "@relay/contracts";
+import { combineProcessFailures } from "@relay/project-runtime";
 import { ServerModule } from "./server.module";
 import { RequestLifetime } from "./http/request-lifetime";
 import { httpMessages } from "./http/http.messages";
@@ -57,11 +58,26 @@ export async function createRelayServer(
     close: (): Promise<void> => {
       if (completion === undefined) {
         lifetime.stop();
+        app.get(ProjectsService).stopSynchronization();
         completion = (async (): Promise<void> => {
-          await app.get(EventsService).close();
-          await lifetime.drain();
-          await app.get(ProjectsService).close();
-          await app.close();
+          let failed = false;
+          let failure: unknown;
+          try {
+            await app.get(EventsService).close();
+            await lifetime.drain();
+            await app.get(ProjectsService).close();
+          } catch (error) {
+            failed = true;
+            failure = error;
+          }
+          try {
+            await app.close();
+          } catch (cleanup) {
+            throw failed ? combineProcessFailures(failure, cleanup) : cleanup;
+          }
+          if (failed) {
+            throw failure;
+          }
         })();
       }
       return completion;

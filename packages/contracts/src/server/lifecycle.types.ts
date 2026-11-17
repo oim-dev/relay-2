@@ -39,6 +39,14 @@ export interface ServerProjectStatus {
 }
 
 /**
+ * Dev-сессия с отдельным Vite; жизненным циклом управляет её терминал.
+ */
+export interface ServerDevelopment {
+  /* Полный HTTP URL Vite на IPv4 loopback; API остаётся в ServerInstanceStatus.url. */
+  readonly webUrl: string;
+}
+
+/**
  * Публичное наблюдение процесса; секрет control capability никогда не входит в этот DTO.
  */
 export interface ServerInstanceStatus {
@@ -56,6 +64,8 @@ export interface ServerInstanceStatus {
   readonly version: string | null;
   /* Владелец процесса; null означает повреждённую регистрацию с неизвестным владельцем. */
   readonly mode: "service" | "foreground" | null;
+  /* Присутствует только у dev-запуска; не означает готовность API или Vite. */
+  readonly development?: ServerDevelopment;
   /* Выбранная область сервера; null только у повреждённой записи. */
   readonly scope: ServerScope | null;
   /* Регистрации из ready health; при другом state состав неизвестен и массив пуст. */

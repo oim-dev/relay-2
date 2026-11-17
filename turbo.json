@@ -42,9 +42,20 @@
     },
     "@relay/web#dev": {
       "dependsOn": ["@relay/rest-sdk#build"],
+      "passThroughEnv": ["RELAY_API_URL", "RELAY_WEB_PORT"],
       "cache": false,
       "persistent": true
     },
-    "dev": { "cache": false, "persistent": true }
+    "dev": {
+      "cache": false,
+      "persistent": true,
+      "passThroughEnv": [
+        "RELAY_CONFIG",
+        "RELAY_HOME",
+        "RELAY_ACTOR",
+        "RELAY_WEB_ORIGIN",
+        "RELAY_CLI_BIN"
+      ]
+    }
   }
 }

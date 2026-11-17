@@ -1,7 +1,7 @@
 import type { Subprocess } from "bun";
 
 /**
- * Подтверждённое ready-сообщение настоящего compiled Server.
+ * Подтверждённое ready-сообщение настоящего процессного entry Server.
  */
 export interface ServerReady {
   /* Фактический loopback URL REST/SPA. */

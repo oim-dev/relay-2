@@ -10,7 +10,7 @@ const modeCases = [
 let fixture: ProjectDatabaseFixture;
 
 beforeEach(() => {
-  fixture = new ProjectDatabaseFixture("mode", "project-local-sync/schedule-mode-review");
+  fixture = new ProjectDatabaseFixture("mode", "dev-mode-test-review/storage-fixtures");
 });
 
 afterEach(() => {
@@ -133,5 +133,34 @@ describe("Локальный auto/manual без подключения тран�
     expect(failure.exitCode).toBe(2);
     expect(db.getSynchronizationSchedule()).toEqual(schedule);
     expect(db.getReplicationGuard()).toEqual(guard);
+  });
+
+  test("неизвестный сохранённый mode отклоняется readonly-чтением без исправления повреждения", () => {
+    const db = fixture.create();
+    const generation = db.getGeneration();
+    db.close();
+    // Обходим CHECK только для моделирования повреждённого файла; штатный setter это значение отвергает.
+    fixture.withRaw((raw) =>
+      raw.exec(
+        "PRAGMA ignore_check_constraints=ON; UPDATE synchronization_schedule SET mode='unexpected' WHERE singleton=1;",
+      ),
+    );
+    const reader = ProjectDatabase.openReadonly(fixture.path);
+    try {
+      const failure = expectRelayError(
+        () => reader.getSynchronizationSchedule(),
+        "DATABASE_INVALID",
+      );
+
+      expect(failure.exitCode).toBe(1);
+      expect(reader.getGeneration()).toBe(generation);
+    } finally {
+      reader.close();
+    }
+    fixture.withRaw((raw) => {
+      expect(
+        raw.query("SELECT mode FROM synchronization_schedule WHERE singleton=1").get(),
+      ).toEqual({ mode: "unexpected" });
+    });
   });
 });

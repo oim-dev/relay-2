@@ -54,7 +54,9 @@ CLI проверяется через `runCli`, интеграцию с лока
 Server integration находится в `apps/server/tests/integration/`: HTTP-команды и receipts,
 проекции/пагинация, выбор workspace, SSE и процессный порт Git Sync, сгенерированные схемы.
 Lifecycle Server проверяется на границе CLI/Runtime в `apps/cli/tests/integration/server-*.integration.test.ts`;
-чистые discovery и native-конфигурации — в `packages/project-runtime/src/server/`.
+dev metadata/control — также в интеграции Runtime. `apps/server/tests/integration/development.integration.test.ts`
+проверяет запуск без Web dist, reload и parent lease на изолированной копии source Server с Bun watch,
+без сборки бинарника или запуска Vite. Чистые discovery и native-конфигурации — в `packages/project-runtime/src/server/`.
 Тестовые процессы control-протокола не заменяют процессный набор настоящего `relay-server`.
 
 ## Выбор уровня проверки

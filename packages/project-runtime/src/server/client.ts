@@ -43,6 +43,17 @@ function selectedLaunch(options: RuntimeOptions, instanceId: string): ServerLaun
 }
 
 /**
+ * Отклоняет управление dev-процессом до discovery, control и изменения native-служб.
+ */
+function assertManagedServer(launch: ServerLaunch): void {
+  if (launch.development !== undefined) {
+    throw new RelayError("SERVER_DEVELOPMENT_MANAGED", messages.developmentManaged, 4, {
+      instanceId: launch.instanceId,
+    });
+  }
+}
+
+/**
  * Ожидает health либо освобождение lease с монотонным бюджетом; повторяются только наблюдения.
  */
 async function waitServer(
@@ -86,6 +97,7 @@ async function stopLaunch(
   launch: ServerLaunch,
   environment: ServerEnvironment,
 ): Promise<ServerInstanceStatus> {
+  assertManagedServer(launch);
   const endpoint = readServerEndpoint(launch);
   if (endpoint && probeServerLease(launch) === "busy") {
     await serverControl(endpoint, "stop", environment);
@@ -177,6 +189,8 @@ async function openBrowser(url: string, environment: ServerEnvironment): Promise
 /**
  * Создаёт ленивый локальный клиент управления независимыми серверами одного явного home.
  * list/stop не требуют проекта или установленного binary; start/run проверяют совместимый выпуск.
+ * Dev допускает list/open; stop/restart возвращают SERVER_DEVELOPMENT_MANAGED до discovery,
+ * control-запросов и обращения к native-службам, даже для уже остановленной регистрации.
  */
 export function createServerClient(environment: ServerEnvironment): ServerClient {
   return {
@@ -229,18 +243,20 @@ export function createServerClient(environment: ServerEnvironment): ServerClient
     list: (options, instanceId): Promise<ServerInstanceList> =>
       listServerInstances(options, environment, instanceId),
     /**
-     * Останавливает один UUID, сериализуя конкурентные команды CLI.
+     * Останавливает один не-dev UUID, сериализуя конкурентные команды CLI.
      */
     async stop(options, instanceId): Promise<ServerInstanceStatus> {
       const launch = selectedLaunch(options, instanceId);
+      assertManagedServer(launch);
       return withServerAction(launch, () => stopLaunch(launch, environment));
     },
     /**
-     * Проверяет binary до остановки, затем заменяет launch и ждёт health нового boot.
+     * После отказа для dev проверяет binary до остановки, заменяет launch и ждёт health нового boot.
      */
     async restart(options, instanceId): Promise<ServerInstanceStatus> {
-      const binary = await discoverServerBinary(environment);
       const launch = selectedLaunch(options, instanceId);
+      assertManagedServer(launch);
+      const binary = await discoverServerBinary(environment);
       return withServerAction(launch, async () => {
         await stopLaunch(launch, environment);
         const next = publishRestart(launch, environment.version);
@@ -250,6 +266,7 @@ export function createServerClient(environment: ServerEnvironment): ServerClient
     },
     /**
      * Отклоняет неоднозначность нескольких ready экземпляров вместо выбора случайного URL.
+     * У dev открывает Vite при ready API; отдельную доступность frontend этот метод не проверяет.
      */
     async open(options, instanceId): Promise<ServerInstanceStatus> {
       const list = await listServerInstances(options, environment, instanceId);
@@ -261,7 +278,7 @@ export function createServerClient(environment: ServerEnvironment): ServerClient
           4,
         );
       }
-      await openBrowser(ready[0].url, environment);
+      await openBrowser(ready[0].development?.webUrl ?? ready[0].url, environment);
       return ready[0];
     },
   };

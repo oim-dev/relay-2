@@ -8,7 +8,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { RelayError, validateActor, type ServerScope } from "@relay/contracts";
+import {
+  RelayError,
+  validateActor,
+  type ServerDevelopment,
+  type ServerScope,
+} from "@relay/contracts";
 import { acquireLocalLock } from "@relay/storage";
 import { hasCode } from "../configuration/files";
 import type { RuntimeOptions } from "../configuration/runtime-options.types";
@@ -103,6 +108,13 @@ export function isServerUrl(value: unknown): value is string {
 }
 
 /**
+ * Проверяет метаданные отдельного dev frontend до публикации и чтения launch/health.
+ */
+export function isServerDevelopment(value: unknown): value is ServerDevelopment {
+  return serverObject(value) && isServerUrl(value.webUrl);
+}
+
+/**
  * Проверяет минимальную область, не читая проектную БД.
  */
 export function isServerScope(value: unknown): value is ServerScope {
@@ -129,7 +141,9 @@ export function createServerLaunch(
     port < 0 ||
     port > 65535 ||
     !input.version ||
-    !["service", "foreground"].includes(input.mode)
+    !["service", "foreground"].includes(input.mode) ||
+    (input.development !== undefined &&
+      (input.mode !== "foreground" || !isServerDevelopment(input.development)))
   ) {
     throw new RelayError("INVALID_ARGUMENT", messages.invalidInput, 2);
   }
@@ -158,6 +172,7 @@ export function createServerLaunch(
     actor,
     port,
     mode: input.mode,
+    ...(input.development === undefined ? {} : { development: { ...input.development } }),
   };
   writeFileSync(launch.path, JSON.stringify(launch), { flag: "wx", mode: 0o600 });
   return launch;
@@ -190,7 +205,9 @@ export function readServerLaunch(path: string): ServerLaunch {
     typeof value.port !== "number" ||
     value.port < 0 ||
     value.port > 65535 ||
-    (value.mode !== "foreground" && value.mode !== "service")
+    (value.mode !== "foreground" && value.mode !== "service") ||
+    (value.development !== undefined &&
+      (value.mode !== "foreground" || !isServerDevelopment(value.development)))
   ) {
     throw new RelayError("SERVER_REGISTRY_INVALID", messages.invalid, 4, { path });
   }
@@ -216,6 +233,9 @@ export function readServerLaunch(path: string): ServerLaunch {
     actor: value.actor,
     port: value.port,
     mode: value.mode,
+    ...(value.development === undefined
+      ? {}
+      : { development: { webUrl: value.development.webUrl } }),
     options: {
       cwd: value.options.cwd,
       config: value.scope.configPath,
