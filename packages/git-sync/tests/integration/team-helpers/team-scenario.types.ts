@@ -16,7 +16,7 @@ export interface OfflineCreation {
   readonly index: number;
   /* Документ с предварительным ключом и точным исходным Markdown. */
   readonly document: KnowledgeRecord<"document">;
-  /* Собственная задача — цель ссылки документа; её ключ также может перенумероваться. */
+  /* Собственная задача — цель ссылки документа; коллизия её ключа требует явного решения. */
   readonly task: TaskRecord;
   /* Исходные immutable changeset до первого обмена. */
   readonly changesets: readonly ReplicationChangeset[];

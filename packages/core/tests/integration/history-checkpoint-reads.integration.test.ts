@@ -15,6 +15,10 @@ import {
   snapshotHistoryStorage,
   withHistoryFixture,
 } from "./history-fixture";
+import {
+  corruptHistoryChildLink,
+  insertForeignIntentMaterial,
+} from "./helpers/history-read-corruption";
 
 const checkpointActions = [
   { action: "open", kind: "intent" },
@@ -437,20 +441,8 @@ describe("Ограниченные чтения записи checkpoint", () => 
       const session = await history.start({ title: "Владелец намерения" }, "автор");
       const intent = await openHistoryIntent(history, session);
       const foreign = await history.start({ title: "Ошибочная сессия результата" }, "автор");
-      const id = crypto.randomUUID();
-      // Повреждаем только связь результата с сессией; намерение по-прежнему явно указано.
-      db.insert({
-        ...intent,
-        id,
-        key: `CP-${id}`,
-        data: {
-          ...intent.data,
-          kind: "result",
-          sessionId: foreign.id,
-          runId: currentHistoryRun(foreign).id,
-          intentId: intent.id,
-        },
-      });
+      // Внешняя SQLite нарушает FK intent→session, сохраняя полную строку результата и его адреса.
+      const result = insertForeignIntentMaterial(db, intent, foreign, "result", 1);
       const current = history.get(session.id);
       const before = snapshotHistoryStorage(db);
 
@@ -461,6 +453,7 @@ describe("Ограниченные чтения записи checkpoint", () => 
 
       expect(snapshotHistoryStorage(db)).toEqual(before);
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.getCheckpoint(result.id)).toEqual(result);
     });
   });
 
@@ -472,18 +465,16 @@ describe("Ограниченные чтения записи checkpoint", () => 
         const intent = await openHistoryIntent(history, session);
         const child = await forkHistorySession(history, history.get(session.id), intent);
         // Одна сторона происхождения остаётся валидной и должна привести к повреждённому ребёнку.
-        db.update(
-          { ...child, revision: child.revision + 1, data: { ...child.data, [field]: null } },
-          child.revision,
-        );
+        corruptHistoryChildLink(db, child, field, null);
         const current = history.get(session.id);
         const before = snapshotHistoryStorage(db);
 
-        await expectHistoryError(
+        const error = await expectHistoryError(
           async () => await recordHistoryMaterial(history, current, intent, "complete"),
           "CORRUPT_DATA",
         );
 
+        expect(error.details).toMatchObject({ id: child.id });
         expect(snapshotHistoryStorage(db)).toEqual(before);
       });
     },

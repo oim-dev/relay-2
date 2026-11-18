@@ -40,7 +40,7 @@ function applyCommandEffect(
       id: after.id,
     });
   }
-  if (!updateEntity(connection, after, before.revision, { allocationId })) {
+  if (!updateEntity(connection, after, before.revision, { allocationId, before })) {
     const current = getEntityRevision(connection, before.id);
     if (current === undefined) {
       throw new RelayError("NOT_FOUND", entityMessages.entityMissing, 3, { id: before.id });

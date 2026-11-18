@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { ReplicationChangeset } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { BatchService } from "../../src/batch/batch";
@@ -10,6 +11,7 @@ import { decodeReplicationSnapshot } from "../../src/replication/replication-for
 import { versionComponent } from "../../src/replication/component-merge";
 import { withReplicationFixture } from "./helpers/replication-fixture";
 import { createLegacyReplicationProject } from "./helpers/replication-legacy-project-fixture";
+import { expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
 import {
   redigestSource,
   unverifiedSourcePublication,
@@ -362,7 +364,7 @@ describe("Закрытый контракт технического source", ()
     );
   });
 
-  test("реальная v2 миграция публикует initial baseline с прежними ID, содержанием и receipt", async () => {
+  test("реальная v2 база с предметными данными и receipt отклоняется без изменения файла", async () => {
     await withReplicationFixture(
       async (db) => {
         await new BatchService(db).execute(
@@ -382,52 +384,78 @@ describe("Закрытый контракт технического source", ()
       ({ first, remote, directory }) => {
         const path = join(directory, "real-v2.sqlite");
         createLegacyReplicationProject(path, first.projectId, first.list(), remote.receipts);
-        const migrated = ProjectDatabase.open(path);
-        let restored: ProjectDatabase | undefined;
-        try {
-          restored = ProjectDatabase.createReplica(
-            join(directory, "migrated-peer.sqlite"),
-            first.projectId,
-          );
-          const source = migrated.getReplicationOutbox()[0];
-          expect(source).toMatchObject({ modelVersion: 2, mode: "baseline", sequence: 1 });
-          expect(source?.transitions?.[0]?.command).toBe("baseline");
-          const before = migrated.getReplicationOutbox();
-          const sync = new ReplicationService(migrated);
+        const before = readFileSync(path);
 
-          const prepared = sync.prepare(null);
+        expectRelayError(() => ProjectDatabase.open(path), "SCHEMA_VERSION_UNSUPPORTED");
 
-          expect(prepared.conflicts).toEqual([]);
-          new ReplicationService(restored).bootstrap(prepared.snapshot);
-          expect(
-            restored
-              .list()
-              .map((entry) => entry.id)
-              .sort(),
-          ).toEqual(
-            first
-              .list()
-              .map((entry) => entry.id)
-              .sort(),
-          );
-          expect(new TasksService(restored).get("PRODUCT-1").data.acceptanceCriteria).toEqual(
-            new TasksService(first).get("PRODUCT-1").data.acceptanceCriteria,
-          );
-          expect(restored.get("DOC-1")?.data.body).toBe("Точный Markdown");
-          expect(restored.getBatchReceipt("historical")).toEqual(
-            first.getBatchReceipt("historical"),
-          );
-          expect(migrated.getReplicationOutbox()).toEqual(before);
-          sync.accept(prepared.snapshot);
-          expect(sync.status().pending).toBe(0);
-          expect(new ReplicationService(restored).prepare(prepared.snapshot).snapshot).toEqual(
-            prepared.snapshot,
-          );
-        } finally {
-          restored?.close();
-          migrated.close();
-        }
+        expect(readFileSync(path)).toEqual(before);
       },
     );
+  });
+
+  test("новая база публикует техническую инициализацию и named batch без изменения source и receipt", async () => {
+    await withEntityDatabase(async (db) => {
+      const batch = new BatchService(db);
+      const result = await batch.execute(
+        {
+          version: 1,
+          operations: [
+            {
+              op: "task.create",
+              input: { title: "Владелец", acceptanceCriteria: [{ title: "Критерий" }] },
+            },
+            { op: "document.create", input: { name: "Документ", body: "Точный Markdown" } },
+          ],
+        },
+        { actor: "seed", operationKey: "initial-material" },
+      );
+      const before = db.getReplicationOutbox();
+      const source = before[0];
+      expect(source).toMatchObject({ modelVersion: 2, mode: "mutation", sequence: 1 });
+      expect(source?.transitions?.[0]?.command).toBe("storage.atomic");
+      const sync = new ReplicationService(db);
+      const restored = ProjectDatabase.createReplica(
+        join(dirname(db.path), "initial-peer.sqlite"),
+        db.projectId,
+      );
+      try {
+        const prepared = sync.prepare(null);
+
+        expect(prepared.conflicts).toEqual([]);
+        expect(prepared.included).toEqual(before.map((entry) => entry.id));
+        expect(prepared.snapshot.publication?.changes.map((entry) => entry.source)).toEqual(before);
+        const peer = new ReplicationService(restored);
+        peer.bootstrap(prepared.snapshot);
+        expect(
+          restored
+            .list()
+            .map((entry) => entry.id)
+            .sort(),
+        ).toEqual(
+          db
+            .list()
+            .map((entry) => entry.id)
+            .sort(),
+        );
+        expect(new TasksService(restored).get("PRODUCT-1").data.acceptanceCriteria).toEqual(
+          new TasksService(db).get("PRODUCT-1").data.acceptanceCriteria,
+        );
+        expect(restored.get("DOC-1")?.data.body).toBe("Точный Markdown");
+        expect(restored.getBatchReceipt("initial-material")).toEqual(
+          db.getBatchReceipt("initial-material"),
+        );
+        expect(new BatchService(restored).getResult("initial-material")).toEqual({
+          ...result,
+          replayed: true,
+        });
+        expect(db.getReplicationOutbox()).toEqual(before);
+        sync.accept(prepared.snapshot);
+        expect(sync.status().pending).toBe(0);
+        expect(peer.prepare(prepared.snapshot).snapshot).toEqual(prepared.snapshot);
+        expect(restored.getReplicationOutbox()).toEqual([]);
+      } finally {
+        restored.close();
+      }
+    });
   });
 });

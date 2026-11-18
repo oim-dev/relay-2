@@ -1,6 +1,8 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { EntityKind, EntityRecord, KnowledgeRecord } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
+import { readVersionedEntity } from "../../src/commands/command-versioned-read";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { calculateParticipationReplacement } from "../../src/knowledge/knowledge-participation";
 import {
@@ -23,11 +25,14 @@ const singletonKinds = ["project", "product"] as const;
 const collisionKinds = ["project", "product", "feature"] as const;
 const collisionForms = ["key", "id", "alias"] as const;
 const addressMethods = ["update", "rename"] as const;
-const corruptParticipation = ["missing", "foreign", "inactive", "omitted"] as const;
-const participationWrites = ["create", "replace"] as const;
+const invalidParticipationTargets = [
+  { name: "несуществующая реализация", target: "missing" },
+  { name: "реализация чужого приложения", target: "foreign" },
+] as const;
+const participationOperations = ["create", "replace", "read"] as const;
 const damagedBacklinks = [
-  { name: "null вместо ID владельца", value: null },
-  { name: "посторонний ID владельца", value: "another-application" },
+  { name: "null вместо ID владельца", value: null, code: "CORRUPT_DATA" },
+  { name: "несуществующий ID владельца", value: "another-application", code: "CONFLICT" },
 ] as const;
 
 /**
@@ -56,6 +61,31 @@ async function createTextRecord(
     { name: "Исходное имя", description: "Полный текст" },
     "tester",
   );
+}
+
+/**
+ * Повреждает только обратную ссылку реализации в изолированной файловой fixture.
+ * FK отключаются на отдельном соединении, чтобы проверить диагностику адресного чтения,
+ * а не штатный запрет записи. Проверяет выбор одной строки и всегда закрывает соединение.
+ */
+function corruptImplementationOwnerWithoutForeignKeys(
+  path: string,
+  implementationId: string,
+): void {
+  const raw = new Database(path, { create: false, readwrite: true, strict: true });
+  try {
+    raw.exec("PRAGMA foreign_keys = OFF");
+    const result = raw
+      .query<{ id: string }, [string, string]>(
+        "UPDATE implementations SET application_id=? WHERE id=? RETURNING id",
+      )
+      .get("missing-application", implementationId);
+    if (result?.id !== implementationId) {
+      throw new Error("Подготовленная реализация не найдена для повреждения обратной ссылки");
+    }
+  } finally {
+    raw.close();
+  }
 }
 
 describe("Адресная стоимость мутаций знаний", () => {
@@ -327,19 +357,54 @@ describe("Предметная диагностика занятого адре�
 });
 
 describe("Согласованное адресное участие приложения", () => {
-  for (const operation of participationWrites) {
-    test.each(damagedBacklinks)(
-      `${operation}: $name отклоняется без изменения состава, счётчика и поколения`,
-      async ({ value }) => {
-        await withKnowledgeFixture(async (service, db) => {
-          const { application, feature, scenario, featureImplementation } =
-            await createKnowledgeParticipation(service);
-          // Повреждение введено через Storage: ID остаётся в составе, но обратная ссылка больше не выбирается.
-          corruptKnowledgeRecord(db, featureImplementation, { applicationId: value });
-          const before = db.list();
-          const generation = db.getGeneration();
+  test.each(damagedBacklinks)(
+    "$name отклоняется при записи без изменения состава, счётчика и поколения",
+    async ({ value, code }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const { application, featureImplementation, scenarioImplementation } =
+          await createKnowledgeParticipation(service);
+        const before = db.list();
+        const parts = db.getComponents([application.id]);
+        const generation = db.getGeneration();
+        const pending = db.getReplicationOutbox();
 
-          await expectAsyncRelayError(async () => {
+        expectRelayError(
+          () => corruptKnowledgeRecord(db, featureImplementation, { applicationId: value }),
+          code,
+        );
+
+        expect(db.list()).toEqual(before);
+        expect(db.getComponents([application.id])).toEqual(parts);
+        expect(db.getGeneration()).toBe(generation);
+        expect(db.getReplicationOutbox()).toEqual(pending);
+        expect(service.participation(application.id)).toEqual({
+          application: application.key,
+          revision: application.revision,
+          items: [featureImplementation, scenarioImplementation],
+        });
+        // Резерв проверяет сохранность счётчика после отказа и удаляется вместе с fixture.
+        expect(db.nextKey("WEB-FI")).toBe("WEB-FI-2");
+      });
+    },
+  );
+
+  test.each(participationOperations)(
+    "%s не скрывает повреждённую SQL-обратную ссылку при адресной выборке участия",
+    async (operation) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const { application, feature, scenario, featureImplementation } =
+          await createKnowledgeParticipation(service);
+        corruptImplementationOwnerWithoutForeignKeys(db.path, featureImplementation.id);
+        const before = db.list();
+        const parts = db.getComponents([application.id]);
+        const generation = db.getGeneration();
+        const pending = db.getReplicationOutbox();
+        const load = spyOn(db.commands, "load");
+        const read = spyOn(db, "get");
+        const selection = spyOn(db, "listByField");
+        const list = spyOn(db, "list");
+        try {
+          const failure = await expectAsyncRelayError(async () => {
             if (operation === "create") {
               return await service.create(
                 "implementation",
@@ -351,6 +416,9 @@ describe("Согласованное адресное участие прило�
                 "tester",
               );
             }
+            if (operation === "read") {
+              return service.participation(application.id);
+            }
             return await service.replaceParticipation(
               application.id,
               [feature.id, scenario.id],
@@ -358,14 +426,39 @@ describe("Согласованное адресное участие прило�
             );
           }, "CORRUPT_DATA");
 
-          expect(db.list()).toEqual(before);
-          expect(db.getGeneration()).toBe(generation);
-          // Резерв следующего ключа выполняется только после проверки отказа и удаляется вместе с fixture.
-          expect(db.nextKey("WEB-FI")).toBe("WEB-FI-2");
-        });
-      },
-    );
-  }
+          expect(failure.details).toMatchObject({ id: application.id });
+          expect(list).not.toHaveBeenCalled();
+          if (operation === "read") {
+            expect(read).toHaveBeenCalledTimes(1);
+            expect(selection.mock.calls).toEqual([
+              ["implementation", "applicationId", application.id],
+            ]);
+          } else {
+            const selectors = load.mock.calls.flatMap(([request]) => request.selectors);
+            expect(selectors.filter((selector) => selector.kind === "field")).toEqual([
+              {
+                kind: "field",
+                entityKind: "implementation",
+                field: "applicationId",
+                value: application.id,
+              },
+            ]);
+            expect(selectors.some((selector) => selector.kind === "kind")).toBe(false);
+          }
+        } finally {
+          load.mockRestore();
+          read.mockRestore();
+          selection.mockRestore();
+          list.mockRestore();
+        }
+        expect(db.list()).toEqual(before);
+        expect(db.getComponents([application.id])).toEqual(parts);
+        expect(db.getGeneration()).toBe(generation);
+        expect(db.getReplicationOutbox()).toEqual(pending);
+        expect(db.nextKey("WEB-FI")).toBe("WEB-FI-2");
+      });
+    },
+  );
 
   test("состав участия сохраняет порядок прежнего непостраничного каталога по ключу", async () => {
     await withKnowledgeFixture(async (service) => {
@@ -548,15 +641,14 @@ describe("Согласованное адресное участие прило�
     });
   });
 
-  test.each(corruptParticipation)("повреждённый состав %s даёт CORRUPT_DATA", async (caseName) => {
-    await withKnowledgeFixture(async (service, db) => {
-      const { application, feature, featureImplementation } =
-        await createKnowledgeParticipation(service);
-      if (caseName === "inactive") {
-        corruptKnowledgeRecord(db, featureImplementation, { active: false });
-      } else {
-        let ids = ["missing-id"];
-        if (caseName === "foreign") {
+  test.each(invalidParticipationTargets)(
+    "$name отклоняется при записи состава",
+    async ({ target }) => {
+      await withKnowledgeFixture(async (service, db) => {
+        const { application, feature, featureImplementation, scenarioImplementation } =
+          await createKnowledgeParticipation(service);
+        let id = "missing-id";
+        if (target === "foreign") {
           const foreign = await service.create(
             "application",
             { name: "Чужое", slug: "foreign" },
@@ -567,18 +659,161 @@ describe("Согласованное адресное участие прило�
             { application: foreign.id, target: feature.id, title: "Чужой вклад" },
             "tester",
           );
-          ids = [implementation.id];
+          id = implementation.id;
         }
-        if (caseName === "omitted") {
-          ids = [];
-        }
-        corruptKnowledgeRecord(db, application, { implementationIds: ids });
-      }
+        const before = db.list();
+        const parts = db.getComponents([application.id]);
+        const generation = db.getGeneration();
+        const pending = db.getReplicationOutbox();
+
+        const failure = expectRelayError(
+          () => corruptKnowledgeRecord(db, application, { implementationIds: [id] }),
+          "CONFLICT",
+        );
+
+        expect(failure.details).toMatchObject({ reason: "FOREIGN KEY constraint failed" });
+        expect(db.list()).toEqual(before);
+        expect(db.getComponents([application.id])).toEqual(parts);
+        expect(db.getGeneration()).toBe(generation);
+        expect(db.getReplicationOutbox()).toEqual(pending);
+        expect(service.participation(application.id)).toEqual({
+          application: application.key,
+          revision: application.revision,
+          items: [featureImplementation, scenarioImplementation],
+        });
+      });
+    },
+  );
+
+  test("правка текста и статуса реализации сохраняет активное участие и согласованные версии", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { application, featureImplementation, scenarioImplementation } =
+        await createKnowledgeParticipation(service);
+      const observed = await readVersionedEntity(
+        db.commands,
+        featureImplementation.id,
+        "implementation",
+      );
+      const parts = db.getComponents([application.id]);
       const generation = db.getGeneration();
 
-      expectRelayError(() => service.participation(application.id), "CORRUPT_DATA");
+      const updated = await service.update(
+        "implementation",
+        featureImplementation.id,
+        { description: "Уточнённый вклад", status: "partial" },
+        {
+          ...write(featureImplementation, "editor"),
+          expectedVersion: observed.versions.aggregateVersion,
+        },
+      );
 
-      expect(db.getGeneration()).toBe(generation);
+      expect(updated).toMatchObject({
+        id: featureImplementation.id,
+        key: featureImplementation.key,
+        revision: featureImplementation.revision + 1,
+        createdAt: featureImplementation.createdAt,
+        createdBy: featureImplementation.createdBy,
+        updatedBy: "editor",
+        data: {
+          ...featureImplementation.data,
+          description: "Уточнённый вклад",
+          status: "partial",
+          active: true,
+        },
+      });
+      expect(service.get("implementation", featureImplementation.id)).toEqual(updated);
+      expect(service.get("application", application.id)).toEqual(application);
+      expect(db.getComponents([application.id])).toEqual(parts);
+      expect(db.getGeneration()).toBe(generation + 1);
+      expect(service.participation(application.id)).toEqual({
+        application: application.key,
+        revision: application.revision,
+        items: [updated, scenarioImplementation],
+      });
+
+      const captured = db.captureReplication();
+      const current = await readVersionedEntity(db.commands, updated.id, "implementation");
+      expect(current.entity).toEqual(updated);
+      expect(current.versions.recordVersion).not.toBe(observed.versions.recordVersion);
+      expect(captured.entities.find((entry) => entry.record.id === updated.id)).toMatchObject({
+        version: current.versions.recordVersion,
+        record: { data: updated.data },
+      });
+    });
+  });
+
+  test("замена участия снимает реализации и сохраняет согласованные переносимые версии", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const { application, featureImplementation, scenarioImplementation } =
+        await createKnowledgeParticipation(service);
+      const observed = await readVersionedEntity(db.commands, application.id, "application");
+      const generation = db.getGeneration();
+
+      const removed = await service.replaceParticipation(application.id, [], {
+        ...write(application, "editor"),
+        expectedVersion: observed.versions.aggregateVersion,
+      });
+
+      expect(removed).toMatchObject({
+        id: application.id,
+        revision: application.revision + 1,
+        data: { ...application.data, implementationIds: [] },
+      });
+      expect(service.get("application", application.id)).toEqual(removed);
+      expect(service.participation(application.id)).toEqual({
+        application: application.key,
+        revision: removed.revision,
+        items: [],
+      });
+      expect(db.getGeneration()).toBe(generation + 3);
+
+      const captured = db.captureReplication();
+      const currentApplication = await readVersionedEntity(
+        db.commands,
+        application.id,
+        "application",
+      );
+      expect(currentApplication.entity).toEqual(removed);
+      expect(currentApplication.versions.aggregateVersion).not.toBe(
+        observed.versions.aggregateVersion,
+      );
+      expect(captured.entities.find((entry) => entry.record.id === application.id)?.version).toBe(
+        currentApplication.versions.recordVersion,
+      );
+      const memberships = captured.components?.filter(
+        (part) => part.ownerId === application.id && part.kind === "application-participation",
+      );
+      expect(memberships).toHaveLength(2);
+      expect(memberships?.every((part) => part.deleted)).toBe(true);
+      for (const implementation of [featureImplementation, scenarioImplementation]) {
+        const current = await readVersionedEntity(db.commands, implementation.id, "implementation");
+        expect(current.entity).toMatchObject({
+          id: implementation.id,
+          key: implementation.key,
+          revision: implementation.revision + 1,
+          updatedBy: "editor",
+          data: { ...implementation.data, active: false },
+        });
+        expect(current.entity).toEqual(service.get("implementation", implementation.id));
+        expect(
+          captured.entities.find((entry) => entry.record.id === implementation.id),
+        ).toMatchObject({
+          version: current.versions.recordVersion,
+          record: { data: current.entity.data },
+        });
+      }
+
+      const reopened = ProjectDatabase.open(db.path);
+      try {
+        expect(reopened.captureReplication()).toEqual(captured);
+        expect(new KnowledgeService(reopened).participation(application.id)).toEqual({
+          application: application.key,
+          revision: removed.revision,
+          items: [],
+        });
+      } finally {
+        reopened.close();
+      }
     });
   });
 

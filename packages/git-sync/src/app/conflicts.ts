@@ -114,6 +114,17 @@ export function resolveConflictRequest(
     conflictDecision(input.decision),
     requiredString(input.actor),
   );
+  return conflictResolutionResult(replication, id, prepared);
+}
+
+/**
+ * Представляет сохранённое решение без полного снимка проекта; pending читается после подготовки.
+ */
+export function conflictResolutionResult(
+  replication: ReplicationAdapter,
+  id: string,
+  prepared: ReturnType<ReplicationAdapter["prepare"]>,
+): GitSyncConflictResolutionResult {
   return {
     id,
     generation: prepared.generation,

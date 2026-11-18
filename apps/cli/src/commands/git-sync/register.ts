@@ -202,6 +202,26 @@ export function registerGitSyncCommands(registry: CommandRegistry): void {
     run: (i): Promise<Result> =>
       request(i, "conflicts.resolve", { id: i.text("id"), decision: i.input, actor: i.actor }),
   });
+  registry.group("git-sync keys", messages.keys);
+  registry.addProcess("git-sync keys list", {
+    ...messages.keysList,
+    presentation: "git-sync-status",
+    /**
+     * Показывает коллизии адресов и предложения свободных ключей из согласованного чтения Core.
+     */
+    run: (i): Promise<Result> => request(i, "keys.list"),
+  });
+  registry.addProcess("git-sync keys resolve", {
+    ...messages.keysResolve,
+    args: { id: positional(messages.id), input: string(messages.input, true) },
+    readInput: readResolutionInput,
+    presentation: "git-sync-status",
+    /**
+     * Передаёт выбранные пользователем ключи и исходный fingerprint без автоматического подбора.
+     */
+    run: (i): Promise<Result> =>
+      request(i, "keys.resolve", { id: i.text("id"), decision: i.input, actor: i.actor }),
+  });
   registry.addProcess("git-sync restore", {
     ...messages.restore,
     args: {

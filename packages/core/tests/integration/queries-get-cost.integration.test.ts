@@ -33,7 +33,14 @@ describe("Ограниченная стоимость группового чт�
         "tester",
       );
       // Полное чтение проекта провалилось бы на повреждении невыбранного документа.
-      db.update({ ...unrelated, revision: 2, data: { ...unrelated.data, relations: null } }, 1);
+      db.update(
+        {
+          ...unrelated,
+          revision: unrelated.revision + 1,
+          data: { ...unrelated.data, body: " \t " },
+        },
+        unrelated.revision,
+      );
       const refs = Array.from({ length: 200 }, (_, index) =>
         index % 2 === 0 ? first.id : second.key,
       );

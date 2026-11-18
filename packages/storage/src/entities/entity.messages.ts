@@ -3,6 +3,7 @@
  */
 export const entityMessages = {
   revisionConflict: "Запись уже изменена; перечитайте её ревизию.",
+  invalidBefore: "Исходная запись эффекта относится к другому владельцу.",
   commentRequiresAppend: "Комментарии публикуются отдельной append-only операцией.",
   entityMissing: "Запись не найдена.",
   invalidPrefix: "Некорректный префикс ключа.",
@@ -14,8 +15,6 @@ export const entityMessages = {
   commentTaskMissing: "Задача исчезла после добавления комментария.",
   invalidSqlText: "Идентичность или SQL TEXT метаданные содержат непарный UTF-16 surrogate.",
   invalidCommentEncoding: "Текст комментария не соответствует неизменяемой маске кодирования.",
-  legacyEncoding:
-    "Старая база содержит непереносимые UTF-8 bytes; сохраняющая миграция невозможна.",
 
   /**
    * Указывает поле комментария, не прошедшее техническую проверку строки.

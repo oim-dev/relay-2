@@ -3,12 +3,16 @@ import {
   isPortableIdentityText,
   type ReplicationChangeset,
   type ReplicationDecision,
-  type ReplicationResolution,
+  type PortableReplicationResolution,
   type ReplicationDocumentTextPatch,
 } from "@relay/contracts";
 import { mergeObject } from "./record-merge";
 import { replicationMessages } from "./replication.messages";
-import type { ReplicationRecordOverride } from "./replication-resolution.types";
+import type {
+  ReplicationRecordOverride,
+  ReplicationEffectiveDecision,
+} from "./replication-resolution.types";
+import { validateKeyResolutionScope } from "./key-resolution";
 
 /**
  * Проверяет закрытый decision contract без изменения исходного source/receipt.
@@ -60,12 +64,20 @@ export function assertReplicationDecision(value: unknown): asserts value is Repl
 }
 
 /**
- * Не разрешает custom выходить за original effect scope или менять неизменяемую историю/квитанцию.
+ * Проверяет закрытую область text/key решения относительно original source.
+ * Не разрешает менять неизменяемую историю, идентичность или квитанцию.
  */
 export function validateResolutionScope(
   source: ReplicationChangeset,
-  decision: ReplicationDecision,
+  decision: ReplicationEffectiveDecision,
 ): void {
+  if (decision.choice === "keys") {
+    validateKeyResolutionScope(source, {
+      fingerprint: decision.fingerprint,
+      assignments: decision.assignments,
+    });
+    return;
+  }
   assertReplicationDecision(decision);
   if (decision.choice !== "custom") {
     return;
@@ -97,7 +109,7 @@ export function validateResolutionScope(
  * Выбирает только поправки данной command boundary; actor/time взяты из immutable решения.
  */
 export function resolutionOverrides(
-  resolution: ReplicationResolution | null,
+  resolution: PortableReplicationResolution | null,
   transition: number,
 ): ReadonlyMap<string, ReplicationRecordOverride> {
   const overrides = new Map<string, ReplicationRecordOverride>();
@@ -120,7 +132,16 @@ export function resolutionOverrides(
 /**
  * Получает пользовательскую часть решения, исключая его служебные immutable метаданные.
  */
-export function resolutionDecision(resolution: ReplicationResolution): ReplicationDecision {
+export function resolutionDecision(
+  resolution: PortableReplicationResolution,
+): ReplicationEffectiveDecision {
+  if (resolution.choice === "keys") {
+    return {
+      fingerprint: resolution.fingerprint,
+      choice: "keys",
+      assignments: resolution.assignments,
+    };
+  }
   return resolution.choice === "custom"
     ? { fingerprint: resolution.fingerprint, choice: "custom", patch: resolution.patch }
     : { fingerprint: resolution.fingerprint, choice: resolution.choice };

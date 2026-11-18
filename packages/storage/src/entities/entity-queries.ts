@@ -22,17 +22,12 @@ import { entityMessages } from "./entity.messages";
 import { hydrateComponentRecords } from "../components/component-hydration";
 import { assertSqlReferences, assertSqlText } from "./entity-sql-text";
 import { TASK_COMMENT_JSON, TASK_COMMENT_SOURCE } from "./comment-text";
+import { entityArrayItemFilter, entityFieldFilter } from "./relational-selections";
 
 // Полная карточка и журнал читаются одним запросом, без N+1 и копий комментариев в payload.
 const ENTITY_COLUMNS = `e.*, CASE WHEN e.kind = 'task' THEN (
   SELECT json_group_array(${TASK_COMMENT_JSON} ORDER BY c.sequence) FROM ${TASK_COMMENT_SOURCE} WHERE c.task_id = e.id
 ) ELSE NULL END AS comments`;
-
-// Имя поля сравнивается буквально, а значение — только как строка верхнего уровня JSON.
-const ENTITY_STRING_FIELD_MATCH = `e.kind = ? AND EXISTS (
-  SELECT 1 FROM json_each(e.data) field
-  WHERE field.key = json_extract(?, '$') AND field.type = 'text' AND field.value = json_extract(?, '$')
-)`;
 
 /**
  * Проверяет корневой JSON-объект, оставляя вложенные значения предметному декодеру Core.
@@ -64,6 +59,18 @@ function decodeEntityRow(row: EntityRow): EntityRecord {
     updatedBy: row.updated_by,
     data,
   };
+}
+
+/**
+ * Читает raw-проекцию владельца по постоянному ID без гидратации частей и журнала.
+ * Используется для точного before/after репликации в транзакции записи; отсутствие даёт undefined.
+ */
+export function getRawEntity(connection: Database, id: string): EntityRecord | undefined {
+  assertSqlText(id, "id");
+  const row = connection
+    .query<EntityRow, [string]>("SELECT e.*,NULL AS comments FROM entities e WHERE e.id=?")
+    .get(id);
+  return row === null ? undefined : decodeEntityRow(row);
 }
 
 /**
@@ -99,7 +106,7 @@ export function getEntityIdentity(
   assertSqlText(ref, "ref");
   const identity = connection
     .query<EntityIdentity, [string]>(
-      `SELECT e.id, e.kind, e.key FROM entity_refs r JOIN entities e ON e.id = r.entity_id
+      `SELECT e.id, e.kind, e.key FROM entity_refs r JOIN entity_identities e ON e.id = r.entity_id
        WHERE r.ref = ?`,
     )
     .get(ref);
@@ -123,7 +130,7 @@ export function resolveEntityReferences(
     .query<EntityReferenceIdentity, [string]>(
       `SELECT r.ref, e.id, e.kind, e.key
        FROM json_each(?) requested
-       JOIN entity_refs r ON r.ref = requested.value JOIN entities e ON e.id = r.entity_id`,
+       JOIN entity_refs r ON r.ref = requested.value JOIN entity_identities e ON e.id = r.entity_id`,
     )
     .all(JSON.stringify([...new Set(refs)]));
   const identities = new Map(rows.map(({ ref, id, kind, key }) => [ref, { id, kind, key }]));
@@ -145,17 +152,8 @@ export function getEntitySummaries(
   }
   const rows = connection
     .query<EntitySummaryRow, [string]>(
-      `SELECT e.id, e.kind, e.key, e.revision,
-         CASE WHEN e.kind IN ('project', 'product', 'feature', 'scenario', 'application', 'board', 'document')
-           THEN e.data -> '$.name' ELSE e.data -> '$.title' END AS title,
-         CASE e.kind WHEN 'task' THEN e.data -> '$.column'
-           WHEN 'document' THEN e.data -> '$.documentStatus'
-           WHEN 'implementation' THEN e.data -> '$.status'
-           WHEN 'work-plan' THEN e.data -> '$.status'
-           WHEN 'release' THEN e.data -> '$.status'
-           WHEN 'work-session' THEN e.data -> '$.status' END AS state,
-         CASE WHEN e.kind = 'implementation' THEN e.data -> '$.active' END AS active
-       FROM json_each(?) requested JOIN entities e ON e.id = requested.value`,
+      `SELECT id,kind,key,revision,title,state,active FROM entity_summaries
+       WHERE id IN (SELECT value FROM json_each(?))`,
     )
     .all(JSON.stringify([...new Set(ids)]));
   const summaries = new Map(
@@ -180,7 +178,9 @@ export function getEntityRevision(connection: Database, id: string): EntityRevis
   assertSqlText(id, "id");
   return (
     connection
-      .query<EntityRevision, [string]>("SELECT id, revision FROM entities WHERE id = ?")
+      .query<EntityRevision, [string]>(
+        "SELECT entity_id AS id,revision FROM local_entity_revisions WHERE entity_id=?",
+      )
       .get(id) ?? undefined
   );
 }
@@ -227,7 +227,7 @@ export function getEntityIdentities(
   return connection
     .query<EntityIdentity, [string, string | null, string | null]>(
       `SELECT e.id, e.kind, e.key
-       FROM json_each(?) requested JOIN entities e ON e.id = requested.value
+       FROM json_each(?) requested JOIN entity_identities e ON e.id = requested.value
        WHERE (? IS NULL OR e.kind = ?) ORDER BY requested.key`,
     )
     .all(JSON.stringify(ids), kind ?? null, kind ?? null);
@@ -244,13 +244,12 @@ export function findAddressIdentities(
 ): EntityIdentity[] {
   assertSqlText(ref, "ref");
   return connection
-    .query<EntityIdentity, [string, string, string]>(
-      `SELECT id, kind, key FROM entities WHERE kind = ? AND (
-         (json_type(data, '$.slug') = 'text' AND json_extract(data, '$.slug') = ?) OR
-         (json_type(data, '$.prefix') = 'text' AND json_extract(data, '$.prefix') = ?)
-       ) ORDER BY id`,
+    .query<EntityIdentity, [string, string]>(
+      `SELECT e.id,e.kind,e.key FROM entity_identities e
+       WHERE ${entityFieldFilter(kind, "slug")} OR ${entityFieldFilter(kind, "prefix")}
+       ORDER BY e.id`,
     )
-    .all(kind, ref, ref);
+    .all(JSON.stringify([JSON.stringify(ref)]), JSON.stringify([JSON.stringify(ref)]));
 }
 
 /**
@@ -272,9 +271,9 @@ export function listEntities(connection: Database, kind?: EntityKind): EntityRec
 }
 
 /**
- * Загружает карточки выбранного вида с точным строковым полем верхнего уровня JSON.
+ * Загружает карточки выбранного вида с точным строковым полем из закрытой карты колонок.
  * SQL отбирает owners до загрузки содержания; один пакет parts ограничен выбранными ID.
- * Имя поля сравнивается буквально, включая точки и кавычки, а не интерпретируется как JSON-путь.
+ * Имя поля буквальное; неизвестное поле не интерпретируется как SQL или вложенный путь.
  */
 export function listEntitiesByField(
   connection: Database,
@@ -283,11 +282,11 @@ export function listEntitiesByField(
   value: string,
 ): EntityRecord[] {
   const rows = connection
-    .query<EntityRow, [string, string, string]>(
-      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE ${ENTITY_STRING_FIELD_MATCH}
+    .query<EntityRow, [string]>(
+      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE ${entityFieldFilter(kind, field)}
        ORDER BY e.key, e.id`,
     )
-    .all(kind, JSON.stringify(field), JSON.stringify(value))
+    .all(JSON.stringify([JSON.stringify(value)]))
     .map(decodeEntityRow);
   return hydrateComponentRecords(connection, rows);
 }
@@ -304,18 +303,18 @@ export function listEntityIdentitiesByField(
   value: string,
 ): EntityIdentityWithRevision[] {
   return connection
-    .query<EntityIdentityWithRevision, [string, string, string]>(
-      `SELECT e.id, e.kind, e.key, e.revision FROM entities e WHERE ${ENTITY_STRING_FIELD_MATCH}
+    .query<EntityIdentityWithRevision, [string]>(
+      `SELECT e.id, e.kind, e.key, e.revision FROM entity_identities e WHERE ${entityFieldFilter(kind, field)}
        ORDER BY e.key, e.id`,
     )
-    .all(kind, JSON.stringify(field), JSON.stringify(value));
+    .all(JSON.stringify([JSON.stringify(value)]));
 }
 
 /**
  * Проверяет наличие объекта с точным строковым полем в верхнеуровневом массиве сущности вида.
- * Имена полей буквальные; один SQL объединяет normalized parts и raw fallback в одном снимке.
- * Возвращается лишь признак существования, без передачи содержания и JSON-декодирования в JS.
- * Неподходящие формы массива, элемента и поля не совпадают; скалярный текст не разбирается как JSON.
+ * Имена полей буквальные; один SQL выбирает только известные предметные колонки.
+ * Возвращается лишь признак существования, без построения полного data/value и JSON-декодирования в JS.
+ * Неизвестные поля и нестроковые значения не совпадают.
  * Снимок нескольких обращений удерживает вызывающий.
  */
 export function hasEntityArrayItemByField(
@@ -325,65 +324,28 @@ export function hasEntityArrayItemByField(
   itemField: string,
   value: string,
 ): boolean {
-  const normalizedKinds: Readonly<Record<string, string>> = {
-    acceptanceCriteria: "task-criterion",
-    stages: "plan-stage",
-    scope: "plan-scope",
-    relations: "document-relation",
-    runs: "session-run",
-    documentSections: "document-section",
-  };
-  const componentKind = Object.hasOwn(normalizedKinds, arrayField)
-    ? normalizedKinds[arrayField]
-    : undefined;
   return (
     connection
-      .query<unknown, [string, string | null, string, string, string, string, string, string]>(
-        `SELECT 1 FROM entities e WHERE e.kind = ? AND (
-          EXISTS (
-            SELECT 1 FROM entity_components c JOIN json_each(c.value) field
-            WHERE c.owner_id=e.id AND c.kind=? AND c.deleted=0
-              AND EXISTS (SELECT 1 FROM entity_components declaration
-                WHERE declaration.owner_id=e.id AND declaration.kind='collection'
-                  AND declaration.id=json_extract(?, '$') AND declaration.deleted=0)
-              AND field.key=json_extract(?, '$') AND field.type='text'
-              AND field.value=json_extract(?, '$')
-          ) OR EXISTS (
-            SELECT 1 FROM json_each(e.data) array_field
-            JOIN json_each(CASE WHEN array_field.type = 'array'
-              THEN array_field.value ELSE '[]' END) item
-           JOIN json_each(CASE WHEN item.type = 'object'
-             THEN item.value ELSE '{}' END) item_field
-            WHERE array_field.key = json_extract(?, '$') AND item_field.key = json_extract(?, '$')
-              AND item_field.type = 'text' AND item_field.value = json_extract(?, '$')
-          )
-        ) LIMIT 1`,
+      .query<unknown, [string]>(
+        `SELECT 1 FROM entity_identities e
+         WHERE ${entityArrayItemFilter(kind, arrayField, itemField)} LIMIT 1`,
       )
-      .get(
-        kind,
-        componentKind ?? null,
-        JSON.stringify(arrayField),
-        JSON.stringify(itemField),
-        JSON.stringify(value),
-        JSON.stringify(arrayField),
-        JSON.stringify(itemField),
-        JSON.stringify(value),
-      ) !== null
+      .get(JSON.stringify(value)) !== null
   );
 }
 
 /**
  * Читает планы, содержащие taskId, по индексу первичных membership, затем гидратирует одним пакетом.
  * Незавершённые и исторические включения возвращаются вместе; правила открытого состава принадлежат Core.
- * Нераспознаваемый inline stages не считается отсутствием включений: такой owner возвращается для диагностики.
+ * Состав выбирается по первичным plan_tasks, без построения JSON всего плана для фильтрации.
  */
 export function listTaskMembershipOwners(connection: Database, taskId: string): EntityRecord[] {
   assertSqlText(taskId, "taskId");
   const rows = connection
     .query<EntityRow, [string]>(
-      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE e.kind='work-plan' AND (
-    e.id IN (SELECT owner_id FROM entity_components WHERE kind='plan-task' AND deleted=0 AND target_id=?)
-    OR json_type(e.data,'$.stages') IS NOT NULL) ORDER BY e.key,e.id`,
+      `SELECT ${ENTITY_COLUMNS} FROM entities e
+       WHERE e.id IN (SELECT owner_id FROM plan_tasks WHERE deleted=0 AND task_id=?)
+       ORDER BY e.key,e.id`,
     )
     .all(taskId);
   return hydrateComponentRecords(connection, rows.map(decodeEntityRow));
@@ -395,9 +357,13 @@ export function listTaskMembershipOwners(connection: Database, taskId: string): 
 export function countEntities(connection: Database, kind?: EntityKind): number {
   const row =
     kind === undefined
-      ? connection.query<EntityCountRow, []>("SELECT count(*) AS count FROM entities").get()
+      ? connection
+          .query<EntityCountRow, []>("SELECT count(*) AS count FROM entity_identities")
+          .get()
       : connection
-          .query<EntityCountRow, [string]>("SELECT count(*) AS count FROM entities WHERE kind = ?")
+          .query<EntityCountRow, [string]>(
+            "SELECT count(*) AS count FROM entity_identities WHERE kind = ?",
+          )
           .get(kind);
   if (!row) {
     throw new RelayError("STORAGE_ERROR", entityMessages.countMissing);
@@ -406,7 +372,7 @@ export function countEntities(connection: Database, kind?: EntityKind): number {
 }
 
 /**
- * Загружает только окно, ограниченное SQL LIMIT/OFFSET, вместе с содержанием и комментариями.
+ * Сначала материализует SQL-окно ID по узким metadata, затем читает только его содержание и комментарии.
  * Параметры страницы предварительно проверяет ProjectDatabase; ID стабилизирует равные ключи сортировки.
  */
 export function entityWindow(
@@ -414,16 +380,24 @@ export function entityWindow(
   kind: EntityKind,
   options: EntityPageRequest,
 ): EntityRecord[] {
-  let order = "e.key";
+  let order = "key";
+  let source = "entity_headers";
+  let direction = "ASC";
   if (options.sort === "updated") {
-    order = "e.updated_at DESC";
+    order = "updated_at";
+    direction = "DESC";
   } else if (options.sort === "title") {
-    order = "coalesce(json_extract(e.data, '$.title'), json_extract(e.data, '$.name'), '')";
+    source = "entity_summaries";
+    order = "coalesce(json_extract(title,'$'),'')";
   }
   const rows = connection
     .query<EntityRow, [string, number, number]>(
-      `SELECT ${ENTITY_COLUMNS} FROM entities e WHERE e.kind = ?
-       ORDER BY ${order}, e.id LIMIT ? OFFSET ?`,
+      `WITH selected AS MATERIALIZED (
+         SELECT id,${order} AS sort_value FROM ${source} WHERE kind=?
+         ORDER BY sort_value ${direction},id LIMIT ? OFFSET ?
+       )
+       SELECT ${ENTITY_COLUMNS} FROM selected JOIN entities e ON e.id=selected.id
+       ORDER BY selected.sort_value ${direction},e.id`,
     )
     .all(kind, options.limit, options.offset)
     .map(decodeEntityRow);
@@ -431,37 +405,12 @@ export function entityWindow(
 }
 
 /**
- * Читает обязательства всех задач без тяжёлого текста и журнала в одном SQL-снимке.
- * Неверные формы обязательств сохраняются для предметного декодера Core, а не заменяются пустыми.
- * INDEXED BY удерживает metadata-only путь: SQLite иначе предпочитает более узкий непокрывающий индекс.
+ * Читает обязательства всех задач непосредственно из узких предметных колонок одним SQL.
+ * Не читает title/description критериев и задач или журнал; отсутствие декларации не маскируется [].
  */
 export function taskGraphRecords(connection: Database): EntityRecord[] {
   return connection
-    .query<EntityRow, []>(
-      `SELECT e.id, e.kind, e.key, e.revision, e.created_at, e.updated_at,
-              e.created_by, e.updated_by,
-              json_set(
-                json_remove(e.data, '$.title', '$.description', '$.boardId', '$.related', '$.targets'),
-                 '$.dependencies', CASE
-                   WHEN EXISTS(SELECT 1 FROM entity_components mark INDEXED BY components_owner_version WHERE mark.owner_id=e.id AND mark.kind='collection' AND mark.id='dependencies' AND mark.deleted=0) THEN
-                     CASE WHEN json_type(e.data,'$.dependencies') IS NOT NULL THEN NULL ELSE json((SELECT json_group_array(target_id ORDER BY position,id) FROM entity_components INDEXED BY components_task_graph WHERE owner_id=e.id AND kind='task-dependency' AND deleted=0)) END
-                   ELSE json_extract(e.data,'$.dependencies') END,
-                 '$.acceptanceCriteria', CASE
-                   WHEN EXISTS(SELECT 1 FROM entity_components mark INDEXED BY components_owner_version WHERE mark.owner_id=e.id AND mark.kind='collection' AND mark.id='acceptanceCriteria' AND mark.deleted=0) THEN
-                     CASE WHEN json_type(e.data,'$.acceptanceCriteria') IS NOT NULL THEN NULL ELSE json((SELECT json_group_array(json_object('completed',json(completed_json)) ORDER BY position,id) FROM entity_components INDEXED BY components_task_graph WHERE owner_id=e.id AND kind='task-criterion' AND deleted=0)) END
-                   WHEN json_type(e.data, '$.acceptanceCriteria') = 'array' THEN json((
-                    SELECT json_group_array(json(CASE
-                      WHEN criterion.type = 'object'
-                        THEN json_object('completed', json(criterion.value -> '$.completed'))
-                      ELSE json_quote(criterion.value)
-                    END))
-                    FROM json_each(e.data, '$.acceptanceCriteria') criterion
-                  ))
-                  ELSE json_extract(e.data, '$.acceptanceCriteria')
-                END
-              ) AS data, NULL AS comments
-       FROM entities e WHERE e.kind = 'task' ORDER BY e.key, e.id`,
-    )
+    .query<EntityRow, []>("SELECT * FROM task_graph_sources ORDER BY key,id")
     .all()
     .map(decodeEntityRow);
 }

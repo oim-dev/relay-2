@@ -17,6 +17,7 @@ import {
   expectAsyncRelayError,
   withEntityDatabase,
 } from "./helpers/entity-fixture";
+import { corruptDocumentSection } from "./queries-get-corruption-fixture";
 
 const actor = "tester";
 const views = [
@@ -161,15 +162,28 @@ describe("Версионированное групповое чтение", () 
         actor,
       );
       const direct = await knowledge.rename("feature", feature.id, "CLI", write(feature));
-      // Нарушаем уникальность virtual для проверки неоднозначности и приоритета буквального алиаса.
-      db.update(
-        {
-          ...second,
-          revision: second.revision + 1,
-          data: { ...second.data, slug: "client", prefix: initial.key },
-        },
-        second.revision,
-      );
+      const secondBoard = knowledge.get("board", second.data.boardId);
+      // Разные колонки могут пересечься без нарушения UNIQUE:
+      // slug второго приложения совпадает с prefix первого, prefix второй доски — с его алиасом.
+      // Сначала меняется доска, от которой приложение получает производный prefix.
+      db.transaction(() => {
+        db.update(
+          {
+            ...secondBoard,
+            revision: secondBoard.revision + 1,
+            data: { ...secondBoard.data, prefix: initial.key },
+          },
+          secondBoard.revision,
+        );
+        db.update(
+          {
+            ...second,
+            revision: second.revision + 1,
+            data: { ...second.data, slug: "CLI", prefix: initial.key },
+          },
+          second.revision,
+        );
+      });
       const refs = [
         `application:${initial.key}`,
         "application:CLI",
@@ -181,32 +195,40 @@ describe("Версионированное групповое чтение", () 
         "application:CLI",
         "client",
       ];
+      const versions = snapshotVersions(db, [application.id, board.id, direct.id]);
       const loads = spyOn(db.commands, "load");
       try {
         const result = await new QueryService(db).getManyVersioned(refs);
 
         expect(result.data.items.slice(0, 5)).toEqual([
           { ref: `application:${initial.key}`, ok: true, entity: application },
-          { ref: "application:CLI", ok: true, entity: application },
+          {
+            ref: "application:CLI",
+            ok: false,
+            error: {
+              code: "CORRUPT_DATA",
+              exitCode: 1,
+              message: expect.any(String),
+              details: { ref: "CLI", kind: "application" },
+            },
+          },
           { ref: "board:client", ok: true, entity: board },
           { ref: "board:CLI", ok: true, entity: board },
           { ref: "CLI", ok: true, entity: direct },
         ]);
         expect(result.data.items.slice(5)).toMatchObject([
-          {
-            ok: false,
-            error: { code: "CORRUPT_DATA", details: { ref: "client", kind: "application" } },
-          },
+          { ok: true, entity: application },
           {
             ok: false,
             error: { code: "NOT_FOUND", details: { ref: "missing", kind: "application" } },
           },
-          { ok: true, entity: application },
+          {
+            ok: false,
+            error: { code: "CORRUPT_DATA", details: { ref: "CLI", kind: "application" } },
+          },
           { ok: false, error: { code: "NOT_FOUND", details: { ref: "client" } } },
         ]);
-        expect(Object.keys(result.versions).sort()).toEqual(
-          [application.id, board.id, direct.id].sort(),
-        );
+        expect(result.versions).toEqual(versions);
         const selectors = loads.mock.calls.flatMap(([request]) => request.selectors);
         expect(selectors.filter((selector) => selector.kind === "identities")).toEqual([
           { kind: "identities", refs: [initial.key, "CLI", "client", "missing"] },
@@ -248,14 +270,7 @@ describe("Версионированное групповое чтение", () 
         actor,
       );
       await knowledge.changeSection("remove", { id: "guides" }, write(project));
-      db.update(
-        {
-          ...damaged,
-          revision: damaged.revision + 1,
-          data: { ...damaged.data, sectionId: "never-existed" },
-        },
-        damaged.revision,
-      );
+      const corrupted = corruptDocumentSection(db, damaged, "never-existed");
       const versions = snapshotVersions(db, [document.id, second.id]);
       const generation = db.getGeneration();
       const sections = spyOn(documentSections, "indexDocumentSections");
@@ -286,6 +301,7 @@ describe("Версионированное групповое чтение", () 
             .filter((selector) => selector.kind === "records"),
         ).toEqual([{ kind: "records", ids: [document.id, second.id, damaged.id, db.projectId] }]);
         expect(db.get(document.id)).toEqual(document);
+        expect(db.get(damaged.id)).toEqual(corrupted);
         expect(db.getGeneration()).toBe(generation);
       } finally {
         sections.mockRestore();
@@ -392,7 +408,7 @@ describe("Версионированное групповое чтение", () 
         const damaged = await knowledge.create("feature", { name: "Будет повреждено" }, actor);
         const task = await new TasksService(db).create({ title: " \t " }, actor);
         db.update(
-          { ...damaged, revision: damaged.revision + 1, data: { ...damaged.data, name: null } },
+          { ...damaged, revision: damaged.revision + 1, data: { ...damaged.data, name: " \t " } },
           damaged.revision,
         );
         const generation = db.getGeneration();
@@ -415,7 +431,7 @@ describe("Версионированное групповое чтение", () 
         });
         expect(result.versions).toEqual(snapshotVersions(db, [task.id]));
         expect(result.data.generation).toBe(generation);
-        expect(db.get(damaged.id)?.data.name).toBeNull();
+        expect(db.get(damaged.id)?.data.name).toBe(" \t ");
       });
     },
   );
@@ -429,17 +445,21 @@ describe("Версионированное групповое чтение", () 
         actor,
       );
       const other = await knowledge.create("feature", { name: "Соседняя карточка" }, actor);
-      db.update(
-        { ...damaged, revision: damaged.revision + 1, data: { ...damaged.data, relations: null } },
-        damaged.revision,
-      );
+      // Обязательное тело остаётся строкой, но пустой Markdown отвергается полным декодером.
+      const corrupted = {
+        ...damaged,
+        revision: damaged.revision + 1,
+        data: { ...damaged.data, body: " \t " },
+      };
+      db.update(corrupted, damaged.revision);
+      const generation = db.getGeneration();
       const queries = new QueryService(db);
 
       const full = await queries.getManyVersioned([damaged.id, other.id]);
       const summary = await queries.getManyVersioned([damaged.id], { summary: true });
 
       expect(full.data.items).toMatchObject([
-        { ok: false, error: { code: "CORRUPT_DATA", details: { id: damaged.id } } },
+        { ok: false, error: { code: "CORRUPT_DATA", details: { id: damaged.id, field: "body" } } },
         { ok: true, entity: other },
       ]);
       expect(Object.keys(full.versions)).toEqual([other.id]);
@@ -447,6 +467,8 @@ describe("Версионированное групповое чтение", () 
         { ok: true, entity: { id: damaged.id, title: "Название сохранно" } },
       ]);
       expect(summary.versions).toEqual(snapshotVersions(db, [damaged.id]));
+      expect(db.get(damaged.id)).toEqual(corrupted);
+      expect(db.getGeneration()).toBe(generation);
     });
   });
 

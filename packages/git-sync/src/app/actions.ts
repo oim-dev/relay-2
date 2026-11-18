@@ -13,6 +13,7 @@ import {
 import type { SyncConfiguration } from "../local/state.types";
 import { syncStatus } from "../sync/status";
 import { getConflict, listConflicts, resolveConflictRequest } from "./conflicts";
+import { resolveKeyConflictRequest } from "./key-conflicts";
 import { appMessages } from "./app.messages";
 import { requiredString } from "./protocol";
 import { restore } from "./restore";
@@ -76,6 +77,8 @@ export async function executeAction(request: GitSyncRequest): Promise<unknown> {
       "conflicts.list",
       "conflicts.get",
       "conflicts.resolve",
+      "keys.list",
+      "keys.resolve",
       "request.get",
     ].includes(request.action)
   ) {
@@ -150,6 +153,10 @@ export async function executeAction(request: GitSyncRequest): Promise<unknown> {
         return getConflict(replication, requiredString(input.id));
       case "conflicts.resolve":
         return resolveConflictRequest(replication, input);
+      case "keys.list":
+        return replication.keyConflicts();
+      case "keys.resolve":
+        return resolveKeyConflictRequest(replication, input);
     }
     return {
       ...(await syncStatus(directory, config, replication.status())),

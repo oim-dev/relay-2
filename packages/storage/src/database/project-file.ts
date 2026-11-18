@@ -1,29 +1,15 @@
 /**
  * Жизненный цикл файла и технической схемы БД. Транзакцией создания и начальных
- * сущностей владеет ProjectDatabase; техническая миграция существующей БД имеет свою транзакцию.
+ * сущностей владеет ProjectDatabase; несовместимые существующие базы не изменяются.
  */
 import { Database } from "bun:sqlite";
 import { closeSync, openSync, rmSync, statSync } from "node:fs";
 import { RelayError, type EntityRecord } from "@relay/contracts";
 import { APPLICATION_ID, SCHEMA, SCHEMA_VERSION } from "../sqlite/schema";
-import { BATCH_RECEIPT_SCHEMA } from "../sqlite/batch-schema";
-import { REPLICATION_SCHEMA, REPLICATION_BACKFILL } from "../sqlite/replication-schema";
-import { flushReplicationQueue } from "../replication/replication-store";
-import { PROJECT_WRITE_TRIGGERS } from "../sqlite/entity-triggers";
-import {
-  migrateComponents,
-  enqueueComponentBaseline,
-  assertLegacyOwnerVersions,
-} from "../components/component-migration";
-import { upgradeReplicationV4 } from "../replication/replication-migration";
-import { COMMAND_SCHEMA } from "../sqlite/command-schema";
 import { assertSqlText } from "../entities/entity-sql-text";
-import { assertLegacyTextEncoding } from "../entities/entity-legacy-text";
-import { upgradeCommentTextStorage } from "../entities/comment-text";
 import { errorCode, storageError } from "../sqlite/sqlite-errors";
 import { SQLITE_BUSY_TIMEOUT_MS, SQLITE_WAL_REOPEN_PAUSE_MS } from "../sqlite/sqlite.constants";
 import { projectDatabaseMessages } from "./project-database.messages";
-import { SYNCHRONIZATION_SCHEMA } from "../synchronization/schedule";
 import type {
   ApplicationIdRow,
   JournalModeRow,
@@ -110,109 +96,115 @@ export function configureProjectWal(connection: Database): void {
 }
 
 /**
- * Открывает и проверяет проект; миграция выполняется не более одного раза в этом вызове.
+ * Открывает и проверяет проект; принимает только текущую схему без автоматического обновления.
+ * Перед каждой RW-попыткой отдельная readonly-проверка читает также живой WAL. Несовместимая
+ * база не получает RW-handle, закрытие которого могло бы выполнить checkpoint даже без записи.
+ * Рабочее соединение повторяет проверку, чтобы не наследовать projectId предварительного открытия.
  * При конкурирующем DELETE→WAL повторяется только техническое открытие/проверка текущей схемы:
  * отказавшее соединение закрывается до паузы, освобождая его shared lock для другого opener.
- * Повторы и SQLite busy handler ограничены одним monotonic budget. Readonly не включает WAL
- * и не повторяет открытие. Любая ошибка закрывает принадлежащее функции соединение.
+ * Preflight, повторы и SQLite busy handler ограничены одним monotonic budget. Readonly не включает
+ * WAL и не повторяет открытие. Любая ошибка закрывает принадлежащее функции соединение.
  */
 export function openExistingProjectFile(
   path: string,
   mode: "readwrite" | "readonly",
 ): OpenedProjectFile {
-  let connection: Database | undefined = connectProjectFile(path, mode);
-  try {
-    let projectId = readProjectId(connection, path, mode === "readonly" ? "readonly" : "migrate");
-    if (mode === "readonly") {
+  if (mode === "readonly") {
+    const connection = connectProjectFile(path, mode);
+    try {
+      const projectId = readProjectId(connection, path);
       return { connection, projectId };
+    } catch (error) {
+      connection.close(true);
+      throw error;
     }
-    const deadline = performance.now() + SQLITE_BUSY_TIMEOUT_MS;
-    let contention: unknown;
-    for (;;) {
-      try {
-        if (!connection) {
-          if (performance.now() >= deadline) {
-            throw contention;
-          }
-          connection = connectProjectFile(path);
-          connection.exec(
-            `PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`,
-          );
-          // Миграция уже завершена; её нельзя повторять после отказа последующего WAL-перехода.
-          projectId = readProjectId(connection, path, "readonly");
-        }
-        connection.exec(
-          `PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`,
-        );
-        configureProjectWal(connection);
-        connection.exec(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
-        return { connection, projectId };
-      } catch (error) {
-        const code = errorCode(error);
-        if (!code.startsWith("SQLITE_BUSY") && !code.startsWith("SQLITE_LOCKED")) {
-          throw error;
-        }
-        contention = error;
-        connection?.close(true);
-        connection = undefined;
-        const remaining = deadline - performance.now();
-        if (remaining <= 0) {
-          throw error;
-        }
-        Bun.sleepSync(Math.min(SQLITE_WAL_REOPEN_PAUSE_MS, remaining));
+  }
+  const deadline = performance.now() + SQLITE_BUSY_TIMEOUT_MS;
+  for (;;) {
+    let connection: Database | undefined;
+    try {
+      preflightProjectFile(path, deadline);
+      connection = connectProjectFile(path);
+      applyOpenBudget(connection, deadline);
+      const projectId = readProjectId(connection, path);
+      applyOpenBudget(connection, deadline);
+      configureProjectWal(connection);
+      connection.exec(`PRAGMA busy_timeout=${SQLITE_BUSY_TIMEOUT_MS}`);
+      return { connection, projectId };
+    } catch (error) {
+      connection?.close(true);
+      const code = errorCode(error);
+      const remaining = deadline - performance.now();
+      if (
+        (!code.startsWith("SQLITE_BUSY") && !code.startsWith("SQLITE_LOCKED")) ||
+        remaining <= 0
+      ) {
+        throw error;
       }
+      Bun.sleepSync(Math.min(SQLITE_WAL_REOPEN_PAUSE_MS, remaining));
     }
-  } catch (error) {
-    connection?.close(true);
-    throw error;
   }
 }
 
 /**
- * Проверяет заголовок и корневую сущность существующей базы без её переинициализации.
+ * Проверяет приложение, текущую схему и корневую запись через readonly SQLite с обычным WAL-чтением.
+ * Закрытие preflight не checkpoint-ит main/WAL; SHM остаётся техническим кешем драйвера.
+ * Не передаёт projectId рабочему handle: после повторного открытия он проверяется заново.
+ */
+function preflightProjectFile(path: string, deadline: number): void {
+  const connection = connectProjectFile(path, "readonly");
+  try {
+    applyOpenBudget(connection, deadline);
+    readProjectId(connection, path);
+  } finally {
+    connection.close(true);
+  }
+}
+
+/**
+ * Ограничивает очередное SQLite-ожидание оставшейся частью общего monotonic бюджета открытия.
+ */
+function applyOpenBudget(connection: Database, deadline: number): void {
+  connection.exec(`PRAGMA busy_timeout=${Math.max(0, Math.ceil(deadline - performance.now()))}`);
+}
+
+/**
+ * Проверяет заголовок и корневую сущность существующей базы в одном read snapshot.
  * Возвращает постоянный ID проекта; чужая или несовместимая база отклоняется до включения WAL.
- * В режиме migrate совместимые v1…v4 получают v5 в атомарной технической миграции.
- * Режим readonly принимает только текущую схему, без миграций и изменения журнала.
+ * Любая прежняя версия отклоняется без DDL, изменения журнала и удаления пользовательских файлов.
  */
-export function readProjectId(
-  connection: Database,
-  path: string,
-  mode: "migrate" | "readonly" = "migrate",
-): string {
-  const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
-  const application = connection.query<ApplicationIdRow, []>("PRAGMA application_id").get();
-  if (application?.application_id !== APPLICATION_ID) {
-    throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.foreignDatabase, 1, { path });
-  }
-  requireSupportedSchema(version?.user_version, path, mode);
-  const state = connection
-    .query<ProjectStateRow, []>(
-      `SELECT project_id FROM project_state s JOIN entities e ON e.id = s.project_id
-       WHERE s.singleton = 1 AND e.kind = 'project'`,
-    )
-    .get();
-  if (!state) {
-    throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.projectMissing, 1, { path });
-  }
-  if (version?.user_version !== SCHEMA_VERSION) {
-    migrateProjectSchema(connection, path);
-  }
-  return state.project_id;
+export function readProjectId(connection: Database, path: string): string {
+  return connection
+    .transaction(() => {
+      const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
+      const application = connection.query<ApplicationIdRow, []>("PRAGMA application_id").get();
+      if (application?.application_id !== APPLICATION_ID) {
+        throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.foreignDatabase, 1, {
+          path,
+        });
+      }
+      requireSupportedSchema(version?.user_version, path);
+      const state = connection
+        .query<ProjectStateRow, []>(
+          `SELECT project_id FROM project_state s JOIN entities e ON e.id = s.project_id
+         WHERE s.singleton = 1 AND e.kind = 'project'`,
+        )
+        .get();
+      if (!state) {
+        throw new RelayError("DATABASE_INVALID", projectDatabaseMessages.projectMissing, 1, {
+          path,
+        });
+      }
+      return state.project_id;
+    })
+    .deferred();
 }
 
 /**
- * Отклоняет неизвестную техническую версию до записи и после ожидания замка миграции.
- * Readonly допускает только текущую схему, поскольку миграция потребовала бы записи.
+ * Отклоняет любую несовпадающую техническую версию до первой записи.
  */
-function requireSupportedSchema(
-  version: number | undefined,
-  path: string,
-  mode: "migrate" | "readonly" = "migrate",
-): void {
-  if (
-    version !== SCHEMA_VERSION &&
-    (mode === "readonly" || (version !== 1 && version !== 2 && version !== 3 && version !== 4))
-  ) {
+function requireSupportedSchema(version: number | undefined, path: string): void {
+  if (version !== SCHEMA_VERSION) {
     throw new RelayError(
       "SCHEMA_VERSION_UNSUPPORTED",
       projectDatabaseMessages.unsupportedSchema,
@@ -223,55 +215,6 @@ function requireSupportedSchema(
         actualVersion: version,
       },
     );
-  }
-}
-
-/**
- * Под замком записи повторяет проверку версии, нормализует v1…v3 и добавляет расписание для v1…v4.
- * Исходный outbox v3/v4 сохраняется; для v1/v2 создаётся baseline после нормализации.
- * Конкурентный open может уже завершить миграцию; DDL и user_version откатываются вместе.
- */
-function migrateProjectSchema(connection: Database, path: string): void {
-  connection.exec("BEGIN IMMEDIATE");
-  try {
-    const version = connection.query<SchemaVersionRow, []>("PRAGMA user_version").get();
-    requireSupportedSchema(version?.user_version, path);
-    if (version?.user_version !== SCHEMA_VERSION && version?.user_version !== 4) {
-      assertLegacyTextEncoding(connection);
-    }
-    if (version?.user_version === 3) {
-      assertLegacyOwnerVersions(connection);
-    }
-    if (version?.user_version === 1) {
-      connection.exec(BATCH_RECEIPT_SCHEMA);
-    }
-    const previous = version?.user_version;
-    if (previous === 1 || previous === 2) {
-      connection.exec(REPLICATION_SCHEMA);
-      for (const [name, sql] of Object.entries(PROJECT_WRITE_TRIGGERS)) {
-        connection.exec(`DROP TRIGGER ${name}`);
-        connection.exec(sql);
-      }
-    }
-    if (previous !== SCHEMA_VERSION && previous !== 4) {
-      migrateComponents(connection);
-      upgradeReplicationV4(connection);
-      upgradeCommentTextStorage(connection);
-      connection.exec(COMMAND_SCHEMA);
-    }
-    if (previous !== SCHEMA_VERSION) {
-      connection.exec(SYNCHRONIZATION_SCHEMA);
-      if (previous === 1 || previous === 2) {
-        connection.exec(REPLICATION_BACKFILL);
-        enqueueComponentBaseline(connection);
-        flushReplicationQueue(connection, true);
-      }
-      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    }
-    connection.exec("COMMIT");
-  } catch (error) {
-    connection.exec("ROLLBACK");
-    throw error;
   }
 }
 

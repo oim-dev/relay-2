@@ -8,8 +8,8 @@ import { knowledgeMessages } from "./knowledge.messages";
 import type { ApplicationCreationData } from "./knowledge.types";
 
 /**
- * Рассчитывает создание приложения rev1, доски и приложения rev2 без I/O.
- * Порядок трёх эффектов наблюдаем; собственные одинаковые slug/prefix двух видов допустимы.
+ * Рассчитывает создание полного приложения и его доски с заранее выделенными взаимными ID.
+ * Обе записи имеют начальную ревизию 1; сохранение выполняется одной транзакцией.
  */
 export function calculateApplicationCreation(
   data: ApplicationCreationData,
@@ -25,14 +25,18 @@ export function calculateApplicationCreation(
   }
   requireKnowledgeAddresses("application", allocation.id, allocation.addresses);
   requireKnowledgeAddresses("board", boardAllocation.id, boardAllocation.addresses);
-  const initial = createCommandEntity(
+  const record = decodeKnowledge(
+    createCommandEntity(
+      "application",
+      allocation.key,
+      {
+        ...data,
+        boardId: boardAllocation.id,
+        implementationIds: [],
+      },
+      allocation,
+    ),
     "application",
-    allocation.key,
-    {
-      ...data,
-      implementationIds: [],
-    },
-    allocation,
   );
   const board = decodeKnowledge(
     createCommandEntity(
@@ -43,30 +47,17 @@ export function calculateApplicationCreation(
         slug: data.slug,
         prefix: data.prefix,
         description: "",
-        applicationId: initial.id,
+        applicationId: record.id,
       },
       boardAllocation,
     ),
     "board",
   );
-  const record = decodeKnowledge(
-    changeCommandEntity(
-      initial,
-      { boardId: board.id },
-      {
-        actor: allocation.actor,
-        ifRevision: initial.revision,
-      },
-      allocation.timestamp,
-    ),
-    "application",
-  );
   return {
     record,
     effects: [
-      ...knowledgeCommandEffect(null, initial, "application.create"),
+      ...knowledgeCommandEffect(null, record, "application.create"),
       ...knowledgeCommandEffect(null, board, "application.create"),
-      ...knowledgeCommandEffect(initial, record, "application.create"),
     ],
   };
 }

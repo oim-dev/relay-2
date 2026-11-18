@@ -37,7 +37,7 @@ const TEST_WATCHDOG_MS = SCENARIO_DEADLINE_MS + CLEANUP_GRACE_MS;
 
 describe("Обмен трёх независимых реплик через одну Git-ветку", () => {
   test(
-    "два писателя и offline-участник сохраняют данные после non-FF, crash, конфликта и возвращения",
+    "два писателя и offline-участник сохраняют данные после non-FF, явного выбора ключей, crash и возвращения",
     async () => {
       await withTeamFixture(
         async (team) => {
@@ -97,7 +97,61 @@ describe("Обмен трёх независимых реплик через о�
           // Барьер допускает оба готовых кандидата с одним parent; первый push закрепляет ключи.
           first.repository.publications.length = 0;
           await publishCompetingPair(team);
-          await offline.engine.run();
+          expect(second.repository.publications).toHaveLength(1);
+          expect(first.replication.keyConflicts()).toEqual([]);
+          expect(second.db.getReplicationOutbox()).toEqual([...secondCreation.changesets]);
+          const acceptedWinner = await publishedSnapshot(first);
+          for (const change of secondCreation.changesets) {
+            expectAcknowledged(acceptedWinner, change, false);
+          }
+
+          for (const { replica, creation, number } of [
+            { replica: second, creation: secondCreation, number: 3 },
+            { replica: offline, creation: offlineCreation, number: 4 },
+          ]) {
+            await replica.engine.run();
+            expect(replica.db.getReplicationOutbox()).toEqual([...creation.changesets]);
+            // Документ зависит от задачи: его коллизия доступна после выбора ключа задачи.
+            for (const expected of [
+              { entity: creation.task, owner: firstCreation.task, key: `PRODUCT-${number}` },
+              { entity: creation.document, owner: firstCreation.document, key: `DOC-${number}` },
+            ]) {
+              const conflicts = replica.replication.keyConflicts();
+              expect(conflicts).toHaveLength(1);
+              const conflict = conflicts[0];
+              if (conflict === undefined) {
+                throw new Error("Нет ожидаемой коллизии ключа offline-создания");
+              }
+              expect(conflict.code).toBe("REPLICATION_KEY_COLLISION");
+              expect(conflict.collisions).toEqual([
+                {
+                  entityId: expected.entity.id,
+                  key: expected.entity.key,
+                  acceptedOwnerId: expected.owner.id,
+                  suggestedKey: expected.key,
+                },
+              ]);
+              const assignments = conflict.collisions.map((entry) => ({
+                entityId: entry.entityId,
+                key: entry.suggestedKey,
+              }));
+              const preview = replica.replication.resolveKeys(
+                conflict.id,
+                { fingerprint: conflict.fingerprint, assignments },
+                `key-resolver-${replica.index}`,
+              );
+              expect(preview.included).toContain(conflict.id);
+              expect(replica.db.getReplicationOutbox()).toEqual([...creation.changesets]);
+              expect(replica.db.get(expected.entity.id)?.key).toBe(expected.entity.key);
+            }
+            await replica.engine.run();
+            expect(replica.replication.keyConflicts()).toEqual([]);
+          }
+          expect(second.repository.publications).toHaveLength(2);
+          expect(second.repository.publications[1]?.exitCode).toBe(0);
+          expect(second.repository.publications[1]?.parent).toBe(
+            first.repository.publications[0]?.commit,
+          );
           await exchangeTeam([first, second]);
 
           const afterCreation = await publishedSnapshot(first);

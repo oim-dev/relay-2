@@ -15,6 +15,8 @@ import type {
   ReplicationStatus,
   ReplicationHistoryInput,
   ReplicationBootstrapOptions,
+  ReplicationKeyConflict,
+  ReplicationKeyDecision,
 } from "@relay/contracts";
 import type { ReplicationDiagnostics } from "./replication-adapter.types";
 import type { SynchronizationAttempt, SynchronizationSchedule } from "@relay/storage";
@@ -138,6 +140,24 @@ export class ReplicationAdapter {
     actor: string,
   ): ReturnType<ReplicationService["resolve"]> {
     return this.core.resolve(id, decision, actor);
+  }
+
+  /**
+   * Читает коллизии семантических ключей с предложениями Core, не резервируя эти адреса.
+   */
+  keyConflicts(): readonly ReplicationKeyConflict[] {
+    return this.core.keyConflicts();
+  }
+
+  /**
+   * Передаёт явные назначения и исходный fingerprint; повтор принятого решения обрабатывает Core.
+   */
+  resolveKeys(
+    id: string,
+    decision: ReplicationKeyDecision,
+    actor: string,
+  ): ReturnType<ReplicationService["resolveKeys"]> {
+    return this.core.resolveKeys(id, decision, actor);
   }
 }
 

@@ -3,6 +3,10 @@ import { RelayError, type EntityRecord, type WriteOptions } from "@relay/contrac
 import { EntityService } from "../../src/entities/entities";
 import * as publicCore from "../../src/index";
 import { entityWriteOptions, expectRelayError, withEntityDatabase } from "./helpers/entity-fixture";
+import {
+  createDocument,
+  createTask,
+} from "../../../storage/tests/integration/helpers/project-database-fixture";
 
 const referenceForms = [
   { name: "ID", field: "id" },
@@ -67,7 +71,7 @@ const invalidIdentityInputs = [
 ] as const;
 const nestedChanges = [
   { name: "no-op", patch: {} },
-  { name: "изменение", patch: { title: "Из устаревшего снимка" } },
+  { name: "изменение", patch: { name: "Из устаревшего снимка" } },
 ] as const;
 const absentRevisionInputs = [
   { name: "пропущенная ревизия", value: undefined },
@@ -121,16 +125,31 @@ describe("Границы общего механизма сущностей Core
   test("изменение входного объекта после create не меняет сохранённый payload", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const input = { title: "Документ", nested: { enabled: true } };
+      const feature = entities.create(
+        "feature",
+        "FEATURE",
+        { name: "Цель", summary: "", description: "" },
+        "author",
+      );
+      const relation = {
+        target: { id: feature.id, kind: "feature" as const },
+        type: "documents" as const,
+        description: "Исходное пояснение",
+      };
+      const input = createDocument(undefined, { relations: [relation] }).data;
 
       const created = entities.create("document", "DOC", input, "author");
-      input.nested.enabled = false;
+      relation.target.id = "другой-id";
+      relation.description = "Изменено после сохранения";
 
       expect(created.key).toBe("DOC-1");
-      expect(entities.get(created.id).data).toEqual({
-        title: "Документ",
-        nested: { enabled: true },
-      });
+      expect(entities.get(created.id).data.relations).toEqual([
+        {
+          target: { id: feature.id, kind: "feature" },
+          type: "documents",
+          description: "Исходное пояснение",
+        },
+      ]);
     });
   });
 
@@ -140,14 +159,14 @@ describe("Границы общего механизма сущностей Core
       const created = entities.create(
         "document",
         "DOC",
-        { title: "Документ", nested: { enabled: true } },
+        createDocument(undefined, { name: "Документ", body: "Полный текст" }).data,
         "author",
       );
 
       const updated = entities.update(
         created.key,
         "document",
-        { title: "Новый заголовок" },
+        { name: "Новый заголовок" },
         entityWriteOptions(created, "editor"),
       );
 
@@ -158,7 +177,7 @@ describe("Границы общего механизма сущностей Core
         createdBy: "author",
         createdAt: created.createdAt,
         updatedBy: "editor",
-        data: { title: "Новый заголовок", nested: { enabled: true } },
+        data: { ...created.data, name: "Новый заголовок" },
       });
       expect(entities.get(created.id)).toEqual(updated);
     });
@@ -169,11 +188,11 @@ describe("Границы общего механизма сущностей Core
     (operation) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", { title: "Текст" }, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const current = entities.update(
           initial.id,
           "document",
-          { title: "Новый текст" },
+          { name: "Новый текст" },
           entityWriteOptions(initial, "editor"),
         );
         const generation = db.getGeneration();
@@ -183,7 +202,7 @@ describe("Границы общего механизма сущностей Core
             ? entities.update(
                 current.id,
                 "document",
-                { title: "Новый текст" },
+                { name: "Новый текст" },
                 entityWriteOptions(current, "other"),
               )
             : entities.rename(
@@ -205,11 +224,11 @@ describe("Границы общего механизма сущностей Core
     (operation) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", { title: "Текст" }, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const current = entities.update(
           initial.id,
           "document",
-          { title: "Новый текст" },
+          { name: "Новый текст" },
           entityWriteOptions(initial),
         );
         const generation = db.getGeneration();
@@ -219,7 +238,7 @@ describe("Границы общего механизма сущностей Core
             return entities.update(
               initial.id,
               "document",
-              { title: "Новый текст" },
+              { name: "Новый текст" },
               entityWriteOptions(initial),
             );
           }
@@ -240,8 +259,8 @@ describe("Границы общего механизма сущностей Core
       expectRelayError(
         () =>
           db.transaction(() => {
-            entities.create("document", "DOC", {}, "author");
-            entities.create("document", "DOC", {}, "author");
+            entities.create("document", "DOC", createDocument().data, "author");
+            entities.create("document", "DOC", createDocument().data, "author");
             throw new RelayError("INVALID_LINK", "Несуществующая ссылка", 2);
           }),
         "INVALID_LINK",
@@ -249,7 +268,7 @@ describe("Границы общего механизма сущностей Core
 
       expect(entities.list("document")).toEqual([]);
       expect(db.getGeneration()).toBe(generation);
-      expect(entities.create("document", "DOC", {}, "author").key).toBe("DOC-1");
+      expect(entities.create("document", "DOC", createDocument().data, "author").key).toBe("DOC-1");
     });
   });
 
@@ -258,7 +277,7 @@ describe("Границы общего механизма сущностей Core
     ({ patch }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", { title: "До изменения" }, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const generation = db.getGeneration();
 
         expectRelayError(
@@ -280,19 +299,19 @@ describe("Границы общего механизма сущностей Core
   test("подготовка получает копию и не может превратить реальное изменение в ложный no-op", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const initial = entities.create("document", "DOC", { title: "До изменения" }, "author");
+      const initial = entities.create("document", "DOC", createDocument().data, "author");
 
       const updated = entities.change(
         initial.id,
         "document",
         entityWriteOptions(initial),
         (current) => {
-          current.data.title = "После изменения";
+          current.data.name = "После изменения";
           return { patch: current.data };
         },
       );
 
-      expect(updated.data.title).toBe("После изменения");
+      expect(updated.data.name).toBe("После изменения");
       expect(updated.revision).toBe(initial.revision + 1);
       expect(entities.get(initial.id)).toEqual(updated);
     });
@@ -303,7 +322,7 @@ describe("Границы общего механизма сущностей Core
     ({ value }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", {}, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const generation = db.getGeneration();
         // Намеренно неверный транспортный тип проверяет runtime-границу примитива записи.
         const invalidWrite = { actor: "author", ifRevision: value } as unknown as WriteOptions;
@@ -324,7 +343,7 @@ describe("Независимый журнал комментариев зада�
   test("комментарий, добавленный во время подготовки no-op, возвращается без потери журнала", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const task = entities.create("task", "TASK", { title: "Задача" }, "author");
+      const task = entities.create("task", "TASK", createTask(db).data, "author");
       const comment = {
         id: crypto.randomUUID(),
         title: "",
@@ -350,7 +369,7 @@ describe("Независимый журнал комментариев зада�
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
 
-      const created = entities.create("task", "TASK", { title: "Задача" }, "author");
+      const created = entities.create("task", "TASK", createTask(db).data, "author");
 
       expect(created.data.comments).toEqual([]);
       expect(entities.get(created.id)).toEqual(created);
@@ -362,7 +381,7 @@ describe("Независимый журнал комментариев зада�
     ({ patch, revision, generationDelta }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const created = entities.create("task", "TASK", { title: "Задача" }, "author");
+        const created = entities.create("task", "TASK", createTask(db).data, "author");
         const entry = {
           id: crypto.randomUUID(),
           title: "",
@@ -391,7 +410,7 @@ describe("Независимый журнал комментариев зада�
   test("устаревший no-op комментариев отклоняется без изменения содержания и журнала", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const initial = entities.create("task", "TASK", { title: "Задача" }, "author");
+      const initial = entities.create("task", "TASK", createTask(db).data, "author");
       db.appendTaskComment(initial.id, {
         id: crypto.randomUUID(),
         title: "",
@@ -422,7 +441,7 @@ describe("Разрешение адресов и вида сущности", () 
   test.each(aliasForms)("$name старый ключ изменяет ту же запись", ({ typed }) => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const initial = entities.create("document", "DOC", { body: "Текст" }, "author");
+      const initial = entities.create("document", "DOC", createDocument().data, "author");
       const renamed = entities.rename(
         `document:${initial.id}`,
         "document",
@@ -454,7 +473,7 @@ describe("Разрешение адресов и вида сущности", () 
     ({ field }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", { body: "Текст" }, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const renamed = entities.rename(
           initial.id,
           "document",
@@ -477,7 +496,7 @@ describe("Разрешение адресов и вида сущности", () 
     ({ field }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const initial = entities.create("document", "DOC", {}, "author");
+        const initial = entities.create("document", "DOC", createDocument().data, "author");
         const renamed = entities.rename(
           initial.id,
           "document",
@@ -494,7 +513,7 @@ describe("Разрешение адресов и вида сущности", () 
   test.each(referenceForms)("типизированный $name чужого вида даёт NOT_FOUND", ({ field }) => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const initial = entities.create("document", "DOC", {}, "author");
+      const initial = entities.create("document", "DOC", createDocument().data, "author");
       const renamed = entities.rename(initial.id, "document", "GUIDE", entityWriteOptions(initial));
       const ref = `task:${entityReference(initial, renamed, field)}`;
 
@@ -521,7 +540,7 @@ describe("Разрешение адресов и вида сущности", () 
   test("чтение документа как задачи даёт NOT_FOUND", () => {
     withEntityDatabase((db) => {
       const entities = new EntityService(db);
-      const document = entities.create("document", "DOC", {}, "author");
+      const document = entities.create("document", "DOC", createDocument().data, "author");
 
       expectRelayError(() => entities.get(document.key, "task"), "NOT_FOUND");
     });
@@ -532,7 +551,7 @@ describe("Разрешение адресов и вида сущности", () 
     ({ typed, code }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const document = entities.create("document", "DOC", {}, "author");
+        const document = entities.create("document", "DOC", createDocument().data, "author");
         const generation = db.getGeneration();
 
         expectRelayError(() => {
@@ -566,7 +585,8 @@ describe("Валидация сущности до записи", () => {
     (operation) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const created = entities.create("feature", "FEATURE", { name: "Поиск" }, "author");
+        const data = { name: "Поиск", summary: "", description: "" };
+        const created = entities.create("feature", "FEATURE", data, "author");
         const typed = `feature:${created.key}`;
         const snapshot = db.list();
         const generation = db.getGeneration();
@@ -574,9 +594,9 @@ describe("Валидация сущности до записи", () => {
         expectRelayError(() => {
           switch (operation) {
             case "ключ":
-              return entities.create("feature", "FEATURE", {}, "author", typed);
+              return entities.create("feature", "FEATURE", data, "author", typed);
             case "префикс":
-              return entities.create("feature", "feature:FEATURE", {}, "author");
+              return entities.create("feature", "feature:FEATURE", data, "author");
             case "переименование":
               return entities.rename(created.id, "feature", typed, entityWriteOptions(created));
             case "Storage":
@@ -588,7 +608,7 @@ describe("Валидация сущности до записи", () => {
         expect(db.list()).toEqual(snapshot);
         expect(db.getGeneration()).toBe(generation);
         expect(entities.get(typed)).toEqual(created);
-        expect(entities.create("feature", "FEATURE", {}, "author").key).toBe("FEATURE-2");
+        expect(entities.create("feature", "FEATURE", data, "author").key).toBe("FEATURE-2");
       });
     },
   );
@@ -599,7 +619,8 @@ describe("Валидация сущности до записи", () => {
       const generation = db.getGeneration();
 
       expectRelayError(
-        () => entities.create("document", "DOC", { value }, "author"),
+        () =>
+          entities.create("document", "DOC", { ...createDocument().data, body: value }, "author"),
         "VALIDATION_ERROR",
       );
 
@@ -622,10 +643,7 @@ describe("Валидация сущности до записи", () => {
 
       expect(entities.list("document")).toEqual([]);
       expect(db.getGeneration()).toBe(generation);
-      expect(
-        entities.create("document", "DOC", { nullable: null, array: [1, "text", true] }, "author")
-          .key,
-      ).toBe("DOC-1");
+      expect(entities.create("document", "DOC", createDocument().data, "author").key).toBe("DOC-1");
     });
   });
 
@@ -635,23 +653,34 @@ describe("Валидация сущности до записи", () => {
       ({ shape }) => {
         withEntityDatabase((db) => {
           const entities = new EntityService(db);
-          const created = entities.create("document", "DOC", { values: [null, "Текст"] }, "author");
+          const created = entities.create("document", "DOC", createDocument().data, "author");
           const value = createInvalidArray(shape);
           const snapshot = db.list();
           const generation = db.getGeneration();
 
           expectRelayError(() => {
             if (operation === "create") {
-              return entities.create("document", "DOC", { value }, "author");
+              return entities.create(
+                "document",
+                "DOC",
+                { ...createDocument().data, relations: value },
+                "author",
+              );
             }
-            return entities.update(created.id, "document", { value }, entityWriteOptions(created));
+            return entities.update(
+              created.id,
+              "document",
+              { relations: value },
+              entityWriteOptions(created),
+            );
           }, "VALIDATION_ERROR");
 
           expect(db.list()).toEqual(snapshot);
           expect(db.getGeneration()).toBe(generation);
-          const next = entities.create("document", "DOC", { values: [null, [], [null]] }, "author");
+          const data = createDocument().data;
+          const next = entities.create("document", "DOC", data, "author");
           expect(next.key).toBe("DOC-2");
-          expect(entities.get(next.id).data).toEqual({ values: [null, [], [null]] });
+          expect(entities.get(next.id).data).toEqual(data);
         });
       },
     );
@@ -664,7 +693,10 @@ describe("Валидация сущности до записи", () => {
         const entities = new EntityService(db);
         const generation = db.getGeneration();
 
-        expectRelayError(() => entities.create("document", "DOC", {}, actor, key), code);
+        expectRelayError(
+          () => entities.create("document", "DOC", createDocument().data, actor, key),
+          code,
+        );
 
         expect(entities.list("document")).toEqual([]);
         expect(db.getGeneration()).toBe(generation);
@@ -677,7 +709,7 @@ describe("Валидация сущности до записи", () => {
     ({ revision }) => {
       withEntityDatabase((db) => {
         const entities = new EntityService(db);
-        const created = entities.create("document", "DOC", {}, "author");
+        const created = entities.create("document", "DOC", createDocument().data, "author");
         const generation = db.getGeneration();
 
         expectRelayError(

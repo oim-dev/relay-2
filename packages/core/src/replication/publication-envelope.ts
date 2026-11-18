@@ -1,42 +1,38 @@
-import { RelayError, type PortableProjectSnapshot, type PublicationChange } from "@relay/contracts";
+import {
+  RelayError,
+  assertReplicationPublicationShape,
+  type PortableProjectSnapshot,
+} from "@relay/contracts";
 import { replicationFingerprint } from "@relay/storage";
 import { publicationIdentity, snapshotDigest } from "./publication-identity";
 import { assertPublicationSource, assertReplicationTransition } from "./publication-source";
-import { mergeObject } from "./record-merge";
 import { replicationMessages } from "./replication.messages";
 import { assertReplicationResolution } from "./resolution-validation";
 
 /**
- * Проверяет самосогласованность checkpoint, не объявляя её доказательством пропущенной истории.
+ * После общего shape decoder Contracts проверяет самосогласованность checkpoint.
+ * Форма не является доказательством пропущенной истории.
  * Bootstrap может пропустить replay только при явном доверии приложения к checkpoint Git history.
  */
 export function validatePublicationEnvelope(snapshot: PortableProjectSnapshot): void {
-  const value: unknown = snapshot.publication;
-  if (
-    !mergeObject(value) ||
-    value.formatVersion !== 1 ||
-    typeof value.publicationId !== "string" ||
-    typeof value.snapshotDigest !== "string" ||
-    !Array.isArray(value.changes) ||
-    !Array.isArray(value.accepted) ||
-    value.changes.length === 0 ||
-    value.changes.length !== value.accepted.length ||
-    !(
-      value.parent === null ||
-      (mergeObject(value.parent) &&
-        typeof value.parent.snapshotDigest === "string" &&
-        (value.parent.publicationId === null || typeof value.parent.publicationId === "string"))
-    )
-  ) {
+  const publication: unknown = snapshot.publication;
+  if (publication === null || publication === undefined) {
     throw new RelayError(
       "REPLICATION_PUBLICATION_REQUIRED",
       replicationMessages.publicationRequired,
       4,
     );
   }
-  const publication = snapshot.publication;
-  if (publication === null || publication === undefined) {
-    throw new RelayError("REPLICATION_PUBLICATION", replicationMessages.publication, 4);
+  assertReplicationPublicationShape(publication);
+  if (
+    publication.changes.length === 0 ||
+    publication.changes.length !== publication.accepted.length
+  ) {
+    throw new RelayError(
+      "REPLICATION_PUBLICATION_REQUIRED",
+      replicationMessages.publicationRequired,
+      4,
+    );
   }
   const { publicationId, ...payload } = publication;
   if (
@@ -46,22 +42,14 @@ export function validatePublicationEnvelope(snapshot: PortableProjectSnapshot): 
     throw new RelayError("REPLICATION_PUBLICATION", replicationMessages.publication, 4);
   }
   const ids = new Set<string>();
-  for (const [index, changeValue] of value.changes.entries()) {
-    if (
-      !mergeObject(changeValue) ||
-      !Array.isArray(changeValue.transitions) ||
-      !(changeValue.resolution === null || mergeObject(changeValue.resolution))
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
-    }
-    assertPublicationSource(changeValue.source);
-    for (const transition of changeValue.transitions) {
+  for (const [index, change] of publication.changes.entries()) {
+    assertPublicationSource(change.source);
+    for (const transition of change.transitions) {
       assertReplicationTransition(transition, snapshot.projectId, snapshot.modelVersion === 2);
     }
-    if (changeValue.resolution !== null) {
-      assertReplicationResolution(changeValue.resolution, snapshot.projectId);
+    if (change.resolution !== null) {
+      assertReplicationResolution(change.resolution, snapshot.projectId);
     }
-    const change = changeValue as unknown as PublicationChange;
     const accepted = publication.accepted[index];
     const proof = snapshot.confirmations
       .find((entry) => entry.replicaId === change.source.replicaId)

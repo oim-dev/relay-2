@@ -181,10 +181,10 @@ describe("Повторная валидация после WAL BUSY", () => {
         name: "Новая выбранная база",
         slug: "replacement",
       });
-      const document = {
-        ...createDocument("DOC-REPLACEMENT"),
-        data: { title: "Данные новой базы", content: "После закрытия первой попытки" },
-      };
+      const document = createDocument("DOC-REPLACEMENT", {
+        name: "Данные новой базы",
+        body: "После закрытия первой попытки",
+      });
       prepared.insert(document);
       const expected = {
         projectId: "replacement-project",
@@ -214,17 +214,20 @@ describe("Повторная валидация после WAL BUSY", () => {
         }
       });
 
+      // Заменённая БД проходит readonly preflight, затем отдельное рабочее RW-открытие.
       expect(observed.trace).toEqual({
         walAttempts: 2,
         busyFailures: 1,
         firstCloses: 1,
         closedHandleRejectsQuery: true,
-        reopens: 1,
-        retryCloses: 1,
+        reopens: 2,
+        retryCloses: 2,
         events: [
           "wal-busy",
           "first-closed",
           "fixture-replaced",
+          "reopened",
+          "retry-closed",
           "reopened",
           "wal-retry",
           "retry-closed",
@@ -241,7 +244,7 @@ describe("Повторная валидация после WAL BUSY", () => {
     }
   });
 
-  test("старая схема на retry отклоняется без второй миграции и без изменения bytes или DDL", () => {
+  test("старая схема на retry отклоняется без миграции и без изменения bytes или DDL", () => {
     const fixture = new ProjectDatabaseFixture("reopen-legacy");
     const replacement = new BatchReceiptUpgradeFixture();
     try {
@@ -275,7 +278,7 @@ describe("Повторная валидация после WAL BUSY", () => {
       });
       expect(observed.value.details).toMatchObject({
         path: fixture.path,
-        expectedVersion: 5,
+        expectedVersion: 6,
         actualVersion: 1,
       });
       expect(readFileSync(fixture.path)).toEqual(beforeBytes);

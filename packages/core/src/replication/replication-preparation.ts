@@ -4,15 +4,11 @@ import {
   type ReplicationChangeset,
   type ReplicationConflict,
   type PublicationChange,
-  type ReplicationResolution,
+  type PortableReplicationResolution,
 } from "@relay/contracts";
-import { portableEntity, type StoredReplicationDecision } from "@relay/storage";
+import type { StoredReplicationDecision } from "@relay/storage";
 import { isConfirmed } from "./confirmations";
-import {
-  availableProvisionalKey,
-  canonicalSnapshot,
-  reconcileAddressComponents,
-} from "./snapshot-merge";
+import { canonicalSnapshot } from "./snapshot-merge";
 import { replicationMessages } from "./replication.messages";
 import { applyPublicationChange } from "./publication-effects";
 import { publishChanges } from "./publication";
@@ -25,6 +21,7 @@ import type {
   ReplicationDependencyWait,
 } from "./replication-selection.types";
 import { dependencyWait } from "./replication-dependencies";
+import { validateKeyAssignments } from "./key-resolution";
 
 /**
  * Готовит доставляемую часть очереди без сети и без изменения переданных снимков.
@@ -62,7 +59,7 @@ export function prepareReplication(
             local,
             remote,
           ),
-          pendingResolution,
+          ...(pendingResolution.choice === "keys" ? {} : { pendingResolution }),
           acceptedResolutionId: accepted,
         });
       }
@@ -84,6 +81,14 @@ export function prepareReplication(
       const portable = resolution === null ? null : portableResolution(resolution);
       if (portable !== null) {
         validateResolution(portable, change, remote);
+        if (portable.choice === "keys") {
+          validateKeyAssignments(
+            change,
+            { fingerprint: portable.fingerprint, assignments: portable.assignments },
+            local,
+            snapshot,
+          );
+        }
       }
       const applied = applyPublicationChange(snapshot, change, portable);
       snapshot = applied.snapshot;
@@ -109,7 +114,9 @@ export function prepareReplication(
 /**
  * Исключает локальный SQL lookup id, сохраняя весь переносимый immutable материал решения.
  */
-function portableResolution(stored: StoredReplicationDecision): ReplicationResolution {
+export function portableResolution(
+  stored: StoredReplicationDecision,
+): PortableReplicationResolution {
   const { id: _id, localSources: _localSources, ...resolution } = stored;
   return resolution;
 }
@@ -142,17 +149,12 @@ export function retainConflictedLocal(
     if (!owners.has(entry.record.id)) {
       continue;
     }
-    let retained = entry;
-    const owner = addresses.get(entry.record.key);
-    if (owner !== undefined && owner !== entry.record.id) {
-      retained = portableEntity(
-        { ...entry.record, key: availableProvisionalKey(entry.record.key, addresses) },
-        [entry.version],
-      );
+    records.set(entry.record.id, entry);
+    // При коллизии оставляем несовместимое наложение для canReconcile: импорт откладывается целиком.
+    if (!addresses.has(entry.record.key)) {
+      addresses.set(entry.record.key, entry.record.id);
     }
-    records.set(entry.record.id, retained);
-    addresses.set(retained.record.key, retained.record.id);
-    addresses.set(retained.record.id, retained.record.id);
+    addresses.set(entry.record.id, entry.record.id);
   }
   for (const entry of local.addresses) {
     if (owners.has(entry.entityId) && !addresses.has(entry.ref)) {
@@ -177,14 +179,10 @@ export function retainConflictedLocal(
   return canonicalSnapshot({
     ...prepared.snapshot,
     entities: [...records.values()],
-    components: reconcileAddressComponents(
-      [
-        ...(prepared.snapshot.components ?? []).filter((part) => !owners.has(part.ownerId)),
-        ...(local.components ?? []).filter((part) => owners.has(part.ownerId)),
-      ],
-      records,
-      addresses,
-    ),
+    components: [
+      ...(prepared.snapshot.components ?? []).filter((part) => !owners.has(part.ownerId)),
+      ...(local.components ?? []).filter((part) => owners.has(part.ownerId)),
+    ],
     addresses: [...addresses].map(([ref, entityId]) => ({ ref, entityId })),
     comments: [...comments.values()],
     receipts: [...receipts.values()],

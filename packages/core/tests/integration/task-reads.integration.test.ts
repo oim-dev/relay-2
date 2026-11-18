@@ -1,7 +1,13 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import assert from "node:assert/strict";
-import type { TaskComment, TaskCriterion, TaskRecord } from "@relay/contracts";
-import { ProjectDatabase } from "@relay/storage";
+import {
+  componentPositionBetween,
+  type TaskComment,
+  type TaskCriterion,
+  type TaskRecord,
+} from "@relay/contracts";
+import { ProjectDatabase, versionComponent } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import type { TaskCollection } from "../../src/tasks/task-read.types";
 import { TasksService } from "../../src/tasks/tasks";
@@ -61,6 +67,73 @@ async function createNestedTask(tasks: TasksService): Promise<TaskRecord> {
   );
   await tasks.comment(task.id, "## Первый\n\n  точный отступ\n", "рецензент");
   return tasks.comment(task.id, "Второй комментарий", "другой автор", "Ответ");
+}
+
+/**
+ * Добавляет отсутствующую цель после действующих зависимостей через отдельное raw-соединение с FK off.
+ * Часть получает корректные ID, позицию и версию, владелец — следующий CAS и поколение.
+ * Первичная запись и независимый журнал не меняются; соединение закрывается даже при отказе.
+ */
+function appendMissingDependency(
+  db: ProjectDatabase,
+  task: TaskRecord,
+  missingTaskId: string,
+): TaskRecord {
+  const previous = db
+    .getComponents([task.id])
+    .filter((part) => part.kind === "task-dependency" && !part.deleted)
+    .sort((left, right) => (left.position < right.position ? -1 : 1))
+    .at(-1);
+  const id = crypto.randomUUID();
+  const part = versionComponent({
+    id,
+    kind: "task-dependency",
+    ownerId: task.id,
+    position: componentPositionBetween(previous?.position ?? null, null, id),
+    parents: [],
+    deleted: false,
+    value: { taskId: missingTaskId },
+  });
+  const corrupted: TaskRecord = {
+    ...task,
+    revision: task.revision + 1,
+    data: { ...task.data, dependencies: [...task.data.dependencies, missingTaskId] },
+  };
+  const raw = new Database(db.path, { strict: true });
+  try {
+    raw.exec("PRAGMA foreign_keys = OFF");
+    raw
+      .transaction(() => {
+        assert(
+          raw
+            .query(
+              `UPDATE local_entity_revisions SET revision=? WHERE entity_id=? AND revision=?
+               RETURNING entity_id`,
+            )
+            .get(corrupted.revision, task.id, task.revision),
+        );
+        raw
+          .query(
+            `INSERT INTO task_dependencies
+           (owner_id,id,position,version,parents_json,deleted,depends_on_task_id)
+           VALUES (?,?,?,?,?,0,?)`,
+          )
+          .run(
+            task.id,
+            part.id,
+            part.position,
+            part.version,
+            JSON.stringify(part.parents),
+            missingTaskId,
+          );
+        raw.exec("UPDATE project_state SET generation=generation+1 WHERE singleton=1");
+        raw.exec("DELETE FROM replication_publications");
+      })
+      .immediate();
+  } finally {
+    raw.close();
+  }
+  return corrupted;
 }
 
 describe("Составные чтения владельца и вложенных данных задачи", () => {
@@ -333,7 +406,7 @@ describe("Составные чтения владельца и вложенны
         const corrupted = {
           ...owner,
           revision: owner.revision + 1,
-          data: { ...owner.data, description: null },
+          data: { ...owner.data, title: "Повреждённый\nзаголовок" },
         };
         db.update(corrupted, owner.revision);
         const generation = db.getGeneration();
@@ -373,16 +446,12 @@ describe("Составные чтения владельца и вложенны
       const dependency = await tasks.create({}, "автор");
       const owner = await tasks.create({ dependencies: [dependency.id] }, "автор");
       // Имитируем внешнее повреждение постоянной ссылки после валидного элемента состава.
-      const corrupted = {
-        ...owner,
-        revision: owner.revision + 1,
-        data: { ...owner.data, dependencies: [dependency.id, "missing-task"] },
-      };
-      db.update(corrupted, owner.revision);
+      const corrupted = appendMissingDependency(db, owner, "missing-task");
       const generation = db.getGeneration();
 
-      expectRelayError(() => tasks.dependenciesWithOwner(owner.id), "NOT_FOUND");
+      const failure = expectRelayError(() => tasks.dependenciesWithOwner(owner.id), "NOT_FOUND");
 
+      expect(failure.details).toEqual({ ref: "missing-task", kind: "task" });
       expect(db.get(owner.id)).toEqual(corrupted);
       expect(tasks.get(dependency.id)).toEqual(dependency);
       expect(db.getGeneration()).toBe(generation);
@@ -397,7 +466,7 @@ describe("Составные чтения владельца и вложенны
       const corrupted = {
         ...dependency,
         revision: dependency.revision + 1,
-        data: { ...dependency.data, description: null },
+        data: { ...dependency.data, title: "Повреждённый\nзаголовок" },
       };
       // Повреждение цели нельзя получить штатной мутацией Core.
       db.update(corrupted, dependency.revision);

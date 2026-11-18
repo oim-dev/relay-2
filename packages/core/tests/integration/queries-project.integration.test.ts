@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { EntityKind, EntityRecord, KnowledgeRecord } from "@relay/contracts";
 import { ProjectDatabase } from "@relay/storage";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
@@ -135,10 +136,16 @@ describe("Проект из полного снимка общих запрос�
       // Этот раздел никогда не существовал и не входит в резерв снятых ID.
       const corruptedRecord = {
         ...document,
-        revision: document.revision + 1,
         data: { ...document.data, sectionId: "never-existed" },
       };
-      db.update(corruptedRecord, document.revision);
+      const raw = new Database(db.path, { create: false, readwrite: true });
+      try {
+        // Нарушаем физический FK только в изолированной БД; штатный writer это запрещает.
+        raw.exec("PRAGMA foreign_keys=OFF");
+        raw.query("UPDATE documents SET section_id=? WHERE id=?").run("never-existed", document.id);
+      } finally {
+        raw.close();
+      }
       const generation = db.getGeneration();
       const queries = new QueryService(db);
 
@@ -157,11 +164,12 @@ describe("Проект из полного снимка общих запрос�
       const knowledge = new KnowledgeService(db);
       const project = knowledge.get("project");
       await knowledge.create("document", { name: "Документ", body: "Содержание" }, actor);
-      // null нельзя трактовать как пустой каталог даже у документа без раздела.
+      // Пустое обязательное имя представимо в typed-строке с корректной версией,
+      // но каталог нельзя принимать даже для документа без назначенного раздела.
       const corruptedProject = {
         ...project,
         revision: project.revision + 1,
-        data: { ...project.data, documentSections: null },
+        data: { ...project.data, documentSections: [{ id: "guides", name: "" }] },
       };
       db.update(corruptedProject, project.revision);
       const generation = db.getGeneration();
@@ -171,7 +179,11 @@ describe("Проект из полного снимка общих запрос�
         expectRelayError(() => queries.overview(), "CORRUPT_DATA"),
       );
 
-      expect(error.details).toEqual({ id: project.id, kind: "project", field: "documentSections" });
+      expect(error.details).toEqual({
+        id: project.id,
+        kind: "project",
+        field: "documentSections[].name",
+      });
       expect(db.get(project.id)).toEqual(corruptedProject);
       expect(db.getGeneration()).toBe(generation);
     });
@@ -191,12 +203,13 @@ describe("Проект из полного снимка общих запрос�
         { name: "Второй", body: "Содержание" },
         actor,
       );
-      // Повреждение проекта не должно прервать сбор диагностик до обхода карточек.
+      // Пустое имя раздела проходит техническую запись, но не предметную проверку.
+      // Повреждение каталога не должно прервать сбор диагностик до обхода всех карточек.
       db.update(
         {
           ...project,
           revision: project.revision + 1,
-          data: { ...project.data, documentSections: null },
+          data: { ...project.data, documentSections: [{ id: "guides", name: "" }] },
         },
         project.revision,
       );

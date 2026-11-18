@@ -73,8 +73,8 @@ ID и пути базы из конфига выбранного проекта.
 [Квитанции](../../packages/storage/tests/integration/batch-receipts.integration.test.ts)
 защищают уникальность ключа, неизменяемость результата и общий rollback с сущностями.
 [Историческая схема v1](../../packages/storage/tests/integration/batch-receipt-upgrade.integration.test.ts)
-проверяет техническую миграцию без потери данных, откат частично выполненного DDL,
-сохранность несовместимого файла и rollback данных/квитанции при отказе INSERT либо COMMIT.
+проверяет отказ открытия несовместимого файла без изменения его данных.
+В том же наборе сохранён rollback данных и квитанции текущей схемы при отказе INSERT либо COMMIT.
 [Workspace](../../packages/project-runtime/tests/integration/workspace.integration.test.ts)
 проверяет однократное чтение/декодирование реестра через symlink и доступность list/remove
 при утраченной базе зарегистрированного проекта.
@@ -84,20 +84,25 @@ ID и пути базы из конфига выбранного проекта.
 вторую копию коллекции. Правка части сохраняет соседние версии и позиции, снятие/повторное
 включение создаёт новый ID с tombstone прежнего. Sparse import меняет только затронутого
 владельца, restore сохраняет точные части без echo, readonly не исправляет повреждение.
-[Миграции частей](../../packages/storage/tests/integration/components-migrations.integration.test.ts)
-сверяют карточки, scoped ID, алиасы, комментарии, квитанции и исходный outbox после
-перехода схем v2/v3 к текущей v5 и повторного открытия.
+[Несовместимые схемы частей](../../packages/storage/tests/integration/components-migrations.integration.test.ts)
+сверяют сохранность карточек, scoped ID, алиасов, комментариев, квитанций и outbox
+при отказе открытия прежних схем; автоматического переноса в v6 нет.
 [Durable outbox](../../packages/storage/tests/integration/replication.integration.test.ts)
 защищает общий rollback записи и changeset, savepoint, receipt-only изменения и сохранение
-исходных bytes/digest исторических пакетов при миграции.
+исходных bytes/digest исторических пакетов при отказе открытия несовместимой базы.
 
 [Расписание](../../packages/storage/tests/integration/synchronization-schedule.integration.test.ts)
 связывает отметки с commit/rollback changeset, receipt-only записью и повторным открытием;
 импорт не создаёт echo. [Режим](../../packages/storage/tests/integration/synchronization-mode.integration.test.ts)
 сохраняет auto/manual без изменения generation/outbox и проверяет локальность выбора при bootstrap.
 Неизвестный сохранённый mode отклоняется readonly-чтением без исправления повреждённой строки.
-[Миграция v4](../../packages/storage/tests/integration/synchronization-migrations.integration.test.ts)
-сохраняет исходные payload/ID/digest и откатывает частичный DDL.
+[Прежние схемы расписания](../../packages/storage/tests/integration/synchronization-migrations.integration.test.ts)
+отклоняются до изменения исходных payload/ID/digest и переключения журнала.
+[Несовместимая WAL-база](../../packages/storage/tests/integration/incompatible-wal.integration.test.ts)
+проверяет отказ `open`/`openReadonly` с сохранением байтов основного файла и committed WAL.
+[Реляционные ограничения](../../packages/storage/tests/integration/relational-constraints.integration.test.ts)
+проверяют matching-kind и scoped FK непосредственно на SQL-границе:
+существующий ID чужого вида и scoped ID только другого владельца отклоняются с rollback.
 
 ## Предметные сценарии Core
 
@@ -231,6 +236,21 @@ targetRevision, пустой membership predicate и raw scope с клиентс
 
 ## Предметная репликация и переносимое состояние
 
+- [Текущая публикация](../../packages/core/tests/integration/replication-current-publication.integration.test.ts)
+  связывает capture с физическим proof текущих строк, его немедленную инвалидацию
+  при мутации, восстановление rollback и отдельное сохранение accepted checkpoint.
+  Receipt-only и поздний pending не получают ложного proof; повтор accept не переписывает строку.
+- [Незавершённые мутации](../../packages/core/tests/integration/replication-unflushed.integration.test.ts)
+  запрещают обмен поверх SQL-дельт до outer flush: приём не удаляет новый критерий
+  и не назначает старый proof после receipt-only записи.
+  [Очереди Storage](../../packages/storage/tests/integration/replication-unflushed.integration.test.ts)
+  отдельно проверяют обнаружение каждого источника дельт без чтения payload.
+- [Явные назначения ключей](../../packages/core/tests/integration/replication-key-resolution.integration.test.ts)
+  сохраняют разные постоянные ID при совпадении читаемого ключа, принятое назначение,
+  исходные source/receipts и отсутствие ложного алиаса. Решение проверяет занятость
+  адреса и повторяется без новой записи до и после acceptance/reopen.
+  [Guards ключевого решения](../../packages/core/tests/integration/replication-key-guards.integration.test.ts)
+  защищают актуальность fingerprint, полный контекст и лёгкое чтение диагностики.
 - [Обмен SQLite-реплик](../../packages/core/tests/integration/replication.integration.test.ts):
   независимые поля, комментарии, отсутствие echo, сохранение поздней локальной записи,
   неделимый batch и независимая доставка при конфликте. Коллизия ключа сохраняет ID,
@@ -524,17 +544,23 @@ guardian вместо обычной отмены.
 различает физический transport context и config-алиас, останавливает auto по deadline
 и сохраняет установленный push-unknown с корреляцией вместо ошибки прерванного ожидания.
 
-[Snapshot codec](../../packages/git-sync/src/snapshot/codec.unit.test.ts) сверяет round-trip
-первичных записей и частей, безопасные имена, exact Markdown и lossless JSON для
-непарных surrogate. Отдельно сохраняются исходный publication payload и исторические
-ревизии; неизвестный путь и несовместимый manifest отвергаются.
-[Markdown-дескрипторы](../../packages/git-sync/src/snapshot/codec-markdown.unit.test.ts)
-проверяют точные bytes/SHA-256, BOM/CRLF/empty/noLF, lone-surrogate fallback и отказ
-неверных descriptors/UTF-8. [JSON layout](../../packages/git-sync/src/snapshot/json.unit.test.ts)
+[Строки переносимых таблиц](../../packages/storage/src/relational/portable-codec.unit.test.ts)
+проверяют точные поля, первичные ключи, ссылки, carriers и восстановление производных
+полей без копий предметных связей. [Snapshot codec](../../packages/git-sync/src/snapshot/codec.unit.test.ts)
+сверяет layout 3: таблица — папка, строка — JSON-файл, все тексты внутри строки,
+без локального CAS. Сохраняются исходные publication proofs и исторические квитанции;
+неизвестные поля, таблицы, пути и несовместимый manifest отвергаются.
+[Имена файлов и manifest](../../packages/git-sync/src/snapshot/layout.unit.test.ts)
+проверяют каноническую адресацию составного PK и отказ старых layout.
+[JSON layout](../../packages/git-sync/src/snapshot/json.unit.test.ts)
 защищает lex UTF-16 pretty bytes, numeric-like ключи и duplicate keys.
-[Смешанная история layout 1→2](../../packages/git-sync/tests/integration/snapshot-layout.integration.test.ts)
-сохраняет DTO, версии, source digests и прежние Git bytes без idle echo. Отказ Core
-для layout 1 либо byte digest для layout 2 не меняет SQLite, pending и accepted cursor.
+[Табличный обмен через Git](../../packages/git-sync/tests/integration/snapshot-layout.integration.test.ts)
+сравнивает JSON с реальной SQL-строкой, сохраняет точные тексты, версии, source и receipts
+между независимыми БД без echo. Прежние layout 1/2 и подменённая строка отклоняются
+без изменения SQLite, pending и accepted cursor.
+[Выбор ключа через транспорт](../../packages/git-sync/tests/integration/key-resolution.integration.test.ts)
+сохраняет обе независимо созданные записи после явного выбора нового номера
+и распознаёт повтор решения после публикации.
 [История Git](../../packages/git-sync/tests/integration/git-history.integration.test.ts)
 проверяет пакетное чтение промежуточных snapshots, общие неизменённые blobs и отказ
 нелинейной истории/symlink до применения.
@@ -813,8 +839,8 @@ JSON-файла, применение через stdin, локальные сс�
 - Ограниченное чтение карточек проверяется для базовых страниц без предметных фильтров
   и явных составов этапа/релиза.
   Это не утверждение об ограниченной стоимости всех поисков и вычисляемых списков.
-- Технические миграции SQLite, включая нормализацию v4, проверяются отдельно от переноса
-  данных первой реализации Relay; перенос её JSON-хранилища не входит в эти проверки.
+- Для новой реляционной схемы проверяется сохраняющий отказ открытия прежних БД.
+  Автоматическая миграция в v6 и перенос JSON-хранилища первой реализации не входят в контракт.
 - [CI-матрица](../../.github/workflows/ci.yml) задаёт нативные Linux/macOS/Windows-запуски.
   Генератор конфигурации, fake manager и Linux-прогон группового примитива не являются
   нативной приёмкой другой ОС. Платформенные условия и границы ownership читаются

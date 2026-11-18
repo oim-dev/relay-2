@@ -1,8 +1,37 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { RelayError } from "@relay/contracts";
+import type { ProjectDatabase } from "@relay/storage";
 import { HistoryService } from "../../src/history/history";
 import { readHistoryTimeline } from "../../src/history/history-timeline";
 import { withGraphViewFixture } from "./graph-view-fixture";
+
+/**
+ * Повреждает ссылку авторства в изолированном SQLite-файле, сохраняя остальные поля материала.
+ * Отключает FK только на собственном соединении; immutable-триггер восстанавливает
+ * в той же транзакции после SQL-подмены. Соединение закрывается даже при отказе.
+ */
+function corruptCheckpointRun(db: ProjectDatabase, checkpointId: string, runId: string): void {
+  const raw = new Database(db.path, { create: false, readwrite: true });
+  try {
+    raw.exec("PRAGMA foreign_keys=OFF");
+    const trigger = raw
+      .query<{ sql: string }, []>(
+        "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name='checkpoints_immutable'",
+      )
+      .get();
+    if (trigger === null) {
+      throw new Error("В fixture отсутствует защита неизменяемости материала.");
+    }
+    raw.transaction(() => {
+      raw.exec("DROP TRIGGER checkpoints_immutable");
+      raw.query("UPDATE checkpoints SET run_id=? WHERE id=?").run(runId, checkpointId);
+      raw.exec(trigger.sql);
+    })();
+  } finally {
+    raw.close();
+  }
+}
 
 describe("Компактная хронология Core", () => {
   test("одинаковые native ID участий разных сессий не смешивают создателя ребёнка и его агента", async () => {
@@ -78,14 +107,9 @@ describe("Компактная хронология Core", () => {
         { runId: run.id, title: "Намерение", body: "Текст" },
         { actor: "Автор", ifRevision: session.revision },
       );
-      const id = crypto.randomUUID();
-      // Намеренно повреждённая ссылка; прочие поля материала сохранены валидными.
-      db.insert({
-        ...intent,
-        id,
-        key: `CP-${id}`,
-        data: { ...intent.data, runId: crypto.randomUUID() },
-      });
+      const missingRunId = crypto.randomUUID();
+      // Повреждаем настоящий материал: sequence и sessionRevision остаются согласованными.
+      corruptCheckpointRun(db, intent.id, missingRunId);
       const generation = db.getGeneration();
 
       let failure: unknown;
@@ -97,7 +121,11 @@ describe("Компактная хронология Core", () => {
 
       expect(failure).toMatchObject({
         code: "CORRUPT_DATA",
-        details: { id, field: "session/run/actor" },
+        details: { id: intent.id, field: "session/run/actor" },
+      });
+      expect(db.get(intent.id)).toEqual({
+        ...intent,
+        data: { ...intent.data, runId: missingRunId },
       });
       expect(db.getGeneration()).toBe(generation);
     });

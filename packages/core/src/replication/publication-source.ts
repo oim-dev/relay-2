@@ -1,7 +1,8 @@
 import {
   RelayError,
+  assertReplicationChangesetShape,
+  assertReplicationTransitionShape,
   componentIdentity,
-  isEntityKind,
   validateActor,
   isPortableIdentityText,
   type ReplicationChangeset,
@@ -10,7 +11,6 @@ import {
 } from "@relay/contracts";
 import { replicationFingerprint, canonicalJson } from "@relay/storage";
 import { assertComponents } from "./component-validation";
-import { mergeObject } from "./record-merge";
 import { replicationMessages } from "./replication.messages";
 import { assertSnapshot } from "./snapshot-validation";
 import { assertPortableEntity } from "./portable-entity-validation";
@@ -21,32 +21,18 @@ import {
 import { assertNamedTransitionTargets } from "./transition-targets";
 
 /**
- * Проверяет payload источника до merge: валидный digest не заменяет проверку версий его сторон.
- * Decoder проверяет форму без previous; replay передаёт фактическую canonical основу, чтобы
+ * Проверяет форму общим decoder Contracts, затем версии и предметный протокол источника до merge.
+ * Без previous проверка не доказывает основание; replay передаёт фактическую canonical основу, чтобы
  * техническая инициализация не могла стать обычной мутацией существующего проекта.
  */
 export function assertPublicationSource(
   value: unknown,
   previous?: PortableProjectSnapshot,
 ): asserts value is ReplicationChangeset {
+  assertReplicationChangesetShape(value);
   if (
-    !mergeObject(value) ||
-    value.formatVersion !== 1 ||
-    (value.modelVersion !== undefined && value.modelVersion !== 2) ||
-    typeof value.projectId !== "string" ||
-    typeof value.id !== "string" ||
-    typeof value.replicaId !== "string" ||
-    !Number.isSafeInteger(value.sequence) ||
-    typeof value.sequence !== "number" ||
-    value.sequence < 1 ||
-    !["baseline", "mutation"].includes(String(value.mode)) ||
-    typeof value.digest !== "string" ||
-    typeof value.createdAt !== "string" ||
     !Number.isFinite(Date.parse(value.createdAt)) ||
-    !Array.isArray(value.dependencies) ||
-    value.dependencies.some((entry) => typeof entry !== "string") ||
-    new Set(value.dependencies).size !== value.dependencies.length ||
-    !Array.isArray(value.readContext)
+    new Set(value.dependencies).size !== value.dependencies.length
   ) {
     throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
       path: "publication.source",
@@ -56,30 +42,16 @@ export function assertPublicationSource(
   if (replicationFingerprint(payload) !== digest) {
     throw new RelayError("REPLICATION_ACK_MISMATCH", replicationMessages.publication, 4);
   }
-  assertReadContext(value.readContext);
-  if (
-    ![value.projectId, value.id, value.replicaId].every(isPortableIdentityText) ||
-    value.dependencies.some((id) => !isPortableIdentityText(id))
-  ) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-      path: "source.identity.utf16",
-    });
-  }
   assertEffects(value, value.modelVersion === 2, value.transitions === undefined);
   assertEffectJournals(value, value.projectId);
   if (value.transitions !== undefined) {
-    if (!Array.isArray(value.transitions)) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
-    }
     for (const step of value.transitions) {
-      assertReplicationTransition(step, value.projectId, value.modelVersion === 2);
+      validateTransitionMaterial(step, value.projectId, value.modelVersion === 2);
     }
   }
   if (value.modelVersion === 2) {
-    // Поля проверены выше; семантический контракт и coverage связывают tape с исходными effects.
-    const source = value as unknown as ReplicationChangeset;
-    assertSourceTransitions(source, previous);
-    assertTapeCoverage(source);
+    assertSourceTransitions(value, previous);
+    assertTapeCoverage(value);
   } else if (value.components !== undefined || value.transitions !== undefined) {
     // Draft-v3 не имел независимых parts или tape; удаление modelVersion не создаёт legacy authority.
     throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
@@ -120,7 +92,8 @@ function assertSourceTransitions(
 }
 
 /**
- * Проверяет форму source/effective boundary. Соответствие source actor/time проверяется отдельно:
+ * Проверяет форму source/effective boundary общим decoder и сохраняет предметные проверки Core.
+ * Соответствие source actor/time проверяется отдельно:
  * merge или custom имеют собственную итоговую record metadata, связанную с publication/resolution.
  */
 export function assertReplicationTransition(
@@ -128,67 +101,30 @@ export function assertReplicationTransition(
   projectId: string,
   normalized: boolean,
 ): asserts value is ReplicationTransition {
+  assertReplicationTransitionShape(value);
+  validateTransitionMaterial(value, projectId, normalized);
+}
+
+/**
+ * Проверяет техническую допустимость уже декодированной boundary без повторного обхода её JSON-формы.
+ */
+function validateTransitionMaterial(
+  value: ReplicationTransition,
+  projectId: string,
+  normalized: boolean,
+): void {
   if (
-    !mergeObject(value) ||
-    typeof value.command !== "string" ||
     !value.command ||
-    typeof value.actor !== "string" ||
-    !Array.isArray(value.readContext) ||
-    (value.timestamp !== undefined &&
-      (typeof value.timestamp !== "string" || !Number.isFinite(Date.parse(value.timestamp))))
+    (value.timestamp !== undefined && !Number.isFinite(Date.parse(value.timestamp)))
   ) {
     throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
       path: "publication.transition",
-    });
-  }
-  if (
-    Object.keys(value).some(
-      (field) =>
-        ![
-          "command",
-          "actor",
-          "timestamp",
-          "targets",
-          "entities",
-          "components",
-          "addresses",
-          "comments",
-          "receipts",
-          "readContext",
-          "predicates",
-        ].includes(field),
-    )
-  ) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-      path: "transition.fields",
     });
   }
   validateActor(value.actor);
   if (!isPortableIdentityText(value.actor)) {
     throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
       path: "transition.actor.utf16",
-    });
-  }
-  assertReadContext(value.readContext);
-  assertPredicates(value.predicates);
-  const targets = value.targets;
-  if (
-    targets !== undefined &&
-    (!mergeObject(targets) ||
-      !(
-        targets.primaryId === null ||
-        (typeof targets.primaryId === "string" && isPortableIdentityText(targets.primaryId))
-      ) ||
-      !Array.isArray(targets.ownerIds) ||
-      targets.ownerIds.some((id) => typeof id !== "string" || !isPortableIdentityText(id)) ||
-      (targets.roles !== undefined &&
-        (!mergeObject(targets.roles) ||
-          Object.values(targets.roles).some(
-            (id) => id !== null && (typeof id !== "string" || !isPortableIdentityText(id)),
-          ))))
-  ) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-      path: "transition.targets",
     });
   }
   assertEffects(value, normalized);
@@ -300,116 +236,12 @@ function sortedEffects(entries: readonly unknown[]): string {
 }
 
 /**
- * Проверяет causal guards до обращения к sourceChangesetId и сравнения переносимых версий.
- */
-function assertReadContext(value: unknown): void {
-  if (!Array.isArray(value)) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
-  }
-  for (const entry of value) {
-    if (
-      !mergeObject(entry) ||
-      typeof entry.id !== "string" ||
-      !["existence", "content"].includes(String(entry.kind)) ||
-      !isPortableIdentityText(entry.id) ||
-      !(
-        entry.version === null ||
-        (typeof entry.version === "string" && /^[a-f0-9]{64}$/.test(entry.version))
-      ) ||
-      !(
-        entry.sourceChangesetId === null ||
-        (typeof entry.sourceChangesetId === "string" &&
-          isPortableIdentityText(entry.sourceChangesetId))
-      ) ||
-      (entry.logicalDigest !== undefined &&
-        (typeof entry.logicalDigest !== "string" || !/^[a-f0-9]{64}$/.test(entry.logicalDigest)))
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "readContext",
-      });
-    }
-  }
-}
-
-/**
- * Проверяет безопасную логическую форму предикатов, не интерпретируя её как SQL/команду пользователя.
- */
-function assertPredicates(value: unknown): void {
-  if (value === undefined) {
-    return;
-  }
-  if (!Array.isArray(value)) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
-  }
-  for (const predicate of value) {
-    if (
-      !mergeObject(predicate) ||
-      !mergeObject(predicate.selector) ||
-      !Array.isArray(predicate.records) ||
-      !(predicate.present === null || typeof predicate.present === "boolean") ||
-      predicate.records.some(
-        (entry) =>
-          !mergeObject(entry) ||
-          typeof entry.id !== "string" ||
-          !isPortableIdentityText(entry.id) ||
-          !(
-            entry.version === null ||
-            (typeof entry.version === "string" && /^[a-f0-9]{64}$/.test(entry.version))
-          ),
-      )
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "predicates",
-      });
-    }
-    const selector = predicate.selector;
-    const fields: Readonly<Record<string, readonly string[]>> = {
-      entity: ["ref"],
-      identities: [],
-      records: [],
-      virtual: ["ref", "entityKind"],
-      field: ["entityKind", "field", "value"],
-      kind: ["entityKind"],
-      "field-set": ["entityKind", "field"],
-      "array-item": ["entityKind", "arrayField", "itemField", "value"],
-      "task-graph": [],
-      memberships: ["taskId"],
-      "address-state": ["ref"],
-      receipt: ["operationKey"],
-    };
-    const required = typeof selector.kind === "string" ? fields[selector.kind] : undefined;
-    if (
-      required === undefined ||
-      required.some((field) => typeof selector[field] !== "string") ||
-      (selector.entityKind !== undefined && !isEntityKind(selector.entityKind)) ||
-      (selector.semantic !== undefined &&
-        selector.semantic !== "existence" &&
-        selector.semantic !== "content") ||
-      (selector.kind === "identities" &&
-        (!Array.isArray(selector.refs) || selector.refs.some((ref) => typeof ref !== "string"))) ||
-      (selector.kind === "records" &&
-        (!Array.isArray(selector.ids) || selector.ids.some((id) => typeof id !== "string")))
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "predicate.selector",
-      });
-    }
-    if (
-      selector.kind === "field-set" &&
-      (!Array.isArray(selector.values) ||
-        selector.values.some((value) => typeof value !== "string"))
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "predicate.selector.values",
-      });
-    }
-  }
-}
-
-/**
  * Переиспользует общую проверку переносимых адресов, comments и исторических receipts без final doctor.
  */
-function assertEffectJournals(value: Record<string, unknown>, projectId: string): void {
+function assertEffectJournals(
+  value: Pick<ReplicationChangeset, "addresses" | "comments" | "receipts">,
+  projectId: string,
+): void {
   assertSnapshot({
     formatVersion: 1,
     projectId,
@@ -425,21 +257,11 @@ function assertEffectJournals(value: Record<string, unknown>, projectId: string)
  * Не допускает подмены переносимой версии правильным digest всего внешнего контейнера.
  */
 function assertEffects(
-  value: Record<string, unknown>,
+  value: Pick<ReplicationChangeset, "entities" | "components">,
   normalized: boolean,
   immediateParents = true,
 ): void {
-  for (const field of ["entities", "addresses", "comments", "receipts"]) {
-    if (!Array.isArray(value[field])) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: `effects.${field}`,
-      });
-    }
-  }
-  for (const change of value.entities as unknown[]) {
-    if (!mergeObject(change) || typeof change.id !== "string") {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
-    }
+  for (const change of value.entities) {
     for (const side of [change.before, change.after]) {
       if (side === null) {
         continue;
@@ -453,11 +275,10 @@ function assertEffects(
     }
     if (
       immediateParents &&
-      mergeObject(change.before) &&
-      mergeObject(change.after) &&
+      change.before !== null &&
+      change.after !== null &&
       change.before.version !== change.after.version &&
-      (!Array.isArray(change.after.parents) ||
-        !change.after.parents.includes(change.before.version))
+      !change.after.parents?.includes(change.before.version)
     ) {
       throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
         path: "effects.entity.parents",
@@ -465,18 +286,14 @@ function assertEffects(
     }
   }
   if (normalized || value.components !== undefined) {
-    if (!Array.isArray(value.components)) {
+    if (value.components === undefined) {
       throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
     }
-    for (const part of value.components) {
-      if (!mergeObject(part)) {
-        throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2);
+    for (const component of value.components) {
+      assertComponents([component.after]);
+      if (component.before !== null) {
+        assertComponents([component.before]);
       }
-      assertComponents([part.after]);
-      if (part.before !== null) {
-        assertComponents([part.before]);
-      }
-      const component = part as unknown as ReplicationTransition["components"][number];
       if (
         component.key !== componentIdentity(component.after) ||
         (component.before !== null && componentIdentity(component.before) !== component.key)

@@ -54,9 +54,6 @@ function writableTransitionFields(
   if (next.kind === "board" && operation === "application.update") {
     return ["name"];
   }
-  if (next.kind === "application" && operation === "application.create") {
-    return ["boardId"];
-  }
   if (
     next.kind === "document" &&
     (operation === "document.link" || operation === "document.unlink")
@@ -71,7 +68,7 @@ function writableTransitionFields(
  * генерации ID/времени и I/O. Канонические записи и final-state связность предоставляет вызывающий.
  * Даже legacy replication не может перепривязать сценарий, FI/SI или доску другого приложения.
  * product.create проверяет пустоту канонического before даже при неизменном after и пустых effects.
- * Единственное заполнение отсутствующего boardId разрешено промежуточному application.create rev1→rev2.
+ * Приложение создаётся с известным boardId; специального перехода для заполнения пустой ссылки нет.
  */
 export function assertKnowledgeTransition(
   previous: Readonly<EntityRecord> | null,
@@ -109,16 +106,7 @@ export function assertKnowledgeTransition(
       field: "key",
     });
   }
-  const boardInitialization =
-    context.operation === "application.create" &&
-    next.kind === "application" &&
-    !Object.hasOwn(previous.data, "boardId") &&
-    previous.revision === 1 &&
-    next.revision === 2;
   for (const field of immutableFields[next.kind]) {
-    if (field === "boardId" && boardInitialization) {
-      continue;
-    }
     if (!isDeepStrictEqual(previous.data[field], next.data[field])) {
       throw new RelayError("INVALID_STATE", knowledgeMessages.immutableTransition, 4, {
         id: next.id,

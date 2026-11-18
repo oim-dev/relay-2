@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import type { EntityRecord } from "@relay/contracts";
 import { HistoryService, KnowledgeService, TasksService } from "@relay/core";
-import type { ProjectDatabase } from "@relay/storage";
+import { versionComponent, type ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import {
   arrayValue,
@@ -79,6 +81,60 @@ async function seedCompletedHistory(db: ProjectDatabase): Promise<void> {
       ifRevision: history.get(session.id).revision,
     },
   );
+}
+
+/**
+ * Создаёт документ через Core и добавляет ссылку на отсутствующую фичу в typed-таблицу.
+ * FK отключён только у принадлежащего helper raw-соединения: штатная запись запрещает дефект.
+ * Версия части соответствует содержимому, чтобы doctor проверял ссылку, а не повреждённый hash.
+ */
+async function createDocumentWithMissingTarget(
+  db: ProjectDatabase,
+  targetId: string,
+): Promise<EntityRecord> {
+  const document = await new KnowledgeService(db).create(
+    "document",
+    { name: "Материал", body: "Текст" },
+    "agent",
+  );
+  const relation = {
+    target: { id: targetId, kind: "feature" },
+    type: "documents",
+    description: "",
+  } as const;
+  const part = versionComponent({
+    id: crypto.randomUUID(),
+    kind: "document-relation",
+    ownerId: document.id,
+    position: "V",
+    parents: [],
+    deleted: false,
+    value: relation,
+  });
+  const raw = new Database(db.path, { strict: true });
+  try {
+    raw.exec("PRAGMA foreign_keys=OFF");
+    raw
+      .query(
+        `INSERT INTO document_relations(
+           owner_id,id,position,version,parents_json,deleted,
+           target_id,target_kind,relation_type,description,description_json
+         ) VALUES(?,?,?,?,?,0,?,?,?,'',NULL)`,
+      )
+      .run(
+        part.ownerId,
+        part.id,
+        part.position,
+        part.version,
+        JSON.stringify(part.parents),
+        relation.target.id,
+        relation.target.kind,
+        relation.type,
+      );
+  } finally {
+    raw.close();
+  }
+  return { ...document, data: { ...document.data, relations: [relation] } };
 }
 
 describe("Поиск и обзор через CLI", () => {
@@ -235,18 +291,7 @@ describe("Диагностика целостности через CLI", () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
       const { generation, damaged } = await cli.withDatabase(project, async (db) => {
-        const document = await new KnowledgeService(db).create(
-          "document",
-          { name: "Материал", body: "Текст" },
-          "agent",
-        );
-        // Ошибка хранения вводится явно: штатный Core не позволяет записать такую ссылку.
-        const damaged = {
-          ...document,
-          revision: document.revision + 1,
-          data: { ...document.data, targets: ["missing-target"] },
-        };
-        db.update(damaged, document.revision);
+        const damaged = await createDocumentWithMissingTarget(db, "missing-target");
         return { generation: db.getGeneration(), damaged };
       });
 
@@ -257,6 +302,6 @@ describe("Диагностика целостности через CLI", () => {
       expect(issues.some((issue) => issue.includes("missing-target"))).toBe(true);
       expect(cli.withDatabase(project, (db) => db.getGeneration())).toBe(generation);
       expect(cli.withDatabase(project, (db) => db.get(damaged.id))).toEqual(damaged);
-    });
+    }, "database-redesign");
   });
 });

@@ -20,7 +20,7 @@ const collisions = [
 
 describe("Коллизии больших допустимых ключей", () => {
   test.each(collisions)(
-    "$name продвигается до свободного ключа без смены ID и чужого alias",
+    "$name предлагается точно и применяется только после явного решения",
     async ({ key, occupied, expected }) => {
       await withReplicationFixture(
         async (db) => {
@@ -60,7 +60,32 @@ describe("Коллизии больших допустимых ключей", ()
 
           const accepted = sync.accept(published.snapshot);
 
-          expect(accepted.reconciled).toBe(true);
+          expect(accepted.reconciled).toBe(false);
+          expect(left.get("document", local.id).key).toBe(key);
+          expect(first.getReplicationOutbox()).toEqual(pending);
+          const conflict = sync.keyConflicts()[0];
+          if (conflict === undefined) {
+            throw new Error("Нет коллизии большого ключа");
+          }
+          expect(conflict.collisions).toEqual([
+            {
+              entityId: local.id,
+              key,
+              acceptedOwnerId: remoteDocument.id,
+              suggestedKey: expected,
+            },
+          ]);
+          const resolved = sync.resolveKeys(
+            conflict.id,
+            {
+              fingerprint: conflict.fingerprint,
+              assignments: [{ entityId: local.id, key: expected }],
+            },
+            "resolver",
+          );
+          sync.accept(resolved.snapshot);
+          peer.accept(resolved.snapshot);
+
           expect(left.get("document", local.id)).toMatchObject({
             id: local.id,
             key: expected,
@@ -76,15 +101,15 @@ describe("Коллизии больших допустимых ключей", ()
             key: occupied,
             data: { body: "C" },
           });
-          expect(first.getReplicationOutbox()).toEqual(pending);
-          expect(first.getReplicationState().base).toEqual(published.snapshot);
+          expect(first.getReplicationOutbox()).toEqual([]);
+          expect(first.getReplicationState().base).toEqual(resolved.snapshot);
           expect(sync.capture().addresses.filter((entry) => entry.ref === key)).toEqual([
             { ref: key, entityId: remoteDocument.id },
           ]);
           expect(sync.capture().addresses.filter((entry) => entry.ref === expected)).toEqual([
             { ref: expected, entityId: local.id },
           ]);
-          expect(sync.conflicts().map((entry) => entry.code)).toEqual(["REPLICATION_ADDRESS"]);
+          expect(sync.keyConflicts()).toEqual([]);
         },
       );
     },

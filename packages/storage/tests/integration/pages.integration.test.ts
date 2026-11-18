@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { EntityRecord } from "@relay/contracts";
+import type { EntityRecord, KnowledgeRecord } from "@relay/contracts";
 import type { ProjectDatabase } from "../../src/database/project-database";
-import { ProjectDatabaseFixture } from "./helpers/project-database-fixture";
+import {
+  ProjectDatabaseFixture,
+  createDocument,
+  createTask,
+} from "./helpers/project-database-fixture";
 import type { AddressedBoards } from "./helpers/page-records.types";
 
 const pageCases = [
@@ -30,20 +34,16 @@ let fixture: ProjectDatabaseFixture;
 let db: ProjectDatabase;
 
 /**
- * Формирует технический JSON-документ для проверки окна SQL, не сохраняя его в БД.
- * Поля name/body намеренно минимальны: предметное декодирование документа принадлежит Core.
+ * Формирует полный документ с одинаковым временем для проверки SQL-окон и устойчивой сортировки.
+ * Запись в БД остаётся явным действием теста.
  */
 function createPageDocument(key: string, name: string, body = "Полное содержание"): EntityRecord {
   return {
-    id: crypto.randomUUID(),
-    kind: "document",
-    key,
-    revision: 1,
+    ...createDocument(key, { name, body }),
     createdAt: "2026-10-21T00:00:00.000Z",
     updatedAt: "2026-10-21T00:00:00.000Z",
     createdBy: "author",
     updatedBy: "author",
-    data: { name, body },
   };
 }
 
@@ -52,20 +52,49 @@ function createPageDocument(key: string, name: string, body = "Полное со
  * Возвращает независимые ожидаемые идентичности; все записи принадлежат БД текущего теста.
  */
 function createAddressedBoards(database: ProjectDatabase): AddressedBoards {
-  const first: EntityRecord = {
+  const first: KnowledgeRecord<"board"> = {
     ...createPageDocument("BOARD-1", "Первая доска"),
     id: "board-1",
     kind: "board",
-    data: { slug: "shared", prefix: "FIRST", description: "НЕ-ЧИТАТЬ-СОДЕРЖАНИЕ-ДОСКИ" },
+    data: {
+      name: "Первая доска",
+      slug: "shared",
+      prefix: "FIRST",
+      description: "НЕ-ЧИТАТЬ-СОДЕРЖАНИЕ-ДОСКИ",
+      applicationId: "application-1",
+    },
   };
-  const second: EntityRecord = {
+  const second: KnowledgeRecord<"board"> = {
     ...createPageDocument("BOARD-2", "Вторая доска"),
     id: "board-2",
     kind: "board",
-    data: { slug: "second", prefix: "shared" },
+    data: {
+      name: "Вторая доска",
+      slug: "second",
+      prefix: "shared",
+      applicationId: "application-2",
+    },
   };
-  database.insert(first);
-  database.insert(second);
+  database.transaction(() => {
+    for (const [index, board] of [first, second].entries()) {
+      database.insert({
+        ...createPageDocument(`APP-${index + 1}`, board.data.name),
+        id: `application-${index + 1}`,
+        kind: "application",
+        data: {
+          name: board.data.name,
+          summary: "",
+          description: "",
+          slug: `${board.data.slug}-app`,
+          prefix: board.data.prefix,
+          type: "internal",
+          boardId: board.id,
+          implementationIds: [],
+        },
+      });
+      database.insert(board);
+    }
+  });
   database.rename(first.id, "BOARD-RENAMED", first.revision, "author");
   return { first, second, identity: { id: first.id, kind: "board", key: "BOARD-RENAMED" } };
 }
@@ -116,6 +145,22 @@ describe("Ограниченные SQL-страницы сущностей", () 
     },
   );
 
+  test.each(["title", "updated"] as const)(
+    "%s сохраняет порядок по ID при равных значениях",
+    (sort) => {
+      const later = { ...createPageDocument("DOC-1", "Общее название"), id: "document-z" };
+      const earlier = { ...createPageDocument("DOC-2", "Общее название"), id: "document-a" };
+      db.insert(later);
+      db.insert(earlier);
+
+      const first = db.listPage("document", { offset: 0, limit: 1, sort });
+      const second = db.listPage("document", { offset: 1, limit: 1, sort });
+
+      expect(first).toEqual({ total: 2, items: [earlier] });
+      expect(second).toEqual({ total: 2, items: [later] });
+    },
+  );
+
   test("счётчик и окно относятся к одному снимку при конкурентном добавлении", () => {
     const first = createPageDocument("DOC-1", "Первая запись");
     db.insert(first);
@@ -140,17 +185,22 @@ describe("Ограниченные SQL-страницы сущностей", () 
 
 describe("Узкие SQL-проекции", () => {
   test("граф задач не загружает текст и независимый журнал комментариев", () => {
-    const task: EntityRecord = {
-      ...createPageDocument("TASK-1", "Техническая задача"),
-      kind: "task",
-      data: {
-        description: "ТЕКСТ-ЗАДАЧИ",
-        column: "ready",
-        parentId: null,
-        dependencies: [],
-        acceptanceCriteria: [{ completed: false, description: "ТЕКСТ-КРИТЕРИЯ" }],
-      },
-    };
+    const task = createTask(db, "TASK-1", {
+      title: "Техническая задача",
+      description: "ТЕКСТ-ЗАДАЧИ",
+      column: "ready",
+      acceptanceCriteria: [
+        {
+          id: "criterion",
+          title: "Критерий",
+          summary: "",
+          completed: false,
+          completedAt: null,
+          completedBy: null,
+          description: "ТЕКСТ-КРИТЕРИЯ",
+        },
+      ],
+    });
     db.insert(task);
     db.appendTaskComment(task.id, {
       id: "comment-id",
@@ -160,19 +210,25 @@ describe("Узкие SQL-проекции", () => {
       createdBy: "author",
     });
 
-    const graph = db.listTaskGraph();
+    const decoder = spyOn(JSON, "parse");
+    try {
+      const graph = db.listTaskGraph();
 
-    expect(graph).toEqual([
-      {
-        ...task,
-        data: {
-          column: "ready",
-          parentId: null,
-          dependencies: [],
-          acceptanceCriteria: [{ completed: false }],
+      expect(graph).toEqual([
+        {
+          ...task,
+          data: {
+            column: "ready",
+            parentId: null,
+            dependencies: [],
+            acceptanceCriteria: [{ completed: false }],
+          },
         },
-      },
-    ]);
+      ]);
+      expect(decoder.mock.calls.some(([text]) => text.includes("ТЕКСТ-"))).toBe(false);
+    } finally {
+      decoder.mockRestore();
+    }
   });
 
   test.each(identityReferences)(
@@ -217,7 +273,7 @@ describe("Узкие SQL-проекции", () => {
       const otherKind = db.findAddressIdentities("shared", "application");
 
       expect(matches).toEqual([identity, { id: second.id, kind: "board", key: second.key }]);
-      expect(otherKind).toEqual([]);
+      expect(otherKind).toEqual([{ id: "application-2", kind: "application", key: "APP-2" }]);
       expect(decoder).not.toHaveBeenCalled();
     } finally {
       decoder.mockRestore();

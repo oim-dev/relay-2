@@ -295,7 +295,7 @@ export function readCommandGuard(
       records = connection
         .query<EntityIdentityWithRevision, [string, string | null, string | null]>(
           `
-        SELECT e.id,e.kind,e.key,e.revision FROM entity_refs r JOIN entities e ON e.id=r.entity_id
+        SELECT e.id,e.kind,e.key,e.revision FROM entity_refs r JOIN entity_identities e ON e.id=r.entity_id
         WHERE r.ref=? AND (? IS NULL OR e.kind=?)
       `,
         )
@@ -307,7 +307,7 @@ export function readCommandGuard(
       records = connection
         .query<EntityIdentityWithRevision, [string, string | null, string | null]>(
           `
-        SELECT e.id,e.kind,e.key,e.revision FROM json_each(?) requested JOIN entities e ON e.id=requested.value
+        SELECT e.id,e.kind,e.key,e.revision FROM json_each(?) requested JOIN entity_identities e ON e.id=requested.value
         WHERE (? IS NULL OR e.kind=?) ORDER BY requested.key
       `,
         )
@@ -328,7 +328,7 @@ export function readCommandGuard(
     case "kind":
       records = connection
         .query<EntityIdentityWithRevision, [string]>(
-          "SELECT id,kind,key,revision FROM entities WHERE kind=? ORDER BY key,id",
+          "SELECT id,kind,key,revision FROM entity_identities WHERE kind=? ORDER BY key,id",
         )
         .all(selector.entityKind);
       break;

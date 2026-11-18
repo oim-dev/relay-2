@@ -24,12 +24,16 @@ import {
   readReplicationState,
   readReplicationConflicts,
   readReplicationDecisions,
+  readReplicationDecision,
   writeReplicationState,
   readReplicationGuard,
+  readReplicationKeyAddresses,
   readReplicationStatus,
+  hasUnflushedReplicationChanges,
 } from "../replication/replication-store";
 import { importStoredProject } from "../replication/replication-import";
 import { storageReplicationMessages } from "../replication/replication.messages";
+import { removeRawEntity } from "../relational/entity-store";
 import { observeReplicationReads } from "../replication/replication-reads";
 import {
   readOutboxDependencies,
@@ -43,7 +47,7 @@ import type {
   ReplicationSourceDigest,
   ReplicationDependencySource,
 } from "../replication/replication-outbox.types";
-import { flushComponentVersions, readComponents } from "../components/component-store";
+import { readComponents } from "../components/component-store";
 import { SqliteCommandStore } from "../commands/sqlite-command-store";
 import type { PortableComponent } from "@relay/contracts";
 import type {
@@ -52,6 +56,7 @@ import type {
   StoredReplicationDecision,
   ReplicationGuard,
   ReplicationImportPlan,
+  ReplicationKeyAddresses,
 } from "../replication/replication.types";
 import type { ReplicationStore, ProjectStorageInfo } from "./project-store.types";
 import { insertBatchReceipt, readBatchReceipt } from "../batch/batch-receipts";
@@ -189,7 +194,7 @@ export class ProjectDatabase implements ReplicationStore {
 
   /**
    * Открывает существующую совместимую базу, проверяя приложение, версию и корневую сущность.
-   * Технические схемы v1…v4 атомарно обновляются до v5 с сохранением данных и исходной очереди.
+   * Принимает только текущую схему; прежние версии отклоняются без изменения файла.
    * Не создаёт отсутствующий файл; при отказе освобождает временно открытое соединение.
    */
   static open(path: string): ProjectDatabase {
@@ -242,15 +247,13 @@ export class ProjectDatabase implements ReplicationStore {
     const db = ProjectDatabase.create(path, { id: projectId, name: "Replica", slug: "replica" });
     try {
       db.transaction(() => {
-        db.connection.exec(
-          "UPDATE replication_state SET importing=1 WHERE singleton=1; DELETE FROM entity_refs;",
-        );
-        db.connection.query("DELETE FROM entities WHERE id!=?").run(projectId);
-        db.connection.query("INSERT INTO entity_refs VALUES(?,?)").run(projectId, projectId);
-        db.connection
-          .query("INSERT INTO entity_refs SELECT 'PROJECT',? WHERE ?!='PROJECT'")
-          .run(projectId, projectId);
-        flushComponentVersions(db.connection);
+        db.connection.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
+        const removed = db.connection
+          .query<{ id: string }, [string]>("SELECT id FROM entities WHERE id!=?")
+          .all(projectId);
+        for (const { id } of removed) {
+          removeRawEntity(db.connection, id);
+        }
         db.connection.exec(
           "DELETE FROM replication_outbox; DELETE FROM replication_owner_heads; DELETE FROM replication_entity_queue; DELETE FROM replication_address_queue; DELETE FROM replication_comment_queue; DELETE FROM replication_receipt_queue; DELETE FROM replication_read_queue; DELETE FROM replication_transition_queue; DELETE FROM component_changes; DELETE FROM component_events; UPDATE replication_state SET sequence=0,importing=0 WHERE singleton=1;",
         );
@@ -418,7 +421,6 @@ export class ProjectDatabase implements ReplicationStore {
           throw new RelayError("ASYNC_TRANSACTION", projectDatabaseMessages.asyncResult);
         }
         if (!nested && (mode === "IMMEDIATE" || this.writeIntent !== writeIntent)) {
-          flushComponentVersions(this.connection);
           flushReplicationQueue(this.connection);
         }
         this.connection.exec(nested ? `RELEASE SAVEPOINT ${point}` : "COMMIT");
@@ -557,8 +559,8 @@ export class ProjectDatabase implements ReplicationStore {
   }
 
   /**
-   * Читает карточки по строковому полю JSON и гидратирует parts только отобранных owners.
-   * Имя поля сравнивается буквально, не как JSON-путь; порядок — по ключу и ID.
+   * Читает карточки по строковому полю typed проекции и гидратирует parts только отобранных owners.
+   * Имя поля сравнивается буквально по закрытой карте колонок; порядок — по ключу и ID.
    * Фильтрация выполняется в SQLite; в TypeScript передаются только выбранные карточки и журналы.
    */
   listByField(kind: EntityKind, field: string, value: string): EntityRecord[] {
@@ -573,7 +575,7 @@ export class ProjectDatabase implements ReplicationStore {
   }
 
   /**
-   * Читает только ID, вид, ключ и ревизию записей с точным строковым полем верхнего уровня JSON.
+   * Читает только ID, вид, ключ и ревизию записей с точным строковым полем typed проекции.
    * Имя поля буквальное, порядок — по ключу и ID; отсутствие совпадений возвращает пустой массив.
    * JSON-содержание и журналы не передаются из SQLite. Общий снимок нескольких чтений задаёт вызывающий.
    */
@@ -790,6 +792,8 @@ export class ProjectDatabase implements ReplicationStore {
 
   /**
    * Возвращает полный сохраняемый переносимый снимок из одной транзакции чтения.
+   * publication берётся из физических строк и равна null после изменения без нового proof.
+   * Последний принятый checkpoint из replication_state.base_json не подставляется.
    */
   captureReplication(): PortableProjectSnapshot {
     return this.snapshot(() => captureStoredProject(this.connection, this.projectId));
@@ -811,10 +815,26 @@ export class ProjectDatabase implements ReplicationStore {
   }
 
   /**
+   * Проверяет несброшенные capture-очереди одним EXISTS-запросом без payload и записи.
+   * Внешним snapshot/transaction владеет вызывающий; текущая транзакция не завершается.
+   */
+  hasUnflushedReplicationChanges(): boolean {
+    return this.withOpenConnection(() => hasUnflushedReplicationChanges(this.connection));
+  }
+
+  /**
    * Возвращает скалярный guard данных, очереди и решений без чтения JSON полного snapshot.
    */
   getReplicationGuard(): ReplicationGuard {
     return this.withOpenConnection(() => readReplicationGuard(this.connection));
+  }
+
+  /**
+   * Читает только локальные и observed адресные пары в одном снимке для диагностики коллизий.
+   * Содержание владельцев, версии частей и outbox payload не загружаются.
+   */
+  getReplicationKeyAddresses(): ReplicationKeyAddresses {
+    return this.snapshot(() => readReplicationKeyAddresses(this.connection));
   }
 
   /**
@@ -891,6 +911,15 @@ export class ProjectDatabase implements ReplicationStore {
   }
 
   /**
+   * Читает последнее immutable решение changeset, включая уже подтверждённое после удаления outbox.
+   * Отсутствие даёт undefined; индексированный поиск декодирует не больше одного JSON.
+   */
+  getReplicationDecision(changesetId: string): StoredReplicationDecision | undefined {
+    assertSqlText(changesetId, "changesetId");
+    return this.withOpenConnection(() => readReplicationDecision(this.connection, changesetId));
+  }
+
+  /**
    * Атомарно записывает подтверждения, конфликты и решения без предметного echo-outbox.
    */
   updateReplicationState(update: ReplicationStateUpdate): void {
@@ -899,6 +928,8 @@ export class ProjectDatabase implements ReplicationStore {
 
   /**
    * Применяет предметно проверенный снимок, не заменяя файл БД и не создавая echo-outbox.
+   * Переносимая дельта снимает current proof и повышает transport revision, включая receipt-only.
+   * No-op сохраняет proof/guard. Publication входа не назначается без отдельного решения Core.
    */
   importReplication(snapshot: PortableProjectSnapshot, plan?: ReplicationImportPlan): void {
     this.transaction(() => importStoredProject(this.connection, snapshot, plan));
@@ -918,11 +949,9 @@ export class ProjectDatabase implements ReplicationStore {
       ) {
         throw new RelayError("REPLICATION_NOT_EMPTY", storageReplicationMessages.bootstrap, 4);
       }
-      this.connection.exec(
-        "UPDATE replication_state SET importing=1 WHERE singleton=1; DELETE FROM entity_refs;",
-      );
+      this.connection.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
       // Отложенный FK project_state допускает замену технической корневой карточки внутри транзакции.
-      this.connection.exec("DELETE FROM entities");
+      removeRawEntity(this.connection, this.projectId);
       importStoredProject(this.connection, snapshot);
       writeReplicationState(this.connection, { base: snapshot, conflicts: [] });
     });

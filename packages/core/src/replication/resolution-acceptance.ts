@@ -1,4 +1,4 @@
-import type { PortableProjectSnapshot, ReplicationResolution } from "@relay/contracts";
+import type { PortableProjectSnapshot, PortableReplicationResolution } from "@relay/contracts";
 
 /**
  * Возвращает привязанное к принятому source решение; null обозначает принятие без ручной поправки.
@@ -17,7 +17,7 @@ export function confirmedResolution(snapshot: PortableProjectSnapshot, id: strin
  * Это отмена локального предложения; immutable canonical proof повторно не переписывается.
  */
 export function isResolutionAdoption(
-  resolution: ReplicationResolution,
+  resolution: PortableReplicationResolution,
   accepted: string | null,
 ): boolean {
   return (

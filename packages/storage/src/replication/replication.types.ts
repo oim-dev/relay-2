@@ -1,11 +1,13 @@
 import type {
   PortableProjectSnapshot,
   ReplicationConflict,
-  ReplicationResolution,
+  PortableReplicationResolution,
   ReplicatedEntityChange,
   PortableComponent,
   PortableComment,
   PortableBatchReceipt,
+  PortableAddress,
+  ReplicationPublication,
 } from "@relay/contracts";
 
 /**
@@ -16,7 +18,7 @@ export interface ReplicationState {
   readonly replicaId: string;
   /* Последний выделенный номер атомарной транзакции. */
   readonly sequence: number;
-  /* Версия локального transport-state, включая receipt-only, observed, решения и ack. */
+  /* Версия локального состояния обмена и импорта, включая current proof и receipt-only. */
   readonly revision: number;
   /* Последний реально принятый remote либо null до первого обмена. */
   readonly base: PortableProjectSnapshot | null;
@@ -27,7 +29,7 @@ export interface ReplicationState {
 /**
  * Сохранённое решение пользователя относительно одной версии конфликта.
  */
-export type StoredReplicationDecision = ReplicationResolution & {
+export type StoredReplicationDecision = PortableReplicationResolution & {
   /* ID changeset, к которому относится решение. */
   readonly id: string;
   /* Локальный immutable witness исходного наложения; не входит в переносимое решение. */
@@ -48,10 +50,15 @@ export interface ResolutionLocalSource {
 
 /**
  * Атомарная запись служебного состояния после проверки Core.
+ * currentPublication связывается с текущими переносимыми строками только под тем же guard,
+ * что импорт/accept; base независимо сохраняет последний принятый checkpoint.
+ * Изменение переносимых строк снимает прежнюю привязку даже без явного currentPublication.
  */
 export interface ReplicationStateUpdate {
   /* Реально принятый remote; отсутствие оставляет прежнюю базу. */
   readonly base?: PortableProjectSnapshot;
+  /* Проверенный proof текущих строк; null снимает его, undefined не назначает новый. */
+  readonly currentPublication?: ReplicationPublication | null;
   /* Предъявленный prepare снимок; null обозначает ещё пустую общую ветку. */
   readonly observed?: PortableProjectSnapshot | null;
   /* Актуальные конфликты examined либо полный набор при отсутствии examined. */
@@ -65,7 +72,7 @@ export interface ReplicationStateUpdate {
 }
 
 /**
- * Сырая SQL-строка очереди карточек; JSON создан SQLite из затронутых строк.
+ * SQL-строка транзакционной очереди; JSON создан адаптером typed записи из raw-проекций.
  */
 export interface EntityDeltaRow {
   /* Постоянный ID затронутой карточки. */
@@ -82,6 +89,30 @@ export interface EntityDeltaRow {
 export interface ReplicationJsonRow {
   /* Точная сериализация проверенной структуры. */
   readonly json: string;
+}
+
+/**
+ * Первичная переносимая строка подтверждений одной реплики.
+ */
+export interface ReplicationConfirmationRow {
+  /* Постоянный ID подтверждаемой реплики. */
+  readonly replica_id: string;
+  /* Точные диапазоны подтверждённых sequence. */
+  readonly ranges_json: string;
+  /* Точные публикационные proofs; SQL null сохраняет отсутствие optional поля. */
+  readonly proofs_json: string | null;
+}
+
+/**
+ * Узкие адресные пространства для диагностики коллизий без содержания владельцев и очереди.
+ */
+export interface ReplicationKeyAddresses {
+  /* Действующие локальные ID, ключи и исторические aliases в порядке ref. */
+  readonly local: readonly PortableAddress[];
+  /* Адреса последнего observed snapshot в порядке ref; пусто при его отсутствии. */
+  readonly observed: readonly PortableAddress[];
+  /* Выбранные ключи последних решений ещё неподтверждённых sources; предложения должны их учитывать. */
+  readonly pending: readonly PortableAddress[];
 }
 
 /**
@@ -130,7 +161,7 @@ export interface ReplicationGuard {
   readonly replicaId: string;
   /* Последний номер локального changeset. */
   readonly sequence: number;
-  /* Версия transport-state, включая решения и квитанции. */
+  /* Версия состояния обмена и импорта, включая решения, квитанции и current proof. */
   readonly revision: number;
   /* Поколение предметного состояния. */
   readonly generation: number;

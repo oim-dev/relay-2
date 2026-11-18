@@ -6,8 +6,8 @@ import type { IndependentWork, OfflineCreation } from "./team-scenario.types";
 import { storedEntity } from "./team-state";
 
 /**
- * Создаёт две связанные записи до сети. Обе читаемые адреса совпадают у всех участников.
- * Нужны именно две записи: перенумеровываются и источник связи, и её цель по ID.
+ * Создаёт две связанные записи до сети. Оба читаемых адреса совпадают у всех участников.
+ * Сценарий явно выбирает новые ключи источника и цели связи, сохраняя их постоянные ID.
  * Дожидается commit задачи до создания ссылающегося документа и чтения outbox.
  */
 export async function createOffline(replica: TeamReplica): Promise<OfflineCreation> {
@@ -153,14 +153,19 @@ export function expectCreationsPreserved(
     expect(snapshot.addresses.find((entry) => entry.ref === document.id)?.entityId).toBe(
       document.id,
     );
+    expect(snapshot.addresses.find((entry) => entry.ref === task.id)?.entityId).toBe(task.id);
     keys.push(document.key);
     taskKeys.push(task.key);
   }
   expect(new Set(keys).size).toBe(creations.length);
   expect(new Set(taskKeys).size).toBe(creations.length);
   expect(storedEntity(snapshot, winner.document.id).record.key).toBe(winner.document.key);
+  expect(storedEntity(snapshot, winner.task.id).record.key).toBe(winner.task.key);
   expect(snapshot.addresses.find((entry) => entry.ref === "DOC-2")?.entityId).toBe(
     winner.document.id,
+  );
+  expect(snapshot.addresses.find((entry) => entry.ref === "PRODUCT-2")?.entityId).toBe(
+    winner.task.id,
   );
 }
 

@@ -1,47 +1,39 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import type { EntityRecord } from "@relay/contracts";
 import {
   ProjectDatabaseFixture,
   createComment,
-  createDocument,
+  createTask,
   expectRelayError,
   requireRecord,
 } from "./helpers/project-database-fixture";
-import type { CommentConstraintCase } from "./helpers/database-cases.types";
 
-const sqlConstraints: readonly CommentConstraintCase[] = [
+const sqlConstraints = [
   {
     name: "изменение опубликованного комментария",
     sql: "UPDATE task_comments SET body = 'Подмена' WHERE id = ?",
     target: "comment",
-    expectedMessage: "append-only",
+    expectedCode: "SQLITE_CONSTRAINT_TRIGGER",
   },
   {
     name: "удаление опубликованного комментария",
     sql: "DELETE FROM task_comments WHERE id = ?",
     target: "comment",
-    expectedMessage: "append-only",
+    expectedCode: "SQLITE_CONSTRAINT_TRIGGER",
   },
   {
     name: "комментарий к сущности другого вида",
     sql: "INSERT INTO task_comments(id, task_id, title, body, created_at, created_by) VALUES ('new-comment', ?, '', '', '', '')",
     target: "product",
-    expectedMessage: "task",
+    expectedCode: "SQLITE_CONSTRAINT_FOREIGNKEY",
   },
   {
     name: "комментарий к отсутствующей задаче",
     sql: "INSERT INTO task_comments(id, task_id, title, body, created_at, created_by) VALUES ('new-comment', ?, '', '', '', '')",
     target: "missing",
-    expectedMessage: "FOREIGN KEY",
+    expectedCode: "SQLITE_CONSTRAINT_FOREIGNKEY",
   },
-  {
-    name: "журнал внутри содержания задачи",
-    sql: "UPDATE entities SET revision = revision + 1, data = json_set(data, '$.comments', json('[]')) WHERE id = ?",
-    target: "task",
-    expectedMessage: "CHECK",
-  },
-];
+] as const;
 const duplicateTargets = [
   { name: "той же задачи", target: "first" },
   { name: "другой задачи", target: "second" },
@@ -63,11 +55,7 @@ afterEach(() => {
 describe("Независимый append-only журнал задачи", () => {
   test("комментарии переживают CAS старого содержания, переименование и повторное открытие", () => {
     const db = fixture.create();
-    const task: EntityRecord = {
-      ...createDocument("TASK-1"),
-      kind: "task",
-      data: { title: "Обсуждение" },
-    };
+    const task = createTask(db, "TASK-1", { title: "Обсуждение" });
     db.insert(task);
     const stale = requireRecord(db, task.id);
     expect(stale.data.comments).toEqual([]);
@@ -97,32 +85,27 @@ describe("Независимый append-only журнал задачи", () => {
         ),
       ).toBe(true);
       expect(queries).toHaveBeenCalled();
-      const entitySelects = queries.mock.calls
-        .map(([sql]) => sql)
-        .filter((sql) => /\bSELECT\b.*\bFROM entities\b/i.test(sql));
-      expect(entitySelects).toHaveLength(1);
-      expect(entitySelects[0]).toMatch(/SELECT id, revision FROM entities/i);
       expect(queries.mock.calls.some(([sql]) => /\bFROM task_comments\b/i.test(sql))).toBe(false);
     } finally {
       queries.mockRestore();
       decoder.mockRestore();
     }
     const updated = requireRecord(db, task.id);
-    expect(updated.data).toEqual({ title: "Уточнение", comments: [first, second] });
+    expect(updated.data).toEqual({ ...task.data, title: "Уточнение", comments: [first, second] });
     expect(db.list("task")).toEqual([updated]);
     expect(db.list().find((entity) => entity.id === task.id)).toEqual(updated);
     expect(db.getGeneration()).toBe(generation + 3);
     expectRelayError(() => peer.update({ ...stale, revision: 2 }, 1), "REVISION_CONFLICT");
     fixture.withRaw((raw) => {
-      expect(raw.query("SELECT data FROM entities WHERE id = ?").get(task.id)).toEqual({
-        data: JSON.stringify({ title: "Уточнение" }),
+      expect(raw.query("SELECT title FROM tasks WHERE id = ?").get(task.id)).toEqual({
+        title: "Уточнение",
       });
       expect(
         raw.query("SELECT count(*) AS count FROM task_comments WHERE task_id = ?").get(task.id),
       ).toEqual({ count: 2 });
     });
     const renamed = db.rename(task.id, "TASK-RENAMED", 2, "editor");
-    expect(renamed.data).toEqual({ title: "Уточнение", comments: [first, second] });
+    expect(renamed.data).toEqual({ ...task.data, title: "Уточнение", comments: [first, second] });
     expect(db.get(task.id)).toEqual(renamed);
     const generationAfterRename = db.getGeneration();
     expect(db.rename(task.id, renamed.key, 3, "other-editor")).toEqual(renamed);
@@ -138,7 +121,7 @@ describe("Независимый append-only журнал задачи", () => {
 
   test("откат внешней транзакции возвращает журнал и поколение", () => {
     const db = fixture.create();
-    const task: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
+    const task = createTask(db);
     db.insert(task);
     const initial = requireRecord(db, task.id);
     const generation = db.getGeneration();
@@ -157,7 +140,7 @@ describe("Независимый append-only журнал задачи", () => {
 
   test("перехваченный вложенный отказ откатывает только свой комментарий и освобождает его ID", () => {
     const db = fixture.create();
-    const task: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
+    const task = createTask(db);
     db.insert(task);
     const generation = db.getGeneration();
     const first = createComment();
@@ -182,8 +165,8 @@ describe("Независимый append-only журнал задачи", () => {
     "повтор ID комментария $name отклоняется без изменения журнала",
     ({ target }) => {
       const db = fixture.create();
-      const first: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
-      const second: EntityRecord = { ...createDocument("TASK-2"), kind: "task" };
+      const first = createTask(db, "TASK-1");
+      const second = createTask(db, "TASK-2");
       db.insert(first);
       db.insert(second);
       const entry = createComment();
@@ -212,7 +195,7 @@ describe("Независимый append-only журнал задачи", () => {
 
   test("замена проекции журнала через update без следующей ревизии отклоняется", () => {
     const db = fixture.create();
-    const task: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
+    const task = createTask(db);
     db.insert(task);
     const appended = db.appendTaskComment(task.id, createComment());
     const generation = db.getGeneration();
@@ -228,9 +211,9 @@ describe("Независимый append-only журнал задачи", () => {
 
   test.each(sqlConstraints)(
     "SQL запрещает $name без изменения журнала и поколения",
-    ({ sql, target, expectedMessage }) => {
+    ({ sql, target, expectedCode }) => {
       const db = fixture.create();
-      const task: EntityRecord = { ...createDocument("TASK-1"), kind: "task" };
+      const task = createTask(db);
       db.insert(task);
       const entry = createComment();
       const appended = db.appendTaskComment(task.id, entry);
@@ -245,11 +228,32 @@ describe("Независимый append-only журнал задачи", () => {
         raw.exec("PRAGMA foreign_keys = ON");
 
         // Прямой SQL намеренно обходит проверки API для проверки последнего рубежа целостности.
-        expect(() => raw.query(sql).run(targets[target])).toThrow(expectedMessage);
+        expect(() => raw.query(sql).run(targets[target])).toThrow(
+          expect.objectContaining({ code: expectedCode }),
+        );
+        expect(raw.query("SELECT id, task_id FROM task_comments ORDER BY id").all()).toEqual([
+          { id: entry.id, task_id: task.id },
+        ]);
       });
 
       expect(db.get(task.id)).toEqual(appended);
       expect(db.getGeneration()).toBe(generation);
     },
   );
+
+  test("вставка задачи с непустой проекцией журнала отклоняется без частичной записи", () => {
+    const db = fixture.create();
+    const comment = createComment();
+    const task = createTask(db, "TASK-1", { comments: [comment] });
+    const generation = db.getGeneration();
+
+    expectRelayError(() => db.insert(task), "VALIDATION_ERROR");
+
+    expect(db.get(task.id)).toBeUndefined();
+    expect(db.get(task.key)).toBeUndefined();
+    expect(db.getGeneration()).toBe(generation);
+    fixture.withRaw((raw) => {
+      expect(raw.query("SELECT id FROM task_comments WHERE id = ?").get(comment.id)).toBeNull();
+    });
+  });
 });

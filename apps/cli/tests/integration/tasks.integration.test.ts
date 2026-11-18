@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import type { EntityRecord } from "@relay/contracts";
 import { TasksService } from "@relay/core";
 import type { ProjectDatabase } from "@relay/storage";
 import { withCliFixture } from "./helpers/cli-fixture";
 import { arrayValue, entityValue, objectValue, stringValue } from "./helpers/responses";
-import type { CorruptedTaskFixture, TaskWithCriterion } from "./helpers/task-fixture.types";
+import type { TaskWithCriterion } from "./helpers/task-fixture.types";
 
 /**
  * Создаёт задачу с одним критерием через Core; соединение принадлежит вызывающей fixture.
@@ -22,16 +23,20 @@ async function createTaskWithCriterion(db: ProjectDatabase): Promise<TaskWithCri
 }
 
 /**
- * Намеренно записывает null вместо dependencies через Storage для проверки отказа декодера.
- * Возвращает состояние после повреждения; соединение не закрывает и не скрывает записи.
+ * Записывает через Storage многострочный заголовок, допустимый для TEXT, но запрещённый Core.
+ * Возвращает повреждённую карточку; соединение принадлежит вызывающей fixture.
  */
-async function createCorruptedDependencies(db: ProjectDatabase): Promise<CorruptedTaskFixture> {
+async function createCorruptedTask(db: ProjectDatabase): Promise<EntityRecord> {
   const task = await new TasksService(db).create({ title: "Повреждение" }, "fixture");
   db.update(
-    { ...task, revision: task.revision + 1, data: { ...task.data, dependencies: null } },
+    {
+      ...task,
+      revision: task.revision + 1,
+      data: { ...task.data, title: "Повреждённый\nзаголовок" },
+    },
     task.revision,
   );
-  return { damaged: entityValue(db.get(task.id)), generation: db.getGeneration() };
+  return entityValue(db.get(task.id));
 }
 
 describe("Задачи через CLI", () => {
@@ -229,25 +234,28 @@ describe("Задачи через CLI", () => {
     });
   });
 
-  test("чтение повреждённых зависимостей возвращает CORRUPT_DATA без изменения записи", async () => {
+  test("чтение зависимостей задачи с многострочным заголовком возвращает CORRUPT_DATA без записи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { damaged, generation } = await cli.withDatabase(project, createCorruptedDependencies);
+      const damaged = await cli.withDatabase(project, createCorruptedTask);
+      const generation = cli.withDatabase(project, (db) => db.getGeneration());
 
       const error = await cli.error(["task", "dependency", "list", damaged.key], 1);
 
       expect(error.code).toBe("CORRUPT_DATA");
+      expect(error.details).toMatchObject({ id: damaged.id });
       cli.withDatabase(project, (db) => {
         expect(db.get(damaged.id)).toEqual(damaged);
         expect(db.getGeneration()).toBe(generation);
       });
-    });
+    }, "database-redesign");
   });
 
-  test("обновление задачи с повреждёнными зависимостями возвращает CORRUPT_DATA без записи", async () => {
+  test("обновление задачи с многострочным заголовком возвращает CORRUPT_DATA без записи", async () => {
     await withCliFixture(async (cli) => {
       const project = cli.createProject();
-      const { damaged, generation } = await cli.withDatabase(project, createCorruptedDependencies);
+      const damaged = await cli.withDatabase(project, createCorruptedTask);
+      const generation = cli.withDatabase(project, (db) => db.getGeneration());
 
       const error = await cli.error(
         [
@@ -263,11 +271,12 @@ describe("Задачи через CLI", () => {
       );
 
       expect(error.code).toBe("CORRUPT_DATA");
+      expect(error.details).toMatchObject({ id: damaged.id });
       cli.withDatabase(project, (db) => {
         expect(db.get(damaged.id)).toEqual(damaged);
         expect(db.getGeneration()).toBe(generation);
       });
-    });
+    }, "database-redesign");
   });
 
   test("добавленный комментарий читается целиком без изменения ревизии задачи", async () => {

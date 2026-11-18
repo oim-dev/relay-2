@@ -2,7 +2,16 @@ import { Database } from "bun:sqlite";
 import { expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { RelayError, type EntityKind, type EntityRecord, type TaskComment } from "@relay/contracts";
+import {
+  RelayError,
+  type DocumentData,
+  type EntityKind,
+  type EntityRecord,
+  type KnowledgeRecord,
+  type TaskComment,
+  type TaskData,
+  type TaskRecord,
+} from "@relay/contracts";
 import { ProjectDatabase } from "../../../src/database/project-database";
 
 export const projectMetadata = {
@@ -27,7 +36,7 @@ export class ProjectDatabaseFixture {
    * Резервирует изолированный каталог в выбранной области артефактов текущей даты.
    * Вызывающий обязан вызвать close даже после отказа теста.
    */
-  constructor(name = "database", artifactsArea = "style-refactor") {
+  constructor(name = "database", artifactsArea = "database-redesign") {
     const artifacts = resolve(
       import.meta.dir,
       "../../../../..",
@@ -94,10 +103,13 @@ export class ProjectDatabaseFixture {
 }
 
 /**
- * Создаёт минимальную техническую запись документа для проверок Storage, без сохранения в БД.
- * Предметная форма документа Core здесь не проверяется; новый объект и UUID изолированы на вызов.
+ * Формирует документ с полной предметной формой, не сохраняя его в БД.
+ * Переопределения задают значимые поля сценария; новый объект и UUID изолированы на вызов.
  */
-export function createDocument(key = "DOC-1"): EntityRecord {
+export function createDocument(
+  key = "DOC-1",
+  data: Readonly<Partial<DocumentData>> = {},
+): KnowledgeRecord<"document"> {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -108,7 +120,49 @@ export function createDocument(key = "DOC-1"): EntityRecord {
     updatedAt: now,
     createdBy: "tester",
     updatedBy: "tester",
-    data: { title: "Документ", content: "Текст" },
+    data: {
+      name: "Документ",
+      summary: "",
+      body: "Текст",
+      documentKind: "description",
+      documentStatus: "draft",
+      sectionId: null,
+      pinned: false,
+      relations: [],
+      ...data,
+    },
+  };
+}
+
+/**
+ * Формирует задачу существующей продуктовой доски без записи в БД.
+ * Журнал по умолчанию пуст; его публикация остаётся отдельным действием теста.
+ */
+export function createTask(
+  db: ProjectDatabase,
+  key = "TASK-1",
+  data: Readonly<Partial<TaskData>> = {},
+): TaskRecord {
+  const board = db.getIdentity("BOARD-PRODUCT", "board");
+  if (!board) {
+    throw new Error("В тестовой базе отсутствует продуктовая доска");
+  }
+  return {
+    ...createDocument(key),
+    kind: "task",
+    data: {
+      boardId: board.id,
+      title: "Задача",
+      description: "",
+      column: "inbox",
+      parentId: null,
+      dependencies: [],
+      related: [],
+      targets: [],
+      acceptanceCriteria: [],
+      comments: [],
+      ...data,
+    },
   };
 }
 

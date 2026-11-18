@@ -193,7 +193,7 @@ describe("Инварианты согласования переносимого
     );
   });
 
-  test("перенумерация цели сохраняет checkpoint revision=1, sessionRevision и historical key snapshots", async () => {
+  test("явная смена ключа цели сохраняет checkpoint revision=1, sessionRevision и historical key snapshots", async () => {
     await withReplicationFixture(
       () => {},
       async ({ first, second, remote }) => {
@@ -231,6 +231,25 @@ describe("Инварианты согласования переносимого
         const published = new ReplicationService(second).prepare(remote).snapshot;
         const service = new ReplicationService(first);
 
+        service.prepare(published);
+        const conflicts = service.keyConflicts();
+        expect(conflicts).toHaveLength(1);
+        const conflict = conflicts[0];
+        if (conflict === undefined) {
+          throw new Error("Нет ожидаемой коллизии документа");
+        }
+        expect(conflict.collisions).toMatchObject([{ entityId: document.id, key: document.key }]);
+        service.resolveKeys(
+          conflict.id,
+          {
+            fingerprint: conflict.fingerprint,
+            assignments: conflict.collisions.map((entry) => ({
+              entityId: entry.entityId,
+              key: entry.suggestedKey,
+            })),
+          },
+          "resolver",
+        );
         const candidate = service.prepare(published);
         service.accept(candidate.snapshot);
 

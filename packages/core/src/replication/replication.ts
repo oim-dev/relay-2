@@ -9,6 +9,8 @@ import {
   type ReplicationStatus,
   type ReplicationHistoryInput,
   type ReplicationBootstrapOptions,
+  type ReplicationKeyConflict,
+  type ReplicationKeyDecision,
 } from "@relay/contracts";
 import {
   replicationFingerprint,
@@ -54,10 +56,15 @@ import {
   type ValidatedReplicationHistory,
   rememberReplicationHistory,
 } from "./replication-history-proof";
+import { assertReplicationKeyDecision } from "./key-resolution";
+import { indexKeyAddresses } from "./key-collisions";
+import { keyConflictDiagnostics, prepareKeyResolution } from "./replication-key-resolution";
 
 /**
  * Предметное согласование одной независимой реплики; транспорт, процессы и пути принадлежат приложению.
  * Каждая запись состояния/импорт/ack атомарны; сеть никогда не удерживает транзакцию SQLite.
+ * Prepare/accept/resolve/bootstrap запрещены поверх незавершённых SQL-мутаций с кодом
+ * REPLICATION_UNFLUSHED_CHANGES. Capture разрешён; скрытого flush внешней транзакции нет.
  */
 export class ReplicationService {
   /* Синхронный порт локального unit-of-work; соединением владеет приложение. */
@@ -73,6 +80,8 @@ export class ReplicationService {
   /**
    * Возвращает точное сохраняемое состояние; не подменяет его пользовательскими effective-проекциями.
    * Полное чтение выполняется только при явном capture, не при каждой предметной записи.
+   * publication доказывает текущие строки либо равна null после их изменения; последний
+   * accepted checkpoint остаётся в локальном ledger и не подставляется вместо current proof.
    */
   capture(): PortableProjectSnapshot {
     return canonicalSnapshot(this.db.captureReplication());
@@ -135,6 +144,8 @@ export class ReplicationService {
    * Подтверждает только реально опубликованный снимок и согласует его с актуальной очередью.
    * Приложение обязано доказать acceptance общей веткой до вызова. Поздние local writes сохраняются.
    * Повтор не повышает revisions/generation и не создаёт echo; конфликт оставляет свои три стороны.
+   * Remote proof привязывается к текущим строкам только после полного импорта без pending;
+   * иначе current proof снимается, а принятый remote независимо сохраняется как checkpoint.
    */
   accept(
     remote: PortableProjectSnapshot,
@@ -163,6 +174,7 @@ export class ReplicationService {
       .map((change) => change.id);
     const candidate = retainConflictedLocal(prepared, context.local);
     const reconciled = candidate === remote || this.canReconcile(candidate);
+    const fullyAccepted = reconciled && context.outbox.length === acknowledged.length;
     const importPlan = reconciled ? planReplicationImport(context.local, candidate) : undefined;
     const current = reconciled ? candidate : context.local;
     const conflicts = prepared.conflicts.map((conflict) => {
@@ -181,17 +193,19 @@ export class ReplicationService {
       if (reconciled) {
         this.db.importReplication(candidate, importPlan);
       }
-      this.db.updateReplicationState({ base: remote, observed: remote, acknowledged, conflicts });
+      this.db.updateReplicationState({
+        base: remote,
+        observed: remote,
+        acknowledged,
+        conflicts,
+        currentPublication: fullyAccepted ? (remote.publication ?? null) : null,
+      });
       return {
         value: { acknowledged, generation: this.db.getGeneration(), conflicts, reconciled },
         guard: this.db.getReplicationGuard(),
       };
     });
-    if (
-      reconciled &&
-      context.outbox.length === acknowledged.length &&
-      isDecodedReplicationSnapshot(remote)
-    ) {
+    if (fullyAccepted && isDecodedReplicationSnapshot(remote)) {
       rememberLocalSnapshot(this.db, remote, committed.guard);
     }
     return committed.value;
@@ -202,6 +216,97 @@ export class ReplicationService {
    */
   conflicts(): readonly ReplicationConflict[] {
     return this.db.getReplicationConflicts();
+  }
+
+  /**
+   * Возвращает сохранённые ключевые конфликты и предложения с учётом адресов и pending-выборов.
+   * Один snapshot читает материалы конфликтов и назначения, без capture/outbox/всех текстов.
+   * Fingerprint обновляет prepare; resolve отклоняет его после изменения просмотренного контекста.
+   */
+  keyConflicts(): readonly ReplicationKeyConflict[] {
+    return this.db.snapshot(() => {
+      const conflicts = this.db.getReplicationConflicts();
+      if (conflicts.length === 0) {
+        return [];
+      }
+      const addresses = this.db.getReplicationKeyAddresses();
+      const pending = conflicts
+        .filter((entry) => entry.code === "REPLICATION_RESOLUTION_STALE")
+        .map((entry) => entry.id);
+      return keyConflictDiagnostics(
+        conflicts,
+        indexKeyAddresses(
+          { addresses: addresses.local },
+          { addresses: addresses.observed },
+          addresses.pending.map((entry) => ({ entityId: entry.entityId, key: entry.ref })),
+        ),
+        pending.length === 0 ? [] : this.db.getReplicationDecisions(pending),
+      );
+    });
+  }
+
+  /**
+   * Сохраняет явный выбор ключей целого changeset и возвращает ограниченный preview.
+   * Свободность и fingerprint проверяются на полном overlay перед guarded commit.
+   * fromKey адресует исходное назначение любой boundary; при единственной коллизии ID он необязателен.
+   * Последующий source rename сохраняется, а заменённое промежуточное назначение становится alias.
+   * Точный повтор до/после acceptance не пишет новое решение; stale и занятый адрес не применяются.
+   * ID, авторство записей, тексты и первоначальные source/receipts сохраняются.
+   */
+  resolveKeys(
+    changesetId: string,
+    decision: ReplicationKeyDecision,
+    actor: string,
+    options: Pick<ReplicationPrepareOptions, "budget"> = {},
+  ): BoundedPreparedReplication {
+    validateActor(actor);
+    if (!isPortableIdentityText(actor)) {
+      throw new RelayError("INVALID_ARGUMENT", replicationMessages.format, 2);
+    }
+    assertReplicationKeyDecision(decision);
+    const request = publicationOutboxRequest(options);
+    const { context, previous } = this.db.snapshot(() => ({
+      context: this.loadContext(),
+      previous: this.db.getReplicationDecision(changesetId),
+    }));
+    const remote = context.state.observed ?? this.emptySnapshot();
+    const calculated = prepareKeyResolution(
+      context,
+      remote,
+      changesetId,
+      decision,
+      actor,
+      previous,
+    );
+    const window = this.db.getReplicationOutboxWindow(request);
+    const completeWindow =
+      window.changesets.length === context.outbox.length &&
+      window.changesets.every(
+        (entry, index) =>
+          entry.id === context.outbox[index]?.id && entry.digest === context.outbox[index]?.digest,
+      );
+    const preview = completeWindow
+      ? calculated.validated
+      : prepareReplication(
+          context.local,
+          remote,
+          window.changesets,
+          calculated.decisions,
+          context.generation,
+          context.outbox,
+        );
+    const prepared = boundedReplicationResult(preview, window, request);
+    return this.db.transaction(() => {
+      this.assertContext(context);
+      if (calculated.decision !== null) {
+        this.db.updateReplicationState({
+          conflicts: prepared.conflicts,
+          examined: prepared.selection.examined,
+          decision: calculated.decision,
+        });
+      }
+      return prepared;
+    });
   }
 
   /**
@@ -327,6 +432,7 @@ export class ReplicationService {
   /**
    * Восстанавливает новую createReplica-базу из валидного portable snapshot с исходными ID/receipts.
    * Новая реплика имеет собственный replicaId и пустой outbox; существующие рабочие данные защищены.
+   * Проверенный proof полного снимка назначается current publication в той же транзакции.
    */
   bootstrap(snapshot: PortableProjectSnapshot, options: ReplicationBootstrapOptions = {}): void {
     this.checkRemote(snapshot);
@@ -337,7 +443,12 @@ export class ReplicationService {
     }
     const canonical = decodeReplicationSnapshot(snapshot);
     const guard = this.db.transaction(() => {
+      this.assertNoUnflushedChanges();
       this.db.bootstrapReplication(canonical);
+      this.db.updateReplicationState({
+        currentPublication: canonical.publication ?? null,
+        conflicts: [],
+      });
       return this.db.getReplicationGuard();
     });
     rememberLocalSnapshot(this.db, canonical, guard);
@@ -497,9 +608,11 @@ export class ReplicationService {
   /**
    * Загружает контекст одним snapshot. prepare читает окно, accept/resolve — весь overlay.
    * Полный outbox при выбранном решении нужен для localSources witness, а не для выбора candidate.
+   * Несброшенные SQL-изменения отклоняются до чтения ledger/cache и любых эффектов обмена.
    */
   private loadContext(options: ReplicationContextLoadOptions = {}): ReplicationContext {
     return this.db.snapshot(() => {
+      this.assertNoUnflushedChanges();
       const state = this.db.getReplicationState();
       const window =
         options.window === undefined ? null : this.db.getReplicationOutboxWindow(options.window);
@@ -533,10 +646,27 @@ export class ReplicationService {
   }
 
   /**
+   * Запрещает обмен поверх незавершённой пользовательской мутации, ещё отсутствующей в outbox.
+   * Даже receipt-only может не изменить guard до outer flush; автоматический flush недопустим.
+   * Чистая внешняя транзакция и no-op разрешены. Вызывающий удерживает snapshot либо writer lock.
+   */
+  private assertNoUnflushedChanges(): void {
+    if (this.db.hasUnflushedReplicationChanges()) {
+      throw new RelayError(
+        "REPLICATION_UNFLUSHED_CHANGES",
+        replicationMessages.unflushedChanges,
+        4,
+      );
+    }
+  }
+
+  /**
    * Проверяет загруженный контекст под BEGIN IMMEDIATE до любого эффекта commit/ack.
    * Sequence защищает также receipt-only запись, не меняющую поколение сущностей.
+   * Повторная проверка capture-очередей защищает ещё не сброшенные изменения между load и commit.
    */
   private assertContext(context: ReplicationContext): void {
+    this.assertNoUnflushedChanges();
     const token = this.contextToken(this.db.getReplicationGuard());
     if (token !== context.token) {
       throw new RelayError("REPLICATION_LOCAL_CHANGED", replicationMessages.localChanged, 4);

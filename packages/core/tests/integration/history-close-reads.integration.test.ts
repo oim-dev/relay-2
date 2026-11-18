@@ -10,6 +10,10 @@ import {
   snapshotHistoryStorage,
   withHistoryFixture,
 } from "./history-fixture";
+import {
+  corruptHistoryChildLink,
+  insertForeignIntentMaterial,
+} from "./helpers/history-read-corruption";
 
 const closureCases = [
   { name: "complete трёх намерений", action: "complete", intentCount: 3 },
@@ -126,6 +130,8 @@ describe("Пакетные основания закрытия сессии", ()
         const session = await history.start({ title: "Владелец закрываемых намерений" }, "автор");
         const intents = await createClosedHistoryIntents(history, session, 3);
         const foreign = await history.start({ title: "Чужая сессия" }, "автор");
+        const foreignIntent =
+          entityKind === "work-session" ? await openHistoryIntent(history, foreign) : null;
         const intent = intents[1];
         if (intent === undefined) {
           throw new Error("Не подготовлено второе намерение");
@@ -146,24 +152,15 @@ describe("Пакетные основания закрытия сессии", ()
         void pending.catch((error: unknown) => ready.reject(error));
         try {
           await ready.promise;
-          const id = crypto.randomUUID();
           // Техническая вставка намеренно повреждает одну из связей и не меняет CAS выбранного владельца.
           if (entityKind === "work-checkpoint") {
-            second.insert({
-              ...intent,
-              id,
-              key: `CP-${id}`,
-              data: {
-                ...intent.data,
-                kind: "progress",
-                sessionId: foreign.id,
-                runId: currentHistoryRun(foreign).id,
-                intentId: intent.id,
-                sequence: 1,
-              },
-            });
+            insertForeignIntentMaterial(second, intent, foreign, "progress", 1);
           } else {
-            second.insert({
+            if (foreignIntent === null) {
+              throw new Error("Не подготовлено собственное намерение чужого родителя");
+            }
+            const id = crypto.randomUUID();
+            const child: HistorySession = {
               ...foreign,
               id,
               key: `S-${id}`,
@@ -173,10 +170,12 @@ describe("Пакетные основания закрытия сессии", ()
                 currentRunId: null,
                 runs: [],
                 parentSessionId: foreign.id,
-                originCheckpointId: intent.id,
+                originCheckpointId: foreignIntent.id,
                 createdByRunId: currentHistoryRun(foreign).id,
               },
-            });
+            };
+            second.insert(child);
+            corruptHistoryChildLink(second, child, "originCheckpointId", intent.id);
           }
           const before = snapshotHistoryStorage(db);
           const outbox = db.getReplicationOutbox();

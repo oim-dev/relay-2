@@ -10,6 +10,7 @@ import {
   expectRelayError,
   withEntityDatabase,
 } from "./helpers/entity-fixture";
+import { corruptDocumentSection } from "./queries-get-corruption-fixture";
 
 const actor = "tester";
 const views = [
@@ -164,7 +165,7 @@ describe("Групповое предметное чтение", () => {
     });
   });
 
-  test("неоднозначный виртуальный адрес остаётся ошибкой только своего элемента", async () => {
+  test("пересечение slug и prefix остаётся ошибкой только неоднозначного виртуального адреса", async () => {
     await withEntityDatabase(async (db) => {
       const knowledge = new KnowledgeService(db);
       const first = await knowledge.create("application", { name: "Первое", slug: "first" }, actor);
@@ -173,23 +174,29 @@ describe("Групповое предметное чтение", () => {
         { name: "Второе", slug: "second" },
         actor,
       );
-      // Низкоуровневая запись нарушает уникальность виртуальных адресов, которую защищает Core.
+      // SQL допускает пересечение разных колонок; Core запрещает такой slug при записи.
+      // Повтор того же slug в двух приложениях уже исключён UNIQUE.
       db.update(
-        { ...second, revision: second.revision + 1, data: { ...second.data, slug: "first" } },
+        {
+          ...second,
+          revision: second.revision + 1,
+          data: { ...second.data, slug: first.data.prefix },
+        },
         second.revision,
       );
+      const ambiguousRef = `application:${first.data.prefix}`;
 
-      const result = new QueryService(db).getMany(["application:first", first.id]);
+      const result = new QueryService(db).getMany([ambiguousRef, first.id]);
 
       expect(result.items).toEqual([
         {
-          ref: "application:first",
+          ref: ambiguousRef,
           ok: false,
           error: {
             code: "CORRUPT_DATA",
             exitCode: 1,
             message: expect.any(String),
-            details: { ref: "first", kind: "application" },
+            details: { ref: first.data.prefix, kind: "application" },
           },
         },
         { ref: first.id, ok: true, entity: first },
@@ -216,12 +223,7 @@ describe("Групповое предметное чтение", () => {
         actor,
       );
       await knowledge.changeSection("remove", { id: "guides" }, write(project));
-      const corrupted = {
-        ...damaged,
-        revision: damaged.revision + 1,
-        data: { ...damaged.data, sectionId: "never-existed" },
-      };
-      db.update(corrupted, damaged.revision);
+      const corrupted = corruptDocumentSection(db, damaged, "never-existed");
       const generation = db.getGeneration();
       const queries = new QueryService(db);
 
@@ -344,7 +346,7 @@ describe("Групповое предметное чтение", () => {
         actor,
       );
       db.update(
-        { ...feature, revision: feature.revision + 1, data: { ...feature.data, name: null } },
+        { ...feature, revision: feature.revision + 1, data: { ...feature.data, name: " \t " } },
         feature.revision,
       );
 

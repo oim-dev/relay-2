@@ -1,23 +1,21 @@
+import { RELATIONAL_TABLES } from "../relational/catalog";
+
 /**
- * Все первичные источники наблюдений v4. entity_refs является проекцией entity_components,
- * поэтому её INSERT/DELETE учитываются триггерами первичной таблицы, включая импорт.
+ * Все физические источники наблюдений команды, включая local CAS и порядок комментариев.
+ * Readonly views не имеют write-триггеров: их изменения учитываются первичными таблицами.
  * Временные очереди и allocation context не относятся к наблюдаемому состоянию команды.
  */
 const COMMAND_READ_TABLES = [
-  "entities",
-  "entity_components",
-  "key_counters",
-  "task_comments",
-  "batch_receipts",
-  "project_state",
-  "replication_remapped_refs",
-  "replication_entity_versions",
-  "replication_comment_order",
-  "replication_comment_text",
+  ...new Set([
+    ...RELATIONAL_TABLES.map((table) => table.name),
+    "key_counters",
+    "project_state",
+    "replication_remapped_refs",
+  ]),
 ];
 
 /**
- * Подключается после основных, replication и component таблиц при создании/миграции v4.
+ * Подключается после всех физических предметных и технических таблиц текущей схемы.
  * Версия меняется внутри исходной транзакции, поэтому rollback возвращает также anchor.
  * Идентичность реплики копируется из replication_state и сохраняется при повторном открытии.
  */

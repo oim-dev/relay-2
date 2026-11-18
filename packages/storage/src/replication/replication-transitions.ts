@@ -11,7 +11,6 @@ import {
   type ReplicationReadGuard,
   type ReplicationTransition,
 } from "@relay/contracts";
-import { flushComponentVersions } from "../components/component-store";
 import { portableEntity, replicationFingerprint } from "./portable-version";
 import type {
   ReplicationJsonRow,
@@ -299,7 +298,6 @@ export function captureCommandTransition(
   step: CommandTransition,
   actor: string,
 ): void {
-  flushComponentVersions(connection);
   const metadata = transitionMetadata(connection, step);
   const entities = entityBoundary(step, metadata);
   const components = componentBoundary(connection);
@@ -312,7 +310,7 @@ export function captureCommandTransition(
   const after = new Map(
     connection
       .query<{ id: string; after_id: string | null }, [string]>(
-        "SELECT id,after_id FROM replication_comment_order WHERE id IN (SELECT value FROM json_each(?))",
+        "SELECT id,after_id FROM task_comments WHERE id IN (SELECT value FROM json_each(?))",
       )
       .all(JSON.stringify(commentEffects.map((effect) => effect.comment.id)))
       .map((entry) => [entry.id, entry.after_id]),

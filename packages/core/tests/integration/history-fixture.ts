@@ -203,8 +203,8 @@ export function snapshotHistoryStorage(db: ProjectDatabase): HistoryStorageSnaps
 }
 
 /**
- * Намеренно заменяет обязательный массив участия на null через Storage.
- * Возвращает повреждённую строку; валидное состояние таким способом не подготавливается.
+ * Пытается заменить обязательный массив участия на null через Storage.
+ * Реляционная схема должна отвергнуть запись; отказ и сохранность проверяет вызывающий тест.
  */
 export function corruptHistoryRuns(db: ProjectDatabase, session: HistorySession): EntityRecord {
   const corrupted = {
@@ -217,8 +217,8 @@ export function corruptHistoryRuns(db: ProjectDatabase, session: HistorySession)
 }
 
 /**
- * Вставляет отдельный намеренно повреждённый материал с references: null через Storage.
- * Исходное валидное намерение сохраняется, чтобы отказ продолжения проверял всю историю.
+ * Пытается вставить следующее продолжение намерения с references: null через Storage.
+ * Реляционная схема должна отвергнуть запись, сохранив исходное валидное намерение.
  */
 export function insertCorruptedHistoryCheckpoint(
   db: ProjectDatabase,
@@ -229,7 +229,14 @@ export function insertCorruptedHistoryCheckpoint(
     ...intent,
     id,
     key: `CP-${id}`,
-    data: { ...intent.data, references: null },
+    data: {
+      ...intent.data,
+      kind: "progress",
+      intentId: intent.id,
+      sequence: intent.data.sequence + 1,
+      sessionRevision: intent.data.sessionRevision + 1,
+      references: null,
+    },
   };
   db.insert(corrupted);
   return corrupted;
@@ -247,8 +254,7 @@ export async function withHistorySessionUpdateFailure(
   const connection = new Database(path, { create: false, readwrite: true });
   try {
     connection.exec(`
-      CREATE TRIGGER history_fail_session BEFORE UPDATE ON entities
-      WHEN OLD.kind = 'work-session'
+      CREATE TRIGGER history_fail_session BEFORE UPDATE ON work_sessions
       BEGIN SELECT RAISE(ABORT, 'Проверка отката составной записи'); END;
     `);
     try {

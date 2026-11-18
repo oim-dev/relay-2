@@ -187,7 +187,11 @@ relay git-sync now --request-id request-id --wait-ms 60000 --format json
 
 Для конфликтов доступны `conflicts list`, `conflicts get <id>` и
 `conflicts resolve <id> --input @resolution.json --actor human`. Решение также можно
-передать непосредственно как JSON либо через `--input -`. В новом каталоге
+передать непосредственно как JSON либо через `--input -`. Коллизии семантических
+ключей разных объектов показываются через `keys list`; явные назначения принимает
+`keys resolve <id> --input @key-resolution.json --actor human`.
+Формат решения описан в [руководстве по ключам](../../docs/CLI.md#разрешить-коллизию-семантических-ключей).
+В новом каталоге
 `relay git-sync restore --remote <URL-или-путь>` создаёт независимую реплику без `init`
 и предварительного подключения. Существующая рабочая БД не заменяется.
 

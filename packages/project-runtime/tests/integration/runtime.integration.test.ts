@@ -83,7 +83,16 @@ describe("Инициализация и выбор локального прое
         updatedAt: now,
         createdBy: "test",
         updatedBy: "test",
-        data: { title: "Только в первом" },
+        data: {
+          name: "Только в первом",
+          summary: "",
+          body: "Документ принадлежит первому проекту.",
+          documentKind: "description",
+          documentStatus: "draft",
+          sectionId: null,
+          pinned: false,
+          relations: [],
+        },
       });
     });
 
@@ -93,7 +102,7 @@ describe("Инициализация и выбор локального прое
       expect(database.get("DOC-1")).toBeUndefined();
     });
     withProjectDatabase(first, (database) => {
-      expect(database.get("DOC-1")?.data.title).toBe("Только в первом");
+      expect(database.get("DOC-1")?.data.name).toBe("Только в первом");
     });
   });
 

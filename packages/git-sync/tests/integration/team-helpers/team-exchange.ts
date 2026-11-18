@@ -14,7 +14,8 @@ export function participant(team: TeamFixture, index: number): TeamReplica {
 }
 
 /**
- * Публикует два готовых кандидата на одном HEAD и доказывает настоящий non-FF второго.
+ * Отправляет два готовых кандидата на одном HEAD и доказывает настоящий non-FF второго.
+ * Продолжение после предметного конфликта и явного решения проверяет вызывающий сценарий.
  * Все процессы ограничены deadline fixture; при отказе ждёт остановки обеих попыток.
  */
 export async function publishCompetingPair(team: TeamFixture): Promise<void> {
@@ -50,9 +51,6 @@ export async function publishCompetingPair(team: TeamFixture): Promise<void> {
   expect(firstPush.exitCode).toBe(0);
   expect(secondPush.exitCode).not.toBe(0);
   expect(secondPush.stdout).toMatch(/\[rejected\].*(fetch first|non-fast-forward)/);
-  expect(second.repository.publications).toHaveLength(2);
-  expect(second.repository.publications[1]?.exitCode).toBe(0);
-  expect(second.repository.publications[1]?.parent).toBe(firstPush.commit);
 }
 
 /**

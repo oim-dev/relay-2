@@ -36,35 +36,50 @@ function filename(id: string): string {
 }
 
 /**
- * Минимальный writer старого layout для миграционных тестов с настоящими Core публикациями.
- * Фиксирует прежние wrappers и compact bytes; production encoder здесь не вызывается.
- * Байты сверены с сохранённым до изменения files.ts; новый формат нельзя использовать как oracle.
+ * Воспроизводит несовместимые layout 1/2 для проверки отказа реального Git reader.
+ * Сохраняет прежние wrappers и отдельные Markdown blobs; production codec не вызывается.
+ * Вход — подготовленная публикация Core; результат принадлежит вызывающему тесту.
  */
-export function encodeLayoutOneFixture(snapshot: PortableProjectSnapshot): Map<string, Uint8Array> {
+export function encodeLegacyLayoutFixture(
+  snapshot: PortableProjectSnapshot,
+  layoutVersion: 1 | 2,
+): Map<string, Uint8Array> {
   const files = new Map<string, Uint8Array>();
   /**
-   * Добавляет compact JSON старого layout с одним LF.
+   * Добавляет прежний compact либо pretty JSON с одним LF.
    */
   function json(path: string, value: unknown): void {
-    files.set(path, Buffer.from(legacyJson(value) + "\n"));
+    const compact = legacyJson(value);
+    const content = layoutVersion === 1 ? compact : JSON.stringify(JSON.parse(compact), null, 2);
+    files.set(path, Buffer.from(content + "\n"));
   }
   /**
-   * Прежний список имён не содержит digest; непарные surrogate остаются в JSON.
+   * Выносит представимые в UTF-8 тексты: layout 1 перечисляет имена, layout 2 добавляет digest.
+   * Изменяет только переданную копию полей; непарные surrogate остаются в JSON.
    */
-  function markdown(directory: string, value: Record<string, unknown>): string[] {
-    const fields: string[] = [];
-    for (const field of ["body", "description", "summary"]) {
+  function markdown(
+    directory: string,
+    value: Record<string, unknown>,
+    allowed: readonly string[] = ["body", "description", "summary"],
+  ): (string | { field: string; digest: string })[] {
+    const fields: (string | { field: string; digest: string })[] = [];
+    for (const field of allowed) {
       const text = value[field];
       if (typeof text === "string" && Buffer.from(text).toString("utf8") === text) {
-        files.set(`${directory}/${field}.md`, Buffer.from(text));
-        fields.push(field);
+        const bytes = Buffer.from(text);
+        files.set(`${directory}/${field}.md`, bytes);
+        fields.push(
+          layoutVersion === 1
+            ? field
+            : { field, digest: createHash("sha256").update(bytes).digest("hex") },
+        );
         delete value[field];
       }
     }
     return fields;
   }
   json("manifest.json", {
-    layoutVersion: 1,
+    layoutVersion,
     formatVersion: 1,
     modelVersion: 2,
     projectId: snapshot.projectId,
@@ -95,6 +110,12 @@ export function encodeLayoutOneFixture(snapshot: PortableProjectSnapshot): Map<s
   }
   for (const item of snapshot.comments) {
     const directory = `comments/${filename(item.comment.id)}`;
+    if (layoutVersion === 2) {
+      const value = { ...item.comment };
+      const fields = markdown(directory, value, ["body"]);
+      json(`${directory}/record.json`, { comment: { ...item, comment: value }, markdown: fields });
+      continue;
+    }
     const { body, ...fields } = item.comment;
     if (Buffer.from(body).toString("utf8") === body) {
       files.set(`${directory}/body.md`, Buffer.from(body));

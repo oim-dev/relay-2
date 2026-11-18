@@ -68,13 +68,6 @@ const corruptedSectionCollections = [
   },
   { name: "null вместо удалённых ID", patch: { retiredDocumentSectionIds: null } },
   { name: "дубли удалённых ID", patch: { retiredDocumentSectionIds: ["guides", "guides"] } },
-  {
-    name: "активный ID среди удалённых",
-    patch: {
-      documentSections: [{ id: "guides", name: "Активный" }],
-      retiredDocumentSectionIds: ["guides"],
-    },
-  },
 ] as const;
 const invalidProjectNames = [
   { name: "пустая строка", value: "" },
@@ -147,15 +140,7 @@ const invalidDocumentInputs = [
   { name: "неизвестный вид", input: { name: "Документ", body: "Текст", documentKind: "unknown" } },
 ] as const;
 const foreignKindOperations = ["create", "get", "list", "update", "rename"] as const;
-const corruptedRelationOperations = [
-  "get",
-  "documentLinks",
-  "list",
-  "update",
-  "linkDocument",
-] as const;
 const corruptedSectionOperations = ["documentSections", "list", "changeSection"] as const;
-const knowledgeReadOperations = ["get", "list"] as const;
 const featureRevisionOperations = ["update", "rename"] as const;
 const invalidRelationInputs = [
   { name: "дубликат пары", input: "duplicate" },
@@ -194,20 +179,24 @@ const sectionMoves = [
 ] as const;
 
 /**
- * Читает испорченную запись указанным публичным маршрутом и проверяет явный отказ.
- * Данные передаются из Storage после намеренной порчи; helper не изменяет их.
+ * Проверяет ранний отказ хранения некорректной формы и сохранность владельца,
+ * первичных частей, поколения и очереди публикации.
  */
-function expectCorruptedKnowledgeRead(
-  service: KnowledgeService,
-  corruptedRecord: EntityRecord,
-  operation: "get" | "list",
+function expectRejectedKnowledgeWrite(
+  db: ProjectDatabase,
+  record: EntityRecord,
+  patch: Readonly<Record<string, unknown>>,
 ): void {
-  expectRelayError(() => {
-    if (operation === "get") {
-      return service.get(corruptedRecord.kind, corruptedRecord.id);
-    }
-    return service.list(corruptedRecord.kind);
-  }, "CORRUPT_DATA");
+  const generation = db.getGeneration();
+  const parts = db.getComponents([record.id]);
+  const pending = db.getReplicationOutbox();
+
+  expectRelayError(() => corruptKnowledgeRecord(db, record, patch), "CORRUPT_DATA");
+
+  expect(db.get(record.id)).toEqual(record);
+  expect(db.getComponents([record.id])).toEqual(parts);
+  expect(db.getGeneration()).toBe(generation);
+  expect(db.getReplicationOutbox()).toEqual(pending);
 }
 
 describe("Страницы знаний и согласованный снимок", () => {
@@ -325,171 +314,146 @@ describe("Страницы знаний и согласованный снимо
 });
 
 describe("Проверка сохранённых знаний", () => {
-  for (const operation of corruptedRelationOperations) {
-    test.each(corruptedRelations)(
-      `${operation}: $name в отношениях даёт CORRUPT_DATA без записи`,
-      async ({ relations }) => {
-        await withKnowledgeFixture(async (service, db) => {
-          const feature = await service.create("feature", { name: "Цель" }, "tester");
-          const document = await service.create(
-            "document",
-            { name: "Документ", body: "Текст", targets: [feature.id] },
-            "tester",
-          );
-          const corruptedRecord = corruptKnowledgeRecord(db, document, { relations });
-          const generation = db.getGeneration();
-
-          await expectAsyncRelayError(async () => {
-            switch (operation) {
-              case "get":
-                return service.get("document", document.id);
-              case "documentLinks":
-                return service.documentLinks(document.id);
-              case "list":
-                return service.list("document", { target: feature.id });
-              case "update":
-                return await service.update(
-                  "document",
-                  document.id,
-                  { summary: "Правка" },
-                  write(corruptedRecord),
-                );
-              case "linkDocument":
-                return await service.linkDocument(document.id, feature.id, write(corruptedRecord));
-            }
-          }, "CORRUPT_DATA");
-
-          expect(db.get(document.id)).toEqual(corruptedRecord);
-          expect(db.getGeneration()).toBe(generation);
-        });
-      },
-    );
-  }
-
-  for (const operation of corruptedSectionOperations) {
-    test.each(corruptedSectionCollections)(
-      `${operation}: $name отклоняется без перезаписи проекта`,
-      async ({ patch }) => {
-        await withKnowledgeFixture(async (service, db) => {
-          const corruptedRecord = corruptKnowledgeRecord(db, service.get("project"), patch);
-          const generation = db.getGeneration();
-
-          await expectAsyncRelayError(async () => {
-            switch (operation) {
-              case "documentSections":
-                return service.documentSections();
-              case "list":
-                return service.list("document");
-              case "changeSection":
-                return await service.changeSection(
-                  "create",
-                  { id: "new", name: "Новый" },
-                  write(corruptedRecord),
-                );
-            }
-          }, "CORRUPT_DATA");
-
-          expect(db.get(corruptedRecord.id)).toEqual(corruptedRecord);
-          expect(db.getGeneration()).toBe(generation);
-        });
-      },
-    );
-  }
-
-  for (const operation of knowledgeReadOperations) {
-    test(`${operation}: null в summary фичи даёт CORRUPT_DATA`, async () => {
+  test.each(corruptedRelations)(
+    "$name в отношениях отклоняется до сохранения документа",
+    async ({ relations }) => {
       await withKnowledgeFixture(async (service, db) => {
-        const feature = await service.create("feature", { name: "Фича" }, "tester");
-        const corruptedRecord = corruptKnowledgeRecord(db, feature, { summary: null });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: числовая ссылка сценария даёт CORRUPT_DATA`, async () => {
-      await withKnowledgeFixture(async (service, db) => {
-        const feature = await service.create("feature", { name: "Фича" }, "tester");
-        const scenario = await service.create(
-          "scenario",
-          { name: "Сценарий", feature: feature.id },
-          "tester",
-        );
-        const corruptedRecord = corruptKnowledgeRecord(db, scenario, { featureId: 42 });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: null в составе приложения даёт CORRUPT_DATA`, async () => {
-      await withKnowledgeFixture(async (service, db) => {
-        const application = await service.create(
-          "application",
-          { name: "Web", slug: "web" },
-          "tester",
-        );
-        const corruptedRecord = corruptKnowledgeRecord(db, application, {
-          implementationIds: null,
-        });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: строковый active реализации даёт CORRUPT_DATA`, async () => {
-      await withKnowledgeFixture(async (service, db) => {
-        const feature = await service.create("feature", { name: "Фича" }, "tester");
-        const application = await service.create(
-          "application",
-          { name: "Web", slug: "web" },
-          "tester",
-        );
-        const implementation = await service.create(
-          "implementation",
-          { application: application.id, target: feature.id, title: "Вклад" },
-          "tester",
-        );
-        const corruptedRecord = corruptKnowledgeRecord(db, implementation, { active: "false" });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: числовой prefix доски даёт CORRUPT_DATA`, async () => {
-      await withKnowledgeFixture((service, db) => {
-        const corruptedRecord = corruptKnowledgeRecord(db, service.get("board", "BOARD-PRODUCT"), {
-          prefix: 42,
-        });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: null в имени продукта даёт CORRUPT_DATA`, async () => {
-      await withKnowledgeFixture((service, db) => {
-        const corruptedRecord = corruptKnowledgeRecord(db, service.get("product"), { name: null });
-
-        expectCorruptedKnowledgeRead(service, corruptedRecord, operation);
-      });
-    });
-
-    test(`${operation}: неизвестный раздел не маскируется отсутствием раздела`, async () => {
-      await withKnowledgeFixture(async (service, db) => {
+        const feature = await service.create("feature", { name: "Цель" }, "tester");
         const document = await service.create(
           "document",
-          { name: "Документ", body: "Текст" },
+          { name: "Документ", body: "Текст", targets: [feature.id] },
           "tester",
         );
-        corruptKnowledgeRecord(db, document, { sectionId: "missing" });
 
-        expectRelayError(() => {
-          if (operation === "get") {
-            return service.get("document", document.id);
-          }
-          return service.list("document", { section: "none" });
-        }, "CORRUPT_DATA");
+        expectRejectedKnowledgeWrite(db, document, { relations });
       });
+    },
+  );
+
+  test.each(corruptedSectionCollections)(
+    "$name отклоняется до перезаписи проекта",
+    async ({ patch }) => {
+      await withKnowledgeFixture((service, db) => {
+        expectRejectedKnowledgeWrite(db, service.get("project"), patch);
+      });
+    },
+  );
+
+  test.each(corruptedSectionOperations)(
+    "%s отвергает активный раздел среди зарезервированных ID",
+    async (operation) => {
+      await withKnowledgeFixture(async (service, db) => {
+        // Обе коллекции имеют допустимую SQL-форму; предметный конфликт выявляет Core.
+        const corruptedRecord = corruptKnowledgeRecord(db, service.get("project"), {
+          documentSections: [{ id: "guides", name: "Активный" }],
+          retiredDocumentSectionIds: ["guides"],
+        });
+        const generation = db.getGeneration();
+
+        await expectAsyncRelayError(async () => {
+          switch (operation) {
+            case "documentSections":
+              return service.documentSections();
+            case "list":
+              return service.list("document");
+            case "changeSection":
+              return await service.changeSection(
+                "create",
+                { id: "new", name: "Новый" },
+                write(corruptedRecord),
+              );
+          }
+        }, "CORRUPT_DATA");
+
+        expect(db.get(corruptedRecord.id)).toEqual(corruptedRecord);
+        expect(db.getGeneration()).toBe(generation);
+      });
+    },
+  );
+
+  test("null в summary фичи отклоняется до записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+
+      expectRejectedKnowledgeWrite(db, feature, { summary: null });
     });
-  }
+  });
+
+  test("числовая ссылка сценария отклоняется до записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+      const scenario = await service.create(
+        "scenario",
+        { name: "Сценарий", feature: feature.id },
+        "tester",
+      );
+
+      expectRejectedKnowledgeWrite(db, scenario, { featureId: 42 });
+    });
+  });
+
+  test("null в составе приложения отклоняется до записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
+
+      expectRejectedKnowledgeWrite(db, application, { implementationIds: null });
+    });
+  });
+
+  test("строковый active реализации отклоняется до записи", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const feature = await service.create("feature", { name: "Фича" }, "tester");
+      const application = await service.create(
+        "application",
+        { name: "Web", slug: "web" },
+        "tester",
+      );
+      const implementation = await service.create(
+        "implementation",
+        { application: application.id, target: feature.id, title: "Вклад" },
+        "tester",
+      );
+
+      expectRejectedKnowledgeWrite(db, implementation, { active: "false" });
+    });
+  });
+
+  test("числовой prefix доски отклоняется до записи", async () => {
+    await withKnowledgeFixture((service, db) => {
+      expectRejectedKnowledgeWrite(db, service.get("board", "BOARD-PRODUCT"), { prefix: 42 });
+    });
+  });
+
+  test("null в имени продукта отклоняется до записи без подмены отсутствующим полем", async () => {
+    await withKnowledgeFixture((service, db) => {
+      expectRejectedKnowledgeWrite(db, service.get("product"), { name: null });
+    });
+  });
+
+  test("несуществующий раздел отклоняется при записи с сохранением документа", async () => {
+    await withKnowledgeFixture(async (service, db) => {
+      const document = await service.create(
+        "document",
+        { name: "Документ", body: "Текст" },
+        "tester",
+      );
+      const generation = db.getGeneration();
+      const pending = db.getReplicationOutbox();
+
+      expectRelayError(
+        () => corruptKnowledgeRecord(db, document, { sectionId: "missing" }),
+        "CONFLICT",
+      );
+
+      expect(service.get("document", document.id)).toEqual(document);
+      expect(db.getGeneration()).toBe(generation);
+      expect(db.getReplicationOutbox()).toEqual(pending);
+    });
+  });
 });
 
 describe("Паспорт продукта и реквизиты проекта", () => {
@@ -756,12 +720,12 @@ describe("Владение доской приложения", () => {
       try {
         // Триггер прерывает вторую предметную запись после уже записанного имени приложения.
         connection.exec(`
-          CREATE TRIGGER knowledge_reject_board_name BEFORE UPDATE ON entities
-          WHEN NEW.kind = 'board' AND json_extract(NEW.data, '$.name') = 'Отклонённое имя'
+          CREATE TRIGGER knowledge_reject_board_name BEFORE UPDATE ON boards
+          WHEN NEW.name = 'Отклонённое имя'
           BEGIN SELECT RAISE(ABORT, 'knowledge board write failure'); END;
         `);
 
-        await expectAsyncRelayError(
+        const failure = await expectAsyncRelayError(
           async () =>
             await service.update(
               "application",
@@ -772,6 +736,7 @@ describe("Владение доской приложения", () => {
           "CONFLICT",
         );
 
+        expect(failure.details).toMatchObject({ reason: "knowledge board write failure" });
         expect(db.list()).toEqual(snapshot);
         expect(db.getGeneration()).toBe(generation);
       } finally {

@@ -3,9 +3,14 @@ import { snapshotMessages } from "./snapshot.messages";
 
 /**
  * Отказывает в чтении непроверенной формы переносимых данных со стабильным кодом.
+ * Переданная причина сохраняет диагностику нижележащей проверки без раскрытия её данных в сообщении.
  */
-export function invalidSnapshot(): never {
-  throw new RelayError("GIT_INVALID_SNAPSHOT", snapshotMessages.invalid, 4);
+export function invalidSnapshot(cause?: unknown): never {
+  const error = new RelayError("GIT_INVALID_SNAPSHOT", snapshotMessages.invalid, 4);
+  if (cause !== undefined) {
+    error.cause = cause;
+  }
+  throw error;
 }
 
 /**

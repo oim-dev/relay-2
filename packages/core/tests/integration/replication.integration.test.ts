@@ -68,7 +68,7 @@ describe("Предметная репликация независимых SQLit
     );
   });
 
-  test("одновременные предварительные ключи уступают принятому remote без ложного алиаса", async () => {
+  test("явный выбор предварительного ключа сохраняет принятого владельца и защищает старый ввод", async () => {
     await withReplicationFixture(
       () => {},
       async ({ first, second, remote }) => {
@@ -88,7 +88,32 @@ describe("Предметная репликация независимых SQLit
         const published = b.prepare(remote).snapshot;
         b.accept(published);
 
-        const prepared = a.prepare(published);
+        const collision = a.prepare(published);
+        expect(collision.conflicts.map((entry) => entry.code)).toEqual([
+          "REPLICATION_KEY_COLLISION",
+        ]);
+        expect(a.accept(published).reconciled).toBe(false);
+        expect(first.get(local.id)?.key).toBe("DOC-1");
+        const conflict = a.keyConflicts()[0];
+        if (conflict === undefined) {
+          throw new Error("Нет коллизии ключа");
+        }
+        expect(conflict.collisions).toEqual([
+          {
+            entityId: local.id,
+            key: "DOC-1",
+            acceptedOwnerId: foreign.id,
+            suggestedKey: "DOC-2",
+          },
+        ]);
+        const prepared = a.resolveKeys(
+          conflict.id,
+          {
+            fingerprint: conflict.fingerprint,
+            assignments: [{ entityId: local.id, key: "DOC-2" }],
+          },
+          "resolver",
+        );
         a.accept(prepared.snapshot);
 
         expect(prepared.conflicts).toEqual([]);

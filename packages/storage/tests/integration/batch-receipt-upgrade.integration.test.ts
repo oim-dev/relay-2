@@ -1,32 +1,32 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { StoredBatchReceipt } from "../../src/batch/batch-receipt.types";
-import type { ProjectDatabase } from "../../src/database/project-database";
+import { ProjectDatabase } from "../../src/database/project-database";
 import {
   BatchReceiptUpgradeFixture,
-  batchUpgradeComments,
-  batchUpgradeDocument,
   batchUpgradeGeneration,
-  batchUpgradeRecords,
-  batchUpgradeTask,
 } from "./helpers/batch-receipt-upgrade-fixture";
+import { componentTask } from "./helpers/components-fixture";
 import {
+  ProjectDatabaseFixture,
   createComment,
   createDocument,
   expectRelayError,
+  requireRecord,
 } from "./helpers/project-database-fixture";
 
 const receipt: StoredBatchReceipt = {
-  operationKey: "publish-upgrade",
+  operationKey: "publish-receipt",
   requestJson: '{"actor":"agent","input":{"version":1}}',
-  resultJson: '{"status":"committed","original":"Квитанция после миграции"}',
+  resultJson: '{"status":"committed","original":"Первоначальная квитанция"}',
 };
-const counters = [
-  { prefix: "DOC", value: 17 },
-  { prefix: "RESERVED", value: 6 },
-  { prefix: "TASK", value: 11 },
-];
 const rejectedDatabases = [
+  {
+    name: "историческая схема v1",
+    corrupt: "",
+    expectedCode: "SCHEMA_VERSION_UNSUPPORTED",
+    expectedVersion: 1,
+  },
   {
     name: "чужой application_id",
     corrupt: "PRAGMA application_id = 42",
@@ -34,16 +34,10 @@ const rejectedDatabases = [
     expectedVersion: 1,
   },
   {
-    name: "более новая версия схемы",
-    corrupt: "PRAGMA user_version = 6",
+    name: "неизвестная будущая версия схемы",
+    corrupt: "PRAGMA user_version = 7",
     expectedCode: "SCHEMA_VERSION_UNSUPPORTED",
-    expectedVersion: 6,
-  },
-  {
-    name: "отсутствующая обязательная строка project_state",
-    corrupt: "DELETE FROM project_state",
-    expectedCode: "DATABASE_INVALID",
-    expectedVersion: 1,
+    expectedVersion: 7,
   },
 ] as const;
 const receiptFailures = [
@@ -55,167 +49,69 @@ const receiptFailures = [
   },
   {
     name: "отказ COMMIT после успешной вставки квитанции",
-    triggerBody: "UPDATE project_state SET project_id = 'missing-project' WHERE singleton = 1;",
+    triggerBody: "INSERT INTO receipt_commit_guard VALUES ('missing-receipt');",
     expectedReason: "FOREIGN KEY constraint failed",
     insertionCompleted: true,
   },
 ] as const;
-let fixture: BatchReceiptUpgradeFixture;
 
-/**
- * Проверяет весь исторический набор через публичные чтения, включая отдельный журнал,
- * прежние адреса и поколение; счётчики не расходует и состояние не изменяет.
- */
-function expectLegacyRecords(db: ProjectDatabase): void {
-  expect(db.projectId).toBe("legacy-project");
-  expect(db.count()).toBe(batchUpgradeRecords.length);
-  for (const record of batchUpgradeRecords) {
-    const expected =
-      record.kind === "task"
-        ? { ...record, data: { ...record.data, comments: batchUpgradeComments } }
-        : record;
-    expect(db.get(record.id)).toEqual(expected);
-  }
-  expect(db.get("DOC-1")).toEqual(batchUpgradeDocument);
-  expect(db.get("DOC-4")).toEqual(batchUpgradeDocument);
-  expect(db.get("DOC-7")).toEqual(batchUpgradeDocument);
-  expect(db.getGeneration()).toBe(batchUpgradeGeneration);
-}
+describe("Отказ открытия несовместимой файловой базы", () => {
+  let fixture: BatchReceiptUpgradeFixture;
 
-beforeEach(() => {
-  fixture = new BatchReceiptUpgradeFixture();
-});
-
-afterEach(() => {
-  fixture.close();
-});
-
-describe("Обновление исторической файловой схемы v1 для batch-квитанций", () => {
-  test("open и reopen сохраняют исторические данные, добавляют квитанции, нормализованную очередь и расписание v5", () => {
-    fixture.createV1();
-    const legacyComments = fixture.withRaw((raw) => ({
-      columns: raw.query<Record<string, unknown>, []>("PRAGMA table_info(task_comments)").all(),
-      foreignKeys: raw.query("PRAGMA foreign_key_list(task_comments)").all(),
-    }));
-    const legacyStructure = fixture.withRaw((raw) => {
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
-      expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
-      expect(
-        raw.query("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name").all(),
-      ).toEqual([
-        { name: "entities" },
-        { name: "entity_refs" },
-        { name: "key_counters" },
-        { name: "project_state" },
-        { name: "task_comments" },
-      ]);
-      return raw
-        .query(
-          "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name != 'entity_refs' AND NOT(type='table' AND name='task_comments') ORDER BY type, name",
-        )
-        .all();
-    });
-
-    const migrated = fixture.open();
-
-    expectLegacyRecords(migrated);
-    expect(migrated.getBatchReceipt(receipt.operationKey)).toBeUndefined();
-    expect(migrated.getSynchronizationSchedule()).toEqual({
-      mode: "auto",
-      dirtySince: expect.any(Number),
-      lastMutationAt: expect.any(Number),
-      nextAttemptAt: 0,
-      lastAttemptAt: null,
-      failures: 0,
-    });
-    migrated.insertBatchReceipt(receipt);
-    const schedule = migrated.getSynchronizationSchedule();
-    expect(migrated.getGeneration()).toBe(batchUpgradeGeneration);
-    migrated.close();
-    const reopened = fixture.open();
-    expectLegacyRecords(reopened);
-    expect(reopened.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
-    expect(reopened.getSynchronizationSchedule()).toEqual(schedule);
-    fixture.withRaw((raw) => {
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
-      expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
-      expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-      expect(
-        raw
-          .query(
-            "SELECT type, name, sql FROM sqlite_schema WHERE type != 'trigger' AND tbl_name NOT IN ('batch_receipts','entity_refs','entity_components','synchronization_schedule') AND NOT(type='table' AND name='task_comments') AND tbl_name NOT LIKE 'replication_%' AND tbl_name NOT LIKE 'component_%' AND tbl_name NOT LIKE 'command_%' ORDER BY type, name",
-          )
-          .all(),
-      ).toEqual(legacyStructure);
-      expect(
-        raw
-          .query<Record<string, unknown>, []>("PRAGMA table_info(task_comments)")
-          .all()
-          .filter((column) => column.name !== "text_encoding"),
-      ).toEqual(legacyComments.columns);
-      expect(raw.query("PRAGMA foreign_key_list(task_comments)").all()).toEqual(
-        legacyComments.foreignKeys,
-      );
-      expect(raw.query("SELECT DISTINCT text_encoding FROM task_comments").all()).toEqual([
-        { text_encoding: 0 },
-      ]);
-      expect(raw.query("SELECT prefix, value FROM key_counters ORDER BY prefix").all()).toEqual(
-        counters,
-      );
-    });
-    expect(reopened.nextKey("DOC")).toBe("DOC-18");
-    expect(reopened.nextKey("TASK")).toBe("TASK-12");
-    expect(reopened.nextKey("RESERVED")).toBe("RESERVED-7");
-    expect(reopened.getGeneration()).toBe(batchUpgradeGeneration);
+  beforeEach(() => {
+    fixture = new BatchReceiptUpgradeFixture();
   });
 
-  test("поздняя коллизия DDL откатывает уже созданные таблицу и триггер до повторного open", () => {
-    fixture.createV1();
-    // Коллизия последнего DDL возникает после создания batch_receipts и её первого триггера.
-    fixture.withRaw((raw) =>
-      raw.exec(`
-      CREATE TRIGGER batch_receipts_no_delete BEFORE DELETE ON key_counters BEGIN SELECT 1; END;
-    `),
+  afterEach(() => {
+    fixture.close();
+  });
+
+  for (const method of ["open", "openReadonly"] as const) {
+    test.each(rejectedDatabases)(
+      `${method}: $name отклоняется до включения WAL и сохраняет заполненный файл`,
+      ({ corrupt, expectedCode, expectedVersion }) => {
+        fixture.createV1();
+        fixture.withRaw((raw) => {
+          // DELETE позволяет обнаружить даже переключение режима журнала перед отказом.
+          raw.exec("PRAGMA journal_mode = DELETE");
+          if (corrupt) {
+            raw.exec(corrupt);
+          }
+          expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
+        });
+        const before = readFileSync(fixture.path);
+        expect(readdirSync(fixture.directory)).toEqual(["project.sqlite"]);
+
+        const failure = expectRelayError(() => {
+          const unexpected = ProjectDatabase[method](fixture.path);
+          unexpected.close();
+        }, expectedCode);
+
+        if (expectedCode === "SCHEMA_VERSION_UNSUPPORTED") {
+          expect(failure.details).toMatchObject({
+            expectedVersion: 6,
+            actualVersion: expectedVersion,
+          });
+        }
+        expect(readFileSync(fixture.path)).toEqual(before);
+        expect(readdirSync(fixture.directory)).toEqual(["project.sqlite"]);
+        fixture.withRaw((raw) => {
+          expect(raw.query("PRAGMA user_version").get()).toEqual({
+            user_version: expectedVersion,
+          });
+          expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
+          expect(raw.query("SELECT * FROM project_state").get()).toEqual({
+            singleton: 1,
+            project_id: "legacy-project",
+            generation: batchUpgradeGeneration,
+          });
+          expect(
+            raw.query("SELECT name FROM sqlite_schema WHERE tbl_name = 'batch_receipts'").all(),
+          ).toEqual([]);
+        });
+      },
     );
-    const before = readFileSync(fixture.path);
-
-    const failure = expectRelayError(() => fixture.open(), "STORAGE_ERROR");
-
-    expect(failure.details).toMatchObject({
-      reason: "trigger batch_receipts_no_delete already exists",
-    });
-    expect(readFileSync(fixture.path)).toEqual(before);
-    fixture.withRaw((raw) => {
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 1 });
-      expect(
-        raw.query("SELECT name FROM sqlite_schema WHERE tbl_name = 'batch_receipts'").all(),
-      ).toEqual([]);
-      raw.exec("DROP TRIGGER batch_receipts_no_delete");
-    });
-    const retried = fixture.open();
-    expectLegacyRecords(retried);
-    retried.insertBatchReceipt(receipt);
-    expect(retried.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
-  });
-
-  test.each(rejectedDatabases)(
-    "$name отклоняется без изменения заполненного файла",
-    ({ corrupt, expectedCode, expectedVersion }) => {
-      fixture.createV1();
-      fixture.withRaw((raw) => raw.exec(corrupt));
-      const before = readFileSync(fixture.path);
-
-      expectRelayError(() => fixture.open(), expectedCode);
-
-      expect(readFileSync(fixture.path)).toEqual(before);
-      fixture.withRaw((raw) => {
-        expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: expectedVersion });
-        expect(
-          raw.query("SELECT name FROM sqlite_schema WHERE tbl_name = 'batch_receipts'").all(),
-        ).toEqual([]);
-      });
-    },
-  );
+  }
 
   test("не-SQLite файл отклоняется без замены его содержимого", () => {
     writeFileSync(fixture.path, "Повреждённый заголовок SQLite\nСодержимое необходимо сохранить.");
@@ -225,40 +121,76 @@ describe("Обновление исторической файловой схе�
 
     expect(failure.cause).toMatchObject({ code: "SQLITE_NOTADB" });
     expect(readFileSync(fixture.path)).toEqual(before);
+    expect(readdirSync(fixture.directory)).toEqual(["project.sqlite"]);
   });
 });
 
-describe("Отказ SQLite при сохранении квитанции в мигрированной базе", () => {
+describe("Состояние базы и атомарность квитанции в текущей схеме", () => {
+  let fixture: ProjectDatabaseFixture;
+
+  beforeEach(() => {
+    fixture = new ProjectDatabaseFixture("receipt-rollback", "database-redesign");
+  });
+
+  afterEach(() => {
+    fixture.close();
+  });
+
+  test("отсутствующий project_state отклоняется без восстановления строки и включения WAL", () => {
+    fixture.create().close();
+    fixture.withRaw((raw) => raw.exec("DELETE FROM project_state; PRAGMA journal_mode=DELETE"));
+    const before = readFileSync(fixture.path);
+
+    expectRelayError(() => fixture.open(), "DATABASE_INVALID");
+
+    expect(readFileSync(fixture.path)).toEqual(before);
+    expect(readdirSync(fixture.directory)).toEqual(["project.sqlite"]);
+  });
+
   test.each(receiptFailures)(
-    "$name откатывает данные, журнал, алиасы и счётчики после reopen",
+    "$name откатывает данные, журнал, алиасы, счётчики и outbox после повторного открытия",
     ({ triggerBody, expectedReason, insertionCompleted }) => {
-      fixture.createV1();
-      const db = fixture.open();
+      const db = fixture.create();
+      const originalDocument = createDocument(db.nextKey("DOC"));
+      db.insert(originalDocument);
+      const document = db.rename(originalDocument.id, "DOC-CURRENT", 1, "editor");
+      const task = componentTask("receipt-task", "TASK-1", []);
+      task.data.boardId = requireRecord(db, "BOARD-PRODUCT").id;
+      db.insert(task);
+      db.appendTaskComment(task.id, createComment("Сохранённое сообщение"));
       const previousReceipt = { ...receipt, operationKey: "previous-operation" };
       db.insertBatchReceipt(previousReceipt);
-      const document = createDocument("DOC-18");
+      const records = db.list();
+      const snapshot = db.captureReplication();
+      const generation = db.getGeneration();
+      const queue = db.getReplicationOutbox();
+      const state = db.getReplicationState();
+      const schedule = db.getSynchronizationSchedule();
+      const counters = fixture.withRaw((raw) =>
+        raw.query("SELECT prefix, value FROM key_counters ORDER BY prefix").all(),
+      );
+      const candidate = createDocument("DOC-2");
       const comment = createComment("Этот комментарий должен откатиться");
       let receiptInserted = false;
-      // Во втором случае отложенный FK допускает INSERT, но запрещает внешний COMMIT.
+      // Собственный отложенный FK внедряет отказ именно COMMIT, независимо от layout проекта.
       fixture.withRaw((raw) =>
         raw.exec(`
-      CREATE TRIGGER upgrade_reject_receipt AFTER INSERT ON batch_receipts
-      WHEN NEW.operation_key = 'publish-upgrade' BEGIN ${triggerBody} END;
-    `),
+          CREATE TABLE receipt_commit_guard (
+            operation_key TEXT PRIMARY KEY REFERENCES batch_receipts(operation_key)
+              DEFERRABLE INITIALLY DEFERRED
+          ) STRICT;
+          CREATE TRIGGER reject_receipt AFTER INSERT ON batch_receipts
+          WHEN NEW.operation_key = 'publish-receipt' BEGIN ${triggerBody} END;
+        `),
       );
 
       const failure = expectRelayError(
         () =>
           db.transaction(() => {
-            expect(db.nextKey("DOC")).toBe(document.key);
-            db.insert(document);
-            db.rename(
-              batchUpgradeDocument.id,
-              "DOC-FAILED",
-              batchUpgradeDocument.revision,
-              "editor",
-            );
-            db.appendTaskComment(batchUpgradeTask.id, comment);
+            expect(db.nextKey("DOC")).toBe(candidate.key);
+            db.insert(candidate);
+            db.rename(document.id, "DOC-FAILED", document.revision, "editor");
+            db.appendTaskComment(task.id, comment);
             db.insertBatchReceipt(receipt);
             receiptInserted = true;
           }),
@@ -269,22 +201,29 @@ describe("Отказ SQLite при сохранении квитанции в м
       expect(receiptInserted).toBe(insertionCompleted);
       db.close();
       const reopened = fixture.open();
-      expectLegacyRecords(reopened);
-      expect(reopened.get(document.id)).toBeUndefined();
-      expect(reopened.get(document.key)).toBeUndefined();
+      expect(reopened.list()).toEqual(records);
+      expect(reopened.captureReplication()).toEqual(snapshot);
+      expect(reopened.get(originalDocument.key)).toEqual(document);
+      expect(reopened.get(candidate.id)).toBeUndefined();
+      expect(reopened.get(candidate.key)).toBeUndefined();
       expect(reopened.get("DOC-FAILED")).toBeUndefined();
       expect(reopened.getBatchReceipt(receipt.operationKey)).toBeUndefined();
       expect(reopened.getBatchReceipt(previousReceipt.operationKey)).toEqual(previousReceipt);
+      expect(reopened.getGeneration()).toBe(generation);
+      expect(reopened.getReplicationOutbox()).toEqual(queue);
+      expect(reopened.getReplicationState()).toEqual(state);
+      expect(reopened.getSynchronizationSchedule()).toEqual(schedule);
       fixture.withRaw((raw) => {
         expect(raw.query("SELECT prefix, value FROM key_counters ORDER BY prefix").all()).toEqual(
           counters,
         );
-        raw.exec("DROP TRIGGER upgrade_reject_receipt");
+        expect(raw.query("SELECT * FROM receipt_commit_guard").all()).toEqual([]);
+        raw.exec("DROP TRIGGER reject_receipt");
       });
-      expect(reopened.nextKey("DOC")).toBe(document.key);
+      expect(reopened.nextKey("DOC")).toBe(candidate.key);
       reopened.insertBatchReceipt(receipt);
       expect(reopened.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
-      expect(reopened.getGeneration()).toBe(batchUpgradeGeneration);
+      expect(reopened.getGeneration()).toBe(generation);
     },
   );
 });

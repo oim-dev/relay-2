@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { PlanningCompositionPageRequest, WorkPlanRecord } from "@relay/contracts";
-import { ProjectDatabase } from "@relay/storage";
+import { applyComponentImportDelta, ProjectDatabase, versionComponent } from "@relay/storage";
 import { PlanningService } from "../../src/planning/planning";
 import { TasksService } from "../../src/tasks/tasks";
 import {
@@ -111,21 +112,56 @@ function ownerMetadata(owner: PlanningPageFixture["owner"]): PlanningPageOwner {
 }
 
 /**
- * Намеренно заменяет сохранённые ID в обход Core для проверки повреждённых ссылок.
+ * Заменяет одно включение во внешней SQLite с отключённым FK только у собственного соединения.
+ * Полная часть сохраняет ID/позицию и корректную версию; delete/insert моделирует повреждение
+ * immutable связи, чтобы чтение достигло проверки целевого ID, а не отказало на форме части.
+ * Остальные включения, карточки и outbox сохраняются; соединение закрывается при любом исходе.
  */
 function corruptReferences(
   db: ProjectDatabase,
   owner: PlanningPageFixture["owner"],
-  ids: readonly string[],
+  index: number,
+  reference: string,
 ): void {
-  const data =
-    owner.kind === "work-plan"
-      ? {
-          ...owner.data,
-          stages: owner.data.stages.map((stage) => ({ ...stage, taskIds: [...ids] })),
-        }
-      : { ...owner.data, planIds: [...ids] };
-  db.update({ ...owner, revision: owner.revision + 1, data }, owner.revision);
+  const originalId =
+    owner.kind === "work-plan" ? owner.data.stages[0]?.taskIds[index] : owner.data.planIds[index];
+  if (originalId === undefined) {
+    throw new Error("В составе отсутствует заменяемое включение");
+  }
+  const before = db
+    .getComponents([owner.id])
+    .find(
+      (part) =>
+        !part.deleted &&
+        ((part.kind === "plan-task" && part.value.taskId === originalId) ||
+          (part.kind === "release-plan" && part.value.planId === originalId)),
+    );
+  if (before?.kind !== "plan-task" && before?.kind !== "release-plan") {
+    throw new Error("Не найдена физическая часть состава");
+  }
+  const after = versionComponent({
+    ...before,
+    parents: [before.version],
+    value:
+      before.kind === "plan-task"
+        ? { stageId: before.value.stageId, taskId: reference }
+        : { planId: reference },
+  });
+  const raw = new Database(db.path, { create: false, readwrite: true, strict: true });
+  try {
+    raw.exec("PRAGMA foreign_keys=OFF");
+    raw
+      .transaction(() => {
+        raw.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
+        applyComponentImportDelta(raw, [], [before]);
+        applyComponentImportDelta(raw, [after], []);
+        raw.exec("UPDATE replication_state SET importing=0 WHERE singleton=1");
+        raw.exec("UPDATE project_state SET generation=generation+1 WHERE singleton=1");
+      })
+      .immediate();
+  } finally {
+    raw.close();
+  }
 }
 
 /**
@@ -295,15 +331,15 @@ describe("Ограниченные страницы составов плани�
       async ({ index, reference }) => {
         await withEntityDatabase(async (db) => {
           const fixture = await seed(db);
-          const ids = fixture.items.map((item) => item.id);
           let broken = "missing-id";
           if (reference === "wrong-kind") {
             broken = db.projectId;
           } else if (reference === "key") {
             broken = itemAt(fixture, index).key;
           }
-          ids[index] = broken;
-          corruptReferences(db, fixture.owner, ids);
+          corruptReferences(db, fixture.owner, index, broken);
+          const ownerBefore = db.get(fixture.owner.id);
+          const generation = db.getGeneration();
 
           const error = expectRelayError(
             () => readPage(db, fixture, { offset: 0, limit: 1 }),
@@ -311,6 +347,8 @@ describe("Ограниченные страницы составов плани�
           );
 
           expect(error.details).toEqual({ ref: broken, kind });
+          expect(db.get(fixture.owner.id)).toEqual(ownerBefore);
+          expect(db.getGeneration()).toBe(generation);
         });
       },
     );
@@ -339,12 +377,11 @@ describe("Ограниченные страницы составов плани�
       await withEntityDatabase(async (db) => {
         const fixture = await seed(db);
         const selected = itemAt(fixture, 0);
-        // Повреждаем обязательный текст выбранной карточки в обход предметного декодера.
-        const data =
-          selected.kind === "task"
-            ? { ...selected.data, description: null }
-            : { ...selected.data, goal: null };
+        // TEXT остаётся технически представимым, но многострочный title запрещён обоим предметным DTO.
+        const data = { ...selected.data, title: "Первая строка\nНедопустимое продолжение" };
         db.update({ ...selected, revision: selected.revision + 1, data }, selected.revision);
+        const before = db.get(selected.id);
+        const generation = db.getGeneration();
 
         const error = expectRelayError(
           () => readPage(db, fixture, { offset: 0, limit: 1 }),
@@ -352,6 +389,8 @@ describe("Ограниченные страницы составов плани�
         );
 
         expect(error.details).toMatchObject({ id: selected.id });
+        expect(db.get(selected.id)).toEqual(before);
+        expect(db.getGeneration()).toBe(generation);
       });
     },
   );

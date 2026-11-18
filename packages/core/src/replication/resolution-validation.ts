@@ -1,77 +1,38 @@
 import {
   RelayError,
+  assertPortableReplicationResolutionShape,
   isPortableIdentityText,
   validateActor,
-  type ReplicationResolution,
+  type PortableReplicationResolution,
   type ReplicationChangeset,
   type PortableProjectSnapshot,
 } from "@relay/contracts";
 import { canonicalJson, replicationFingerprint } from "@relay/storage";
-import { mergeObject } from "./record-merge";
 import { assertSnapshot } from "./snapshot-validation";
 import { assertPublicationSource } from "./publication-source";
 import { createReplicationConflict, resolutionRemoteDigest } from "./conflict-material";
 import { resolutionDecision, validateResolutionScope } from "./replication-resolution";
 import { replicationMessages } from "./replication.messages";
+import { validateKeyAssignments } from "./key-resolution";
 
 /**
- * Декодирует immutable resolution material без доверия неизвестным полям или локальным KV.
+ * После общего shape decoder проверяет авторство, scope и версии сторон immutable resolution material.
+ * Проверка формы не заменяет предметные правила и не объявляет material доказательством принятия.
  */
 export function assertReplicationResolution(
   value: unknown,
   projectId: string,
-): asserts value is ReplicationResolution {
-  if (
-    !mergeObject(value) ||
-    value.formatVersion !== 1 ||
-    !mergeObject(value.material) ||
-    typeof value.actor !== "string" ||
-    !isPortableIdentityText(value.actor) ||
-    typeof value.createdAt !== "string" ||
-    !Number.isFinite(Date.parse(value.createdAt)) ||
-    typeof value.changesetId !== "string"
-  ) {
+): asserts value is PortableReplicationResolution {
+  assertPortableReplicationResolutionShape(value);
+  if (!isPortableIdentityText(value.actor) || !Number.isFinite(Date.parse(value.createdAt))) {
     throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
       path: "resolution",
     });
   }
   validateActor(value.actor);
-  for (const field of ["resolutionId", "sourceDigest", "fingerprint", "remoteDigest"]) {
-    if (typeof value[field] !== "string" || !/^[a-f0-9]{64}$/.test(value[field])) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: `resolution.${field}`,
-      });
-    }
-  }
-  const allowed = [
-    "formatVersion",
-    "resolutionId",
-    "changesetId",
-    "sourceDigest",
-    "actor",
-    "createdAt",
-    "remoteDigest",
-    "material",
-    "fingerprint",
-    "choice",
-    ...(value.choice === "custom" ? ["patch"] : []),
-  ];
-  if (Object.keys(value).some((field) => !allowed.includes(field))) {
-    throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-      path: "resolution.fields",
-    });
-  }
   const material = value.material;
-  for (const field of ["id", "fingerprint", "code", "message"]) {
-    if (typeof material[field] !== "string") {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: `resolution.material.${field}`,
-      });
-    }
-  }
   assertPublicationSource(material.changeset);
-  const resolution = value as unknown as ReplicationResolution;
-  validateResolutionScope(material.changeset, resolutionDecision(resolution));
+  validateResolutionScope(material.changeset, resolutionDecision(value));
   assertSnapshot({
     formatVersion: 1,
     modelVersion: 2,
@@ -100,7 +61,7 @@ export function assertReplicationResolution(
  * Проверяет identity решения и полный просмотренный материал относительно реального parent.
  */
 export function validateResolution(
-  resolution: ReplicationResolution,
+  resolution: PortableReplicationResolution,
   source: ReplicationChangeset,
   parent: PortableProjectSnapshot,
 ): void {
@@ -128,5 +89,13 @@ export function validateResolution(
     canonicalJson(resolution.material.changeset) !== canonicalJson(source)
   ) {
     throw new RelayError("REPLICATION_PUBLICATION", replicationMessages.publication, 4);
+  }
+  if (resolution.choice === "keys") {
+    validateKeyAssignments(
+      source,
+      { fingerprint: resolution.fingerprint, assignments: resolution.assignments },
+      parent,
+      parent,
+    );
   }
 }

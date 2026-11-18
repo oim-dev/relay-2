@@ -4,68 +4,44 @@ import {
   type PortableEntity,
   type PortableProjectSnapshot,
   type ReplicationChangeset,
-  type PortableComponent,
   type ReplicationTransition,
 } from "@relay/contracts";
-import { canonicalJson, portableEntity, replicationFingerprint } from "@relay/storage";
+import { canonicalJson, portableEntity } from "@relay/storage";
 import { confirmChangeset } from "./confirmations";
 import { mergeRecord } from "./record-merge";
 import { replicationMessages } from "./replication.messages";
 import { validateSnapshot } from "./snapshot-validation";
 import { validateChangesetTransition } from "./transition-validation";
 import { validateAcceptedHistory } from "./history-continuity";
-import { mergeComponents, versionComponent } from "./component-merge";
+import { mergeComponents } from "./component-merge";
 import { canonicalSnapshot } from "./snapshot-canonical";
 import { logicalTransitionChangeset } from "./transition-records";
 import type { ReplicationRecordOverride } from "./replication-resolution.types";
 export { canonicalSnapshot } from "./snapshot-canonical";
 
 /**
- * Выделяет новый предварительный ключ проигравшей локальной записи, не создавая старого алиаса.
- * ID, структурированные ссылки, произвольный Markdown и исторические снимки не изменяются.
- * BigInt сохраняет продвижение для любого допустимого десятичного суффикса, включая > MAX_SAFE_INTEGER.
- */
-export function availableProvisionalKey(
-  key: string,
-  occupied: ReadonlyMap<string, string>,
-): string {
-  const match = /^(.*)-(\d+)$/.exec(key);
-  const prefix = match?.[1] ?? key;
-  let number = BigInt(match?.[2] ?? "1");
-  while (true) {
-    const candidate = `${prefix}-${++number}`;
-    if (!occupied.has(candidate)) {
-      return candidate;
-    }
-  }
-}
-
-/**
- * Согласует новые адреса changeset; только первичное неопубликованное назначение может уступить remote.
+ * Согласует новые адреса; коллизия текущего ключа требует отдельного явного выбора.
+ * Подтверждённое назначение, ID и содержание сохраняются; проигранный ключ не становится alias.
  */
 function mergeAddresses(
   changeset: ReplicationChangeset,
   records: Map<string, PortableEntity>,
   addresses: Map<string, string>,
 ): void {
-  const created = new Set(
-    changeset.entities.filter((entry) => entry.before === null).map((entry) => entry.id),
-  );
   for (const entry of changeset.addresses) {
     const owner = addresses.get(entry.ref);
     if (owner !== undefined && owner !== entry.entityId) {
       const record = records.get(entry.entityId);
-      if (!created.has(entry.entityId) || record === undefined || entry.ref === entry.entityId) {
+      if (record === undefined || entry.ref === entry.entityId || record.record.key !== entry.ref) {
         throw new RelayError("REPLICATION_ADDRESS", replicationMessages.address, 4, {
           ref: entry.ref,
         });
       }
-      if (record.record.key === entry.ref) {
-        const key = availableProvisionalKey(entry.ref, addresses);
-        records.set(entry.entityId, portableEntity({ ...record.record, key }, [record.version]));
-        addresses.set(key, entry.entityId);
-      }
-      continue;
+      throw new RelayError("REPLICATION_KEY_COLLISION", replicationMessages.keyCollision, 4, {
+        ref: entry.ref,
+        entityId: entry.entityId,
+        acceptedOwnerId: owner,
+      });
     }
     addresses.set(entry.ref, entry.entityId);
   }
@@ -100,38 +76,6 @@ function immutableUnion<T>(
     result.set(id, entry);
   }
   return [...result.values()];
-}
-
-/**
- * Переназначает лишь непринятую provisional заявку; проигранный адрес не становится алиасом.
- * Новое назначение получает детерминированный ID от исходной заявки и согласованного ключа.
- */
-export function reconcileAddressComponents(
-  components: readonly PortableComponent[],
-  records: ReadonlyMap<string, PortableEntity>,
-  addresses: ReadonlyMap<string, string>,
-): PortableComponent[] {
-  return components.map((part) => {
-    if (
-      part.kind !== "address-assignment" ||
-      part.deleted ||
-      addresses.get(part.value.ref) === part.ownerId
-    ) {
-      return part;
-    }
-    const owner = records.get(part.ownerId);
-    if (owner === undefined) {
-      throw new RelayError("REPLICATION_ADDRESS", replicationMessages.address, 4);
-    }
-    return versionComponent(
-      {
-        ...part,
-        id: replicationFingerprint({ assignment: part.id, ref: owner.record.key }),
-        value: { ref: owner.record.key },
-      },
-      [],
-    );
-  });
 }
 
 /**
@@ -197,10 +141,10 @@ export function applyChangeset(
   const next = canonicalSnapshot({
     ...previous,
     entities: [...records.values()],
-    components: reconcileAddressComponents(
-      mergeComponents(previous.components ?? [], changeset.components ?? [], choice === "local"),
-      records,
-      addresses,
+    components: mergeComponents(
+      previous.components ?? [],
+      changeset.components ?? [],
+      choice === "local",
     ),
     addresses: [...addresses].map(([ref, entityId]): PortableAddress => ({ ref, entityId })),
     comments,

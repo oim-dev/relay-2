@@ -1,47 +1,17 @@
-import { RelayError, isPortableIdentityText, type PortableProjectSnapshot } from "@relay/contracts";
-import { createHash } from "node:crypto";
+import { RelayError, type PortableProjectSnapshot } from "@relay/contracts";
+import { RELATIONAL_TABLES, portableRowsToSnapshot, snapshotToPortableRows } from "@relay/storage";
 import type { GitFiles } from "../transport/repository.types";
-import { address, comment, entity, receipt } from "./records";
-import { array, prettyJson, invalidSnapshot, keys, object, parseJson, text } from "./json";
-import { extractMarkdown, readMarkdown, restoreMarkdown } from "./markdown";
+import { invalidSnapshot, keys, object, parseJson, prettyJson } from "./json";
+import { decodeManifest, encodeManifest, rowFilePath, rowFileTable } from "./layout";
 import { snapshotMessages } from "./snapshot.messages";
 
-/**
- * Сортирует технические наборы по UTF-16 code units, независимо от locale/ICU хоста.
- */
-function compareText(left: string, right: string): number {
-  if (left < right) {
-    return -1;
-  }
-  if (left > right) {
-    return 1;
-  }
-  return 0;
-}
+const portableTables = new Map<string, (typeof RELATIONAL_TABLES)[number]>(
+  RELATIONAL_TABLES.filter((table) => table.portable).map((table) => [table.name, table]),
+);
 
 /**
- * Кодирует произвольный постоянный ID в безопасное имя без коллизий регистра и reserved names.
- */
-function filename(id: string): string {
-  if (!id || !isPortableIdentityText(id)) {
-    return invalidSnapshot();
-  }
-  return createHash("sha256").update(Buffer.from(id, "utf8")).digest("hex");
-}
-
-/**
- * Идентичность части scoped: JSON tuple ownerId/kind/id хешируется UTF-8 без Unicode-нормализации.
- */
-function componentFilename(ownerId: string, kind: string, id: string): string {
-  if (![ownerId, kind, id].every((value) => value.length > 0 && isPortableIdentityText(value))) {
-    invalidSnapshot();
-  }
-  return filename(JSON.stringify([ownerId, kind, id]));
-}
-
-/**
- * Кодирует layout 2: pretty JSON, отдельные карточки по ID и точные Markdown-байты с digest.
- * История операций не размножается по каталогам реплик; acknowledgements остаются компактными.
+ * Выпускает layout 3: одна папка на переносимую SQL-таблицу, один JSON на её строку.
+ * Storage владеет разложением и закрытой схемой; порядок файлов и JSON не зависит от порядка входа.
  */
 export function encodeSnapshot(snapshot: PortableProjectSnapshot): Map<string, Uint8Array> {
   if (
@@ -52,194 +22,120 @@ export function encodeSnapshot(snapshot: PortableProjectSnapshot): Map<string, U
   ) {
     throw new RelayError("GIT_FORMAT_INCOMPATIBLE", snapshotMessages.version, 4);
   }
-  const files = new Map<string, Uint8Array>();
-  /**
-   * Добавляет однозначное JSON-представление без платформенной нормализации строк.
-   */
-  function json(path: string, value: unknown): void {
-    if (files.has(path)) {
-      invalidSnapshot();
+  const rows = convertStorageRows(() => snapshotToPortableRows(snapshot));
+  keys(object(rows), ["projectId", "tables"]);
+  if (rows.projectId !== snapshot.projectId) {
+    invalidSnapshot();
+  }
+  const tables: Readonly<Record<string, readonly unknown[]>> = rows.tables;
+  const files = new Map<string, Uint8Array>([
+    ["manifest.json", encodeManifest(snapshot.projectId)],
+  ]);
+  for (const [name, entries] of Object.entries(tables)) {
+    const table = requirePortableTable(name);
+    for (const entry of entries) {
+      const row = object(entry);
+      const path = rowFilePath(name, primaryKey(row, table.primaryKey));
+      if (files.has(path)) {
+        invalidSnapshot();
+      }
+      files.set(path, Buffer.from(prettyJson(row), "utf8"));
     }
-    files.set(path, Buffer.from(prettyJson(value), "utf8"));
   }
-  json("manifest.json", {
-    layoutVersion: 2,
-    formatVersion: snapshot.formatVersion,
-    modelVersion: snapshot.modelVersion,
-    projectId: snapshot.projectId,
-  });
-  json(
-    "addresses.json",
-    [...snapshot.addresses].sort((a, b) => compareText(a.ref, b.ref)),
-  );
-  json(
-    "confirmations.json",
-    [...snapshot.confirmations].sort((a, b) => compareText(a.replicaId, b.replicaId)),
-  );
-  json("publication.json", snapshot.publication);
-  for (const item of snapshot.entities) {
-    if (Object.hasOwn(item.record, "revision")) {
-      invalidSnapshot();
-    }
-    const id = filename(item.record.id);
-    const data = { ...item.record.data };
-    const markdown = extractMarkdown(files, `entities/${id}`, data);
-    json(`entities/${id}/record.json`, {
-      entity: { ...item, record: { ...item.record, data } },
-      markdown,
-    });
-  }
-  for (const component of snapshot.components) {
-    const id = componentFilename(component.ownerId, component.kind, component.id);
-    const value: Record<string, unknown> = { ...component.value };
-    const markdown = extractMarkdown(files, `components/${id}`, value);
-    json(`components/${id}/record.json`, { component: { ...component, value }, markdown });
-  }
-  for (const item of snapshot.comments) {
-    const id = filename(item.comment.id);
-    const value = { ...item.comment };
-    const markdown = extractMarkdown(files, `comments/${id}`, value, ["body"]);
-    json(`comments/${id}/record.json`, { comment: { ...item, comment: value }, markdown });
-  }
-  for (const item of snapshot.receipts) {
-    json(`receipts/${filename(item.operationKey)}.json`, item);
-  }
-  return files;
+  return new Map([...files].sort(([left], [right]) => compareText(left, right)));
 }
 
 /**
- * Строго читает layout 1 либо 2 без доступа к filesystem; каждый файл потребляется один раз.
- * Неизвестные пути, лишние поля, несовместимая версия и неверный project ID дают отказ до Core.
- * Оба layout возвращают только непроверенный DTO: publication/history по-прежнему проверяет Core.
+ * Читает только табличный layout 3 без filesystem и возвращает логическую проекцию для Core.
+ * Пути и PK проверяются здесь, полная закрытая форма строк — Storage, предметные правила — Core.
+ * Входная карта и её bytes остаются собственностью вызывающего и не изменяются.
  */
 export function decodeSnapshotData(files: GitFiles, expectedProjectId?: string): unknown {
-  const remaining = new Map(files);
-  /**
-   * Извлекает обязательный файл и исключает возможность повторного обращения к одному пути.
-   */
-  function take(path: string): Uint8Array {
-    const value = remaining.get(path);
-    if (!value) {
+  const manifest = files.get("manifest.json");
+  if (manifest === undefined) {
+    return invalidSnapshot();
+  }
+  const projectId = decodeManifest(manifest, expectedProjectId);
+  const tables: Record<string, Record<string, unknown>[]> = {};
+  for (const name of portableTables.keys()) {
+    tables[name] = [];
+  }
+  for (const [path, bytes] of files) {
+    if (path === "manifest.json") {
+      continue;
+    }
+    const name = rowFileTable(path);
+    const table = requirePortableTable(name);
+    const row = object(parseJson(bytes));
+    if (path !== rowFilePath(name, primaryKey(row, table.primaryKey))) {
+      invalidSnapshot();
+    }
+    const entries = tables[name];
+    if (entries === undefined) {
       return invalidSnapshot();
     }
-    remaining.delete(path);
-    return value;
+    entries.push(row);
   }
-  const manifest = object(parseJson(take("manifest.json")));
-  if (
-    (manifest.layoutVersion !== 1 && manifest.layoutVersion !== 2) ||
-    manifest.formatVersion !== 1 ||
-    manifest.modelVersion !== 2
-  ) {
-    throw new RelayError("GIT_FORMAT_INCOMPATIBLE", snapshotMessages.version, 4);
-  }
-  keys(manifest, ["layoutVersion", "formatVersion", "modelVersion", "projectId"]);
-  const projectId = text(manifest.projectId);
-  if (expectedProjectId !== undefined && expectedProjectId !== projectId) {
-    throw new RelayError("GIT_PROJECT_MISMATCH", snapshotMessages.project, 4);
-  }
-  const addresses = array(parseJson(take("addresses.json"))).map(address);
-  const confirmations = array(parseJson(take("confirmations.json")));
-  const publication = parseJson(take("publication.json"));
-  const entities = [];
-  const components = [];
-  const comments = [];
-  const receipts = [];
-  for (const path of [...remaining.keys()].sort()) {
-    if (/^entities\/[a-f0-9]+\/record\.json$/.test(path)) {
-      const wrapper = object(parseJson(take(path)));
-      keys(wrapper, ["entity", "markdown"]);
-      const candidate = object(wrapper.entity);
-      const record = object(candidate.record);
-      const data = object(record.data);
-      restoreMarkdown(
-        remaining,
-        path.slice(0, -"/record.json".length),
-        data,
-        wrapper.markdown,
-        manifest.layoutVersion,
-      );
-      const item = entity(candidate);
-      if (path !== `entities/${filename(item.record.id)}/record.json`) {
-        invalidSnapshot();
-      }
-      entities.push(item);
-    } else if (/^components\/[a-f0-9]+\/record\.json$/.test(path)) {
-      const wrapper = object(parseJson(take(path)));
-      keys(wrapper, ["component", "markdown"]);
-      const component = object(wrapper.component);
-      keys(component, [
-        "ownerId",
-        "kind",
-        "id",
-        "position",
-        "version",
-        "parents",
-        "deleted",
-        "value",
-      ]);
-      const value = object(component.value);
-      restoreMarkdown(
-        remaining,
-        path.slice(0, -"/record.json".length),
-        value,
-        wrapper.markdown,
-        manifest.layoutVersion,
-      );
-      const id = componentFilename(
-        text(component.ownerId),
-        text(component.kind),
-        text(component.id),
-      );
-      if (path !== `components/${id}/record.json`) {
-        invalidSnapshot();
-      }
-      components.push(component);
-    } else if (/^comments\/[a-f0-9]+\/record\.json$/.test(path)) {
-      const wrapper = object(parseJson(take(path)));
-      const candidate = manifest.layoutVersion === 1 ? wrapper : object(wrapper.comment);
-      const record = object(candidate.comment);
-      if (manifest.layoutVersion === 1) {
-        if (!Object.hasOwn(record, "body")) {
-          record.body = readMarkdown(remaining, path.replace("record.json", "body.md"), null);
-        }
-      } else {
-        keys(wrapper, ["comment", "markdown"]);
-        restoreMarkdown(
-          remaining,
-          path.slice(0, -"/record.json".length),
-          record,
-          wrapper.markdown,
-          manifest.layoutVersion,
-          ["body"],
-        );
-      }
-      const item = comment(candidate);
-      if (path !== `comments/${filename(item.comment.id)}/record.json`) {
-        invalidSnapshot();
-      }
-      comments.push(item);
-    } else if (/^receipts\/[a-f0-9]+\.json$/.test(path)) {
-      const item = receipt(parseJson(take(path)));
-      if (path !== `receipts/${filename(item.operationKey)}.json`) {
-        invalidSnapshot();
-      }
-      receipts.push(item);
-    }
-  }
-  if (remaining.size > 0) {
+  const input: unknown = { projectId, tables };
+  const snapshot = convertStorageRows(() => portableRowsToSnapshot(input));
+  if (snapshot.projectId !== projectId) {
     invalidSnapshot();
   }
-  return {
-    formatVersion: 1,
-    modelVersion: 2,
-    projectId,
-    entities,
-    components,
-    addresses,
-    comments,
-    receipts,
-    confirmations,
-    publication,
-  };
+  return snapshot;
+}
+
+/**
+ * Требует переносимую таблицу закрытого каталога; локальные SQL-таблицы не становятся файлами Git.
+ */
+function requirePortableTable(name: string): (typeof RELATIONAL_TABLES)[number] {
+  const table = portableTables.get(name);
+  if (table === undefined) {
+    return invalidSnapshot();
+  }
+  return table;
+}
+
+/**
+ * Извлекает кортеж именно объявленных PK-колонок без подмены отсутствующего поля пустым значением.
+ * Содержание остальных колонок и предметную допустимость ключа проверяет общий codec Storage.
+ */
+function primaryKey(
+  row: Readonly<Record<string, unknown>>,
+  columns: readonly string[],
+): (string | number)[] {
+  return columns.map((column) => {
+    const value = row[column];
+    if (typeof value !== "string" && !(typeof value === "number" && Number.isSafeInteger(value))) {
+      return invalidSnapshot();
+    }
+    return value;
+  });
+}
+
+/**
+ * Переводит отказ формы Storage в диагностику Git, сохраняя исходную причину.
+ * Неожиданные ошибки реализации сохраняют свой тип и не маскируются повреждённым снимком.
+ */
+function convertStorageRows<T>(convert: () => T): T {
+  try {
+    return convert();
+  } catch (error) {
+    if (error instanceof RelayError && error.code === "CORRUPT_DATA") {
+      return invalidSnapshot(error);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Сравнивает канонические пути по UTF-16 code units независимо от locale/ICU хоста.
+ */
+function compareText(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
 }

@@ -39,13 +39,25 @@ export type * from "./commands/command-store.types";
 export type * from "./commands/command-write.types";
 export { BATCH_LIMITS, BATCH_NESTED_RESULT_KINDS } from "./batch/batch.constants";
 export type * from "./replication/replication.types";
+export type * from "./replication/replication-key.types";
 export { isPortableIdentityText, isPortableVersionParents } from "./replication/portable-identity";
+export { assertReplicationPublicationShape } from "./replication/replication-publication-shape";
+export {
+  assertReplicationChangesetShape,
+  assertReplicationTransitionShape,
+} from "./replication/replication-source-shape";
+export { assertPortableReplicationResolutionShape } from "./replication/replication-resolution-shape";
+export {
+  assertPortableEntityShape,
+  assertPortableComponentShape,
+} from "./replication/replication-record-shape";
 export type * from "./replication/git-sync.types";
 export { decodeGitSyncRequest } from "./replication/git-sync-request";
 export type * from "./replication/git-sync-control.types";
 export type * from "./replication/git-sync-conflicts.types";
 export { GIT_SYNC_REQUEST_MAX_BYTES } from "./replication/git-sync.constants";
 export type * from "./components/component.types";
+export { componentCollectionNames } from "./components/component.constants";
 export { componentAllocatedId } from "./components/component-layout";
 export { hasConsistentComponentId } from "./components/component-layout";
 export {

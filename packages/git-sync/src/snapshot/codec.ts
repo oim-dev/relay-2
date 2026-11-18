@@ -6,8 +6,8 @@ import { decodeSnapshotData } from "./files";
 export { encodeSnapshot, decodeSnapshotData } from "./files";
 
 /**
- * Связывает layout 1/2 с единственным Core decoder DTO, не реконструируя nested source материал.
- * Старый layout и проверенный Markdown digest не заменяют предметную проверку snapshot/history.
+ * Передаёт логическую проекцию табличного layout 3 единственному Core decoder DTO.
+ * Физическая форма строк и соответствие PK не заменяют предметную проверку snapshot/history.
  */
 export function decodeSnapshot(
   files: GitFiles,

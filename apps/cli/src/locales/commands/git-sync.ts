@@ -133,6 +133,45 @@ export const gitSyncCommandMessages = {
       },
     ],
   },
+  keys: {
+    description: "Коллизии семантических ключей разных объектов",
+    details:
+      "list показывает занятые ключи, постоянные ID владельцев и предложенные свободные номера. resolve сохраняет явно выбранные назначения. Внутренние ID, предметные связи и содержание объектов сохраняются.",
+    examples: [
+      {
+        description: "Посмотреть коллизии и предлагаемые ключи",
+        command: "relay git-sync keys list --format json",
+      },
+    ],
+  },
+  keysList: {
+    description: "Показать коллизии ключей и свободные предложения",
+    details:
+      "Возвращает ID пакета, fingerprint и collisions: entityId, занятый key, acceptedOwnerId и suggestedKey. Уже принятое общей историей назначение сохраняется. Предложенный номер не резервируется: его доступность повторно проверяется при решении и публикации.",
+    examples: [
+      {
+        description: "Прочитать исходные данные для решения",
+        command: "relay git-sync keys list --format json",
+      },
+    ],
+  },
+  keysResolve: {
+    description: "Назначить согласованные ключи конфликтующему пакету",
+    details:
+      '--input принимает JSON, @UTF-8-файл либо - для stdin. Передайте fingerprint из keys list и assignments: [{"entityId":"постоянный-ID","key":"выбранный-ключ"}]. Поле fromKey уточняет исходное назначение из collisions.key и обязательно при нескольких коллизиях одного ID. Замена относится к этому назначению; последующий rename внутри исходного batch сохраняется. ID пакета и все значения берутся из прочитанного конфликта. Требуется --actor либо RELAY_ACTOR. Назначения одного пакета проверяются атомарно; устаревшее решение или занятый ключ отклоняются. Чужой занятый ключ не становится алиасом переименованного объекта. После сохранения решения выполните git-sync now для публикации.',
+    examples: [
+      {
+        description: "Применить подготовленный выбор ключей",
+        command:
+          "relay git-sync keys resolve changeset-id --input @key-resolution.json --actor human",
+      },
+      {
+        description: "Выбрать другой номер; подставьте ID пакета, объекта и fingerprint",
+        command:
+          'relay git-sync keys resolve changeset-id --input \'{"fingerprint":"прочитанный-fingerprint","assignments":[{"entityId":"постоянный-ID","key":"TASK-43"}]}\' --actor human',
+      },
+    ],
+  },
   restore: {
     description: "Восстановить реплику или завершить сохранённую привязку",
     details:
@@ -220,6 +259,14 @@ export const gitSyncCommandMessages = {
     localOnly: "Только локально",
     unpublished: "Не опубликовано",
     conflicts: "Конфликты",
+    collisions: "Коллизии ключей",
+    entityId: "Постоянный ID объекта",
+    acceptedOwnerId: "Принятый владелец ключа",
+    suggestedKey: "Предлагаемый свободный ключ",
+    assignments: "Выбранные назначения",
+    fromKey: "Исходное назначение ключа",
+    key: "Ключ",
+    replayed: "Решение уже сохранено",
     blocked: "Ожидают зависимостей",
     dependencies: "Непринятые предшественники",
     fingerprint: "Fingerprint сторон для resolve",

@@ -3,7 +3,6 @@ import {
   RelayError,
   componentCollection,
   componentIdentity,
-  componentMigrationId,
   componentAllocatedId,
   componentNaturalIdentity,
   isComponentPosition,
@@ -23,10 +22,15 @@ import type {
 } from "./component-store.types";
 import { componentStorageMessages } from "./component.messages";
 import { assertSqlReferences, assertSqlText } from "../entities/entity-sql-text";
+import {
+  removeRelationalComponent,
+  upsertRelationalComponent,
+} from "../relational/component-store";
+import { captureComponentChange, isReplicationImport } from "../replication/replication-capture";
 
 /**
  * Декодирует primary SQL part; неверная форма не превращается в пустую коллекцию.
- * Пустая версия допустима лишь как промежуточное SQL-состояние создаваемого адреса.
+ * Все части, включая адреса, обязаны иметь окончательную проверяемую версию.
  */
 export function decodeComponentRow(row: ComponentRow): PortableComponent {
   const value: unknown = JSON.parse(row.value);
@@ -58,8 +62,7 @@ export function decodeComponentRow(row: ComponentRow): PortableComponent {
     !hasConsistentComponentId(component) ||
     row.identity_key !== componentSqlIdentity(component) ||
     row.group_id !== (component.kind === "plan-task" ? component.value.stageId : "") ||
-    (!(row.kind === "address-assignment" && row.version_pending === 1) &&
-      versionComponent(component).version !== component.version)
+    versionComponent(component).version !== component.version
   ) {
     throw new RelayError("CORRUPT_DATA", componentStorageMessages.shape, 1, {
       ownerId: row.owner_id,
@@ -87,13 +90,12 @@ export function readComponents(
   const rows =
     ownerIds === undefined
       ? connection
-          .query<ComponentRow, []>(
-            `SELECT c.*,EXISTS(SELECT 1 FROM component_pending_versions p WHERE p.owner_id=c.owner_id AND p.kind=c.kind AND p.id=c.id) AS version_pending FROM entity_components c ORDER BY c.owner_id,c.kind,c.id`,
-          )
+          .query<ComponentRow, []>("SELECT * FROM entity_components ORDER BY owner_id,kind,id")
           .all()
       : connection
           .query<ComponentRow, [string]>(
-            `SELECT c.*,EXISTS(SELECT 1 FROM component_pending_versions p WHERE p.owner_id=c.owner_id AND p.kind=c.kind AND p.id=c.id) AS version_pending FROM entity_components c WHERE c.owner_id IN (SELECT value FROM json_each(?)) ORDER BY c.owner_id,c.kind,c.id`,
+            `SELECT * FROM entity_components WHERE owner_id IN (SELECT value FROM json_each(?))
+             ORDER BY owner_id,kind,id`,
           )
           .all(JSON.stringify([...new Set(ownerIds)]));
   return rows.map(decodeComponentRow);
@@ -116,35 +118,35 @@ export function versionComponent(component: Omit<PortableComponent, "version">):
 }
 
 /**
- * Сохраняет один проверенный part без побочных commit; constraints защищают identity/history.
+ * Сохраняет часть через её typed таблицу и захватывает точную дельту в той же транзакции.
+ * Неизменённая часть не записывается; relational constraints защищают identity/history.
  */
-function persistComponent(connection: Database, entry: ComponentStorageEntry): void {
+export function persistComponent(connection: Database, entry: ComponentStorageEntry): void {
   const part = entry.component;
   assertComponentSqlText(part);
   assertSqlText(entry.group, "component.group");
   const identity =
     part.kind === "plan-participant" ? JSON.stringify(entry.identity) : entry.identity;
   assertSqlText(identity, "component.identity");
-  connection
-    .query(
-      `INSERT INTO entity_components(owner_id,kind,id,identity_key,group_id,position,version,parents_json,deleted,value)
-    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(owner_id,kind,id) DO UPDATE SET
-      position=excluded.position,version=excluded.version,parents_json=excluded.parents_json,deleted=excluded.deleted,value=excluded.value
-      WHERE entity_components.version!=excluded.version OR entity_components.position!=excluded.position
-      OR entity_components.parents_json!=excluded.parents_json OR entity_components.deleted!=excluded.deleted OR entity_components.value!=excluded.value`,
-    )
-    .run(
-      part.ownerId,
-      part.kind,
-      part.id,
-      identity,
-      entry.group,
-      part.position,
-      part.version,
-      JSON.stringify(part.parents),
-      part.deleted ? 1 : 0,
-      canonicalJson(part.value),
-    );
+  if (isReplicationImport(connection)) {
+    upsertRelationalComponent(connection, part);
+    return;
+  }
+  let before = entry.before;
+  if (before === undefined) {
+    const row = connection
+      .query<ComponentRow, [string, string, string]>(
+        `SELECT c.* FROM entity_components c
+         WHERE c.owner_id=? AND c.kind=? AND c.id=?`,
+      )
+      .get(part.ownerId, part.kind, part.id);
+    before = row === null ? null : decodeComponentRow(row);
+  }
+  if (before !== null && canonicalJson(before) === canonicalJson(part)) {
+    return;
+  }
+  upsertRelationalComponent(connection, part);
+  captureComponentChange(connection, before, part);
 }
 
 /**
@@ -177,13 +179,19 @@ function orderingGroup(kind: ComponentKind, group: string): string {
 /**
  * Атомарно синхронизирует первичные parts из уже проверенного агрегатного результата Core.
  * Новый UUID появляется лишь у нового включения без старого ID; no-op не меняет его version/position.
- * Малформированное поле остаётся явным raw fallback, прежние части сохраняются для ремонта.
+ * Неверная форма коллекции отклоняется до записи: универсального raw fallback в typed схеме нет.
  */
 export function synchronizeComponents(
   connection: Database,
   layout: ComponentLayout,
   options: ComponentWriteOptions = {},
 ): void {
+  if (layout.malformed.length > 0) {
+    throw new RelayError("CORRUPT_DATA", componentStorageMessages.shape, 1, {
+      ownerId: layout.record.id,
+      fields: layout.malformed,
+    });
+  }
   const old = readComponents(connection, [layout.record.id]);
   const active = new Map(
     old
@@ -197,12 +205,7 @@ export function synchronizeComponents(
       options.allocationId === undefined
         ? undefined
         : componentAllocatedId(options.allocationId, layout.record.id, item.kind, item.identity);
-    const id =
-      item.id ??
-      previous?.id ??
-      (options.migration
-        ? componentMigrationId(layout.record.id, item.kind, item.identity)
-        : (allocated ?? crypto.randomUUID()));
+    const id = item.id ?? previous?.id ?? allocated ?? crypto.randomUUID();
     const key = componentIdentity({ ownerId: layout.record.id, kind: item.kind, id });
     const prior = previous ?? all.get(key);
     if (prior?.deleted && item.kind !== "collection") {
@@ -242,13 +245,11 @@ export function synchronizeComponents(
     if (previous.deleted || field === null || desired.has(componentIdentity(previous))) {
       continue;
     }
-    if (layout.malformed.includes(field) && previous.kind !== "collection") {
-      continue;
-    }
     persistComponent(connection, {
       component: versionComponent({ ...previous, deleted: true, parents: [previous.version] }),
       identity: componentNaturalIdentity(previous),
       group: previous.kind === "plan-task" ? previous.value.stageId : "",
+      before: previous,
     });
   }
   for (const draft of drafts) {
@@ -277,37 +278,8 @@ export function synchronizeComponents(
       component,
       identity: draft.item.identity,
       group: draft.item.group,
+      before: draft.prior ?? null,
     });
-  }
-}
-
-/**
- * Завершает версии только SQL-created адресов/снятий текущей транзакции перед capture/flush.
- * Схлопнутая component_changes и append event tape сохраняются до владельца replication flush.
- */
-export function flushComponentVersions(connection: Database): void {
-  const rows = connection
-    .query<ComponentRow & { before_version: string | null }, []>(
-      `SELECT c.*,q.before_version,1 AS version_pending FROM entity_components c JOIN component_pending_versions q
-    ON q.owner_id=c.owner_id AND q.kind=c.kind AND q.id=c.id`,
-    )
-    .all();
-  for (const row of rows) {
-    const current = decodeComponentRow(row);
-    const parents =
-      row.before_version === null || row.before_version === "" ? [] : [row.before_version];
-    const { version: _version, ...value } = current;
-    const next = versionComponent({ ...value, parents });
-    if (next.version !== current.version) {
-      persistComponent(connection, {
-        component: next,
-        identity: row.identity_key,
-        group: row.group_id,
-      });
-    }
-    connection
-      .query("DELETE FROM component_pending_versions WHERE owner_id=? AND kind=? AND id=?")
-      .run(row.owner_id, row.kind, row.id);
   }
 }
 
@@ -336,9 +308,19 @@ export function replaceComponents(
 }
 
 /**
+ * Определяет запись, освобождающую уникальное действующее назначение перед следующими upserts.
+ * Завершённый session-run остаётся immutable историей с deleted=false, но освобождает active-слот owner.
+ */
+function releasesComponentSlot(component: PortableComponent): boolean {
+  return (
+    component.deleted || (component.kind === "session-run" && component.value.state !== "active")
+  );
+}
+
+/**
  * Применяет только заранее рассчитанные exact upserts/removals под importing=1 и внешней transaction.
  * Не сканирует owners/весь проект, не создаёт IDs/версии. Повтор неизменённого upsert не пишет строку.
- * Tombstones идут первыми, освобождая active identity для нового независимого назначения.
+ * Tombstones и завершения session-run идут первыми, освобождая unique-слоты до новых назначений.
  */
 export function applyComponentImportDelta(
   connection: Database,
@@ -357,22 +339,17 @@ export function applyComponentImportDelta(
     removedIds.add(key);
   }
   for (const part of removed) {
-    connection
-      .query("DELETE FROM entity_components WHERE owner_id=? AND kind=? AND id=?")
-      .run(part.ownerId, part.kind, part.id);
+    removeRelationalComponent(connection, part);
   }
   for (const part of [
-    ...upserts.filter((entry) => entry.deleted),
-    ...upserts.filter((entry) => !entry.deleted),
+    ...upserts.filter(releasesComponentSlot),
+    ...upserts.filter((entry) => !releasesComponentSlot(entry)),
   ]) {
     persistComponent(connection, {
       component: part,
       identity: componentNaturalIdentity(part),
       group: part.kind === "plan-task" ? part.value.stageId : "",
     });
-    connection
-      .query("DELETE FROM component_pending_versions WHERE owner_id=? AND kind=? AND id=?")
-      .run(part.ownerId, part.kind, part.id);
   }
 }
 
@@ -413,24 +390,4 @@ function validateComponentUpserts(components: readonly PortableComponent[]): Set
     identities.add(key);
   }
   return identities;
-}
-
-/**
- * Создаёт исходную адресную часть миграции с воспроизводимой идентичностью и точным ref.
- */
-export function migrateAddressComponent(connection: Database, ownerId: string, ref: string): void {
-  const id = componentMigrationId(ownerId, "address-assignment", ref);
-  persistComponent(connection, {
-    component: versionComponent({
-      id,
-      kind: "address-assignment",
-      ownerId,
-      position: "V",
-      parents: [],
-      deleted: false,
-      value: { ref },
-    }),
-    identity: ref,
-    group: "",
-  });
 }

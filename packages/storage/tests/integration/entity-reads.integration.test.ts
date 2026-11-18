@@ -1,19 +1,80 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, spyOn, test } from "bun:test";
-import { createDocument, ProjectDatabaseFixture } from "./helpers/project-database-fixture";
+import type { KnowledgeRecord } from "@relay/contracts";
+import type { ProjectDatabase } from "../../src/database/project-database";
+import {
+  createDocument,
+  createTask,
+  expectRelayError,
+  ProjectDatabaseFixture,
+} from "./helpers/project-database-fixture";
 
 const invalidFields = [
   {
     name: "явный null заголовка",
     data: { name: null },
-    expected: { title: null, state: undefined, active: undefined },
   },
   {
     name: "объект вместо заголовка",
     data: { name: { bad: true } },
-    expected: { title: { bad: true }, state: undefined, active: undefined },
   },
 ] as const;
+
+/**
+ * Сохраняет снятую реализацию с настоящими приложением, доской и функциональностью.
+ * Связанные записи создаются одной транзакцией; участие приложения намеренно пусто.
+ */
+function createInactiveImplementation(db: ProjectDatabase): KnowledgeRecord<"implementation"> {
+  const applicationId = crypto.randomUUID();
+  const boardId = crypto.randomUUID();
+  const feature: KnowledgeRecord<"feature"> = {
+    ...createDocument("FEATURE-1"),
+    kind: "feature",
+    data: { name: "Функциональность", summary: "", description: "" },
+  };
+  const application: KnowledgeRecord<"application"> = {
+    ...createDocument("APP-1"),
+    id: applicationId,
+    kind: "application",
+    data: {
+      name: "Приложение",
+      summary: "",
+      description: "",
+      slug: "application",
+      prefix: "APP",
+      type: "internal",
+      boardId,
+      implementationIds: [],
+    },
+  };
+  const board: KnowledgeRecord<"board"> = {
+    ...createDocument("BOARD-APP"),
+    id: boardId,
+    kind: "board",
+    data: { name: "Доска приложения", slug: "application", prefix: "APP", applicationId },
+  };
+  const implementation: KnowledgeRecord<"implementation"> = {
+    ...createDocument("IMPL-1"),
+    kind: "implementation",
+    data: {
+      title: "Снятая",
+      description: "",
+      status: "partial",
+      active: false,
+      applicationId,
+      featureId: feature.id,
+      targetKind: "feature",
+      targetId: feature.id,
+    },
+  };
+  db.transaction(() => {
+    db.insert(feature);
+    db.insert(application);
+    db.insert(board);
+    db.insert(implementation);
+  });
+  return implementation;
+}
 
 describe("Адресное пакетное разрешение Storage", () => {
   test("ID, ключи, алиасы, пропуски и повторы сохраняют исходные позиции без чтения содержания", () => {
@@ -68,20 +129,27 @@ describe("Краткая адресная SQL-проекция", () => {
     const fixture = new ProjectDatabaseFixture("read-summary");
     try {
       const db = fixture.create();
-      const document = {
-        ...createDocument(),
-        data: { name: "Документ", documentStatus: "active", body: "НЕ-ЗАГРУЖАТЬ-ТЕЛО" },
-      };
-      const task = {
-        ...createDocument("TASK-1"),
-        kind: "task" as const,
-        data: {
-          title: "Задача",
-          column: "review",
-          description: "НЕ-ЗАГРУЖАТЬ-ОПИСАНИЕ",
-          acceptanceCriteria: [{ title: "НЕ-ЗАГРУЖАТЬ-КРИТЕРИЙ" }],
-        },
-      };
+      const document = createDocument("DOC-1", {
+        name: "Документ",
+        documentStatus: "active",
+        body: "НЕ-ЗАГРУЖАТЬ-ТЕЛО",
+      });
+      const task = createTask(db, "TASK-1", {
+        title: "Задача",
+        column: "review",
+        description: "НЕ-ЗАГРУЖАТЬ-ОПИСАНИЕ",
+        acceptanceCriteria: [
+          {
+            id: "criterion",
+            title: "НЕ-ЗАГРУЖАТЬ-КРИТЕРИЙ",
+            summary: "",
+            description: "",
+            completed: false,
+            completedAt: null,
+            completedBy: null,
+          },
+        ],
+      });
       db.insert(document);
       db.insert(task);
       db.appendTaskComment(task.id, {
@@ -156,18 +224,32 @@ describe("Краткая адресная SQL-проекция", () => {
   });
 
   test.each(invalidFields)(
-    "$name сохраняется для предметной диагностики Core",
-    ({ data, expected }) => {
+    "$name отклоняется до записи без повреждения кратких чтений",
+    ({ data }) => {
       const fixture = new ProjectDatabaseFixture("read-summary-invalid");
       try {
         const db = fixture.create();
-        const document = { ...createDocument(), data };
+        const document = createDocument();
         db.insert(document);
+        const generation = db.getGeneration();
 
-        const result = db.getManySummaries([document.id]);
+        expectRelayError(
+          () => db.update({ ...document, revision: 2, data: { ...document.data, ...data } }, 1),
+          "CORRUPT_DATA",
+        );
 
-        expect(result).toEqual([
-          { id: document.id, kind: "document", key: document.key, revision: 1, ...expected },
+        expect(db.get(document.id)).toEqual(document);
+        expect(db.getGeneration()).toBe(generation);
+        expect(db.getManySummaries([document.id])).toEqual([
+          {
+            id: document.id,
+            kind: "document",
+            key: document.key,
+            revision: 1,
+            title: "Документ",
+            state: "draft",
+            active: undefined,
+          },
         ]);
       } finally {
         fixture.close();
@@ -175,26 +257,40 @@ describe("Краткая адресная SQL-проекция", () => {
     },
   );
 
-  test("SQL-проекция различает boolean активности и повреждённое число", () => {
+  test("SQL-проекция сохраняет false активности, а числовая подмена отклоняется до записи", () => {
     const fixture = new ProjectDatabaseFixture("read-summary-active");
     try {
       const db = fixture.create();
-      const first = {
-        ...createDocument("IMPL-1"),
-        kind: "implementation" as const,
-        data: { title: "Снятая", status: "partial", active: false },
-      };
-      const second = {
-        ...createDocument("IMPL-2"),
-        kind: "implementation" as const,
-        data: { title: "Повреждённая", status: "none", active: 0 },
-      };
-      db.insert(first);
-      db.insert(second);
+      const implementation = createInactiveImplementation(db);
+      const generation = db.getGeneration();
 
-      const result = db.getManySummaries([first.id, second.id]);
+      const result = db.getManySummaries([implementation.id]);
+      expectRelayError(
+        () =>
+          db.update(
+            {
+              ...implementation,
+              revision: 2,
+              data: { ...implementation.data, active: 0 },
+            },
+            1,
+          ),
+        "CORRUPT_DATA",
+      );
 
-      expect(result.map((record) => record?.active)).toEqual([false, 0]);
+      expect(result).toEqual([
+        {
+          id: implementation.id,
+          key: implementation.key,
+          kind: "implementation",
+          revision: 1,
+          title: "Снятая",
+          state: "partial",
+          active: false,
+        },
+      ]);
+      expect(db.get(implementation.id)).toEqual(implementation);
+      expect(db.getGeneration()).toBe(generation);
     } finally {
       fixture.close();
     }

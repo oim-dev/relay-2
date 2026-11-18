@@ -1,4 +1,18 @@
-import type { ReplicationDocumentTextPatch } from "@relay/contracts";
+import type {
+  ReplicationDecision,
+  ReplicationDocumentTextPatch,
+  ReplicationKeyDecision,
+} from "@relay/contracts";
+
+/**
+ * Внутренний выбор effective-эффектов, включая отдельный ключевой ввод Core.
+ */
+export type ReplicationEffectiveDecision =
+  | ReplicationDecision
+  | (ReplicationKeyDecision & {
+      /* Отдельный переносимый вариант назначения ключей. */
+      readonly choice: "keys";
+    });
 
 /**
  * Проверенная текстовая поправка одного owner на одной boundary; не является универсальной мутацией.

@@ -9,8 +9,8 @@ const validTitles = [
   { name: "пробельный", input: { title: " \t  " }, expected: " \t  " },
 ] as const;
 const corruptedTitles = [
-  { name: "null", value: null },
-  { name: "число", value: 17 },
+  { name: "LF", value: "До\nпосле" },
+  { name: "CRLF", value: "До\r\nпосле" },
   { name: "1025 символов", value: "З".repeat(1025) },
   { name: "NUL", value: "До\0после" },
   { name: "U+2028", value: "До\u2028после" },
@@ -66,7 +66,7 @@ describe("Заголовок задачи в групповом чтении", (
     async ({ value }) => {
       await withEntityDatabase(async (db) => {
         const task = await new TasksService(db).create({}, "tester");
-        // Storage намеренно обходит предметный ввод: null и число не означают безымянную задачу.
+        // Строковая форма допустима для SQLite, предметные ограничения заголовка нарушены.
         const corrupted = {
           ...task,
           revision: task.revision + 1,

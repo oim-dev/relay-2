@@ -152,38 +152,32 @@ describe("Согласованность WAL-снимков", () => {
 
   test("snapshot удерживает список и поколение после commit конкурентного писателя", () => {
     const reader = fixture.create();
+    const writer = fixture.open();
     const entity = createDocument();
     reader.insert(entity);
     const generation = reader.getGeneration();
-    fixture.withRaw((writer) => {
-      writer.exec("BEGIN IMMEDIATE");
-      writer
-        .query(
-          "UPDATE entities SET revision = revision + 1, data = json_set(data, '$.title', ?) WHERE id = ?",
-        )
-        .run("Новый заголовок", entity.id);
+    const updated = { ...entity, revision: 2, data: { ...entity.data, name: "Новый заголовок" } };
 
-      const previous = reader.snapshot(() => {
-        const list = reader.list("document");
-        expect(list).toEqual([entity]);
-        expect(reader.get(entity.id)).toEqual(entity);
-        writer.exec("COMMIT");
-        // После commit писателя поколение читателя всё ещё должно соответствовать прочитанному списку.
-        expect(reader.getGeneration()).toBe(generation);
-        expect(reader.snapshot(() => reader.list("document"))).toEqual(list);
-        return { list, generation: reader.getGeneration() };
-      });
+    const previous = reader.snapshot(() => {
+      const list = reader.list("document");
+      expect(list).toEqual([entity]);
+      expect(reader.get(entity.id)).toEqual(entity);
+      writer.update(updated, entity.revision);
+      // После commit писателя поколение читателя всё ещё должно соответствовать прочитанному списку.
+      expect(reader.getGeneration()).toBe(generation);
+      expect(reader.snapshot(() => reader.list("document"))).toEqual(list);
+      return { list, generation: reader.getGeneration() };
+    });
 
-      expect(previous).toEqual({ list: [entity], generation });
-      expect(
-        reader.snapshot(() => ({
-          list: reader.list("document"),
-          generation: reader.getGeneration(),
-        })),
-      ).toEqual({
-        list: [{ ...entity, revision: 2, data: { ...entity.data, title: "Новый заголовок" } }],
-        generation: generation + 1,
-      });
+    expect(previous).toEqual({ list: [entity], generation });
+    expect(
+      reader.snapshot(() => ({
+        list: reader.list("document"),
+        generation: reader.getGeneration(),
+      })),
+    ).toEqual({
+      list: [updated],
+      generation: generation + 1,
     });
   });
 
@@ -196,7 +190,10 @@ describe("Согласованность WAL-снимков", () => {
 
     reader.snapshot(() => {
       expect(reader.list("document")).toEqual([initial]);
-      writer.update({ ...initial, revision: 2, data: { title: "Конкурентная запись" } }, 1);
+      writer.update(
+        { ...initial, revision: 2, data: { ...initial.data, name: "Конкурентная запись" } },
+        1,
+      );
       expectRelayError(
         () => reader.transaction(() => reader.insert(createDocument("DOC-2"))),
         "STORAGE_BUSY",

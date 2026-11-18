@@ -396,7 +396,7 @@ describe("Async planning через точный guarded commit", () => {
         {
           ...unrelated,
           revision: unrelated.revision + 1,
-          data: { ...unrelated.data, status: "broken-unrelated" },
+          data: { ...unrelated.data, title: "" },
         },
         unrelated.revision,
       );
@@ -419,24 +419,29 @@ describe("Async planning через точный guarded commit", () => {
       } finally {
         loads.mockRestore();
       }
-      // Повреждённый статус именно относящегося к задаче owner обязан попасть в decoder.
+      // Пустой обязательный title технически представим; именно выбранный owner должен попасть в decoder.
       db.update(
         {
           ...included,
           revision: included.revision + 1,
-          data: { ...included.data, status: "broken-relevant" },
+          data: { ...included.data, title: "" },
         },
         included.revision,
       );
       const target = await emptyPlan(service, "Новый получатель");
       const generation = db.getGeneration();
+      const before = db.get(included.id);
+      const outbox = db.getReplicationOutbox();
 
-      await expectAsyncRelayError(
+      const error = await expectAsyncRelayError(
         () => service.stageTask(target.id, stageId(target), task.id, false, write(target, actor)),
         "CORRUPT_DATA",
       );
+      expect(error.details).toMatchObject({ id: included.id });
       expect(service.get("work-plan", target.id)).toEqual(target);
+      expect(db.get(included.id)).toEqual(before);
       expect(db.getGeneration()).toBe(generation);
+      expect(db.getReplicationOutbox()).toEqual(outbox);
     });
   });
 });

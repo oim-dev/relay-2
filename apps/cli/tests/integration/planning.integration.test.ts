@@ -4,29 +4,16 @@ import { withCliFixture } from "./helpers/cli-fixture";
 import { arrayValue, entityValue, objectValue, stringValue } from "./helpers/responses";
 import type { StagedPlanFixture, StageView } from "./helpers/planning-fixture.types";
 
-const corruptedStages = [
+const corruptedPlanReads = [
   {
-    name: "список stages",
-    field: "stages",
-    stages: null,
+    name: "список этапов",
     command: ["plan", "stage", "list"],
-    tail: [],
+    includeStage: false,
   },
   {
-    name: "состав taskIds",
-    field: "stage.taskIds",
-    stages: [
-      {
-        id: "stage",
-        title: "Этап",
-        summary: "",
-        outcome: "",
-        completionConditions: "",
-        taskIds: null,
-      },
-    ],
+    name: "список задач этапа",
     command: ["plan", "stage", "task", "list"],
-    tail: ["stage"],
+    includeStage: true,
   },
 ] as const;
 
@@ -94,31 +81,32 @@ describe("Планы и релизы через CLI", () => {
     });
   });
 
-  test.each(corruptedStages)(
-    "повреждённый $name возвращает CORRUPT_DATA без изменения плана и поколения",
-    async ({ field, stages, command, tail }) => {
+  test.each(corruptedPlanReads)(
+    "$name плана с пустым названием возвращает CORRUPT_DATA без изменения плана и поколения",
+    async ({ command, includeStage }) => {
       await withCliFixture(async (cli) => {
         const project = cli.createProject();
-        const { plan, generation } = await cli.withDatabase(project, async (db) => {
-          const plan = await new PlanningService(db).create(
-            "work-plan",
-            { title: "Повреждённый" },
-            "agent",
-          );
-          // Намеренно нарушаем форму вложенных данных в обход проверок Core.
-          const damaged = { ...plan, revision: plan.revision + 1, data: { ...plan.data, stages } };
+        const { plan, stage, generation } = await cli.withDatabase(project, async (db) => {
+          const { plan, stage } = await createStagedPlan(db);
+          // TEXT сохраняет пробелы; обязательность названия проверяет Core при чтении владельца.
+          const damaged = {
+            ...plan,
+            revision: plan.revision + 1,
+            data: { ...plan.data, title: "   " },
+          };
           db.update(damaged, plan.revision);
-          return { plan: damaged, generation: db.getGeneration() };
+          return { plan: damaged, stage, generation: db.getGeneration() };
         });
+        const refs = includeStage ? [plan.key, stage.id] : [plan.key];
 
-        const error = await cli.error([...command, plan.key, ...tail], 1);
+        const error = await cli.error([...command, ...refs], 1);
 
         expect(error.code).toBe("CORRUPT_DATA");
-        expect(error.message).toContain(field);
+        expect(error.message).toContain("title");
         expect(error.details).toMatchObject({ id: plan.id });
         expect(cli.withDatabase(project, (db) => db.getGeneration())).toBe(generation);
         expect(cli.withDatabase(project, (db) => db.get(plan.id))).toEqual(plan);
-      });
+      }, "database-redesign");
     },
   );
 

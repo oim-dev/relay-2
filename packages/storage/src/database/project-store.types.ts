@@ -30,6 +30,7 @@ import type {
   StoredReplicationDecision,
   ReplicationGuard,
   ReplicationImportPlan,
+  ReplicationKeyAddresses,
 } from "../replication/replication.types";
 
 /**
@@ -187,6 +188,12 @@ export interface ProjectStore {
  */
 export interface ReplicationStore extends ProjectStore {
   /**
+   * Проверяет захваченные изменения, ещё не перенесённые outer commit в durable outbox.
+   * Не читает payload и не выполняет flush; readonly/no-op без предметных эффектов возвращает false.
+   * Проверка и последующая работа используют общий snapshot/transaction вызывающего.
+   */
+  hasUnflushedReplicationChanges(): boolean;
+  /**
    * Читает первичные scoped parts, включая tombstones, для выбранных owners либо полного снимка.
    */
   getComponents(ownerIds?: readonly string[]): PortableComponent[];
@@ -195,11 +202,17 @@ export interface ReplicationStore extends ProjectStore {
    */
   getReplicationGuard(): ReplicationGuard;
   /**
+   * Читает локальные и observed ID/ключи/aliases одним снимком без карточек и outbox payload.
+   */
+  getReplicationKeyAddresses(): ReplicationKeyAddresses;
+  /**
    * Читает технический status ограниченными SQL-проекциями без payload очереди.
    */
   getReplicationStatus(): ReplicationStatus;
   /**
    * Читает точное сохранённое состояние без effective-проекций.
+   * publication доказывает текущие строки либо равна null после их изменения;
+   * последний accepted checkpoint остаётся отдельно в getReplicationState().base.
    */
   captureReplication(): PortableProjectSnapshot;
   /**
@@ -231,11 +244,19 @@ export interface ReplicationStore extends ProjectStore {
    */
   getReplicationDecisions(ids?: readonly string[]): StoredReplicationDecision[];
   /**
+   * Читает последнее сохранённое решение changeset, включая уже подтверждённый и удалённый из outbox.
+   * Отсутствие решения возвращает undefined; поиск индексирован по постоянному changeset ID.
+   */
+  getReplicationDecision(changesetId: string): StoredReplicationDecision | undefined;
+  /**
    * Атомарно сохраняет техническое состояние без echo-outbox.
+   * Current proof назначает только Core после проверки полного соответствия текущим строкам.
    */
   updateReplicationState(update: ReplicationStateUpdate): void;
   /**
    * Применяет уже проверенный полный снимок строками, сохраняя локальные CAS и журналы.
+   * Изменения снимают current proof и повышают transport revision; no-op сохраняет их.
+   * Publication входного снимка автоматически не назначается: это отдельная гарантия Core accept.
    */
   importReplication(snapshot: PortableProjectSnapshot, plan?: ReplicationImportPlan): void;
   /**

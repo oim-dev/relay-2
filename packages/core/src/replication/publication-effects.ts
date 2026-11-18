@@ -4,7 +4,7 @@ import {
   type PortableProjectSnapshot,
   type PublicationChange,
   type ReplicationChangeset,
-  type ReplicationResolution,
+  type PortableReplicationResolution,
   type ReplicationTransition,
 } from "@relay/contracts";
 import {
@@ -18,6 +18,8 @@ import { effectivePredicates } from "./publication-predicates";
 import { replicationMessages } from "./replication.messages";
 import { assertPublicationSource } from "./publication-source";
 import { logicalRecord } from "./snapshot-records";
+import { validateKeyAssignments } from "./key-resolution";
+import { applyKeyResolutionToTransition, createKeyTransitionContext } from "./key-transitions";
 import {
   resolutionDecision,
   resolutionOverrides,
@@ -108,7 +110,7 @@ function legacyTransition(change: ReplicationChangeset): ReplicationTransition {
 export function applyPublicationChange(
   previous: PortableProjectSnapshot,
   source: ReplicationChangeset,
-  resolution: ReplicationResolution | null,
+  resolution: PortableReplicationResolution | null,
 ): { readonly snapshot: PortableProjectSnapshot; readonly change: PublicationChange } {
   assertPublicationSource(source, previous);
   const { digest, ...payload } = source;
@@ -132,6 +134,17 @@ export function applyPublicationChange(
   if (resolution !== null) {
     validateResolutionScope(source, resolutionDecision(resolution));
   }
+  const keyContext =
+    resolution?.choice === "keys"
+      ? createKeyTransitionContext(
+          validateKeyAssignments(
+            source,
+            { fingerprint: resolution.fingerprint, assignments: resolution.assignments },
+            previous,
+            previous,
+          ),
+        )
+      : null;
   if (
     source.mode === "mutation" &&
     resolution === null &&
@@ -161,11 +174,13 @@ export function applyPublicationChange(
     snapshot = next;
   } else {
     for (const [index, step] of steps.entries()) {
+      const effective =
+        keyContext === null ? step : applyKeyResolutionToTransition(step, snapshot, keyContext);
       const next = applyChangeset(
         snapshot,
-        { ...source, ...step },
+        { ...source, ...effective },
         resolution?.choice === "local" ? "local" : undefined,
-        step,
+        effective,
         resolutionOverrides(resolution, index),
       );
       transitions.push(effectiveTransition(snapshot, next, step));

@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import type { EntityKind, EntityRecord, WriteOptions } from "@relay/contracts";
-import { ProjectDatabase } from "@relay/storage";
+import { ProjectDatabase, versionComponent } from "@relay/storage";
 import { HistoryService } from "../../src/history/history";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { PlanningService } from "../../src/planning/planning";
@@ -42,6 +43,21 @@ const sectionStates = [
  */
 function write(entity: EntityRecord): WriteOptions {
   return entityWriteOptions(entity, actor);
+}
+
+/**
+ * Повреждает только изолированный файл fixture через физические SQL-таблицы.
+ * FK/CHECK отключены на отдельном соединении, которое закрывается при любом исходе.
+ * Вызвавший тест задаёт повреждение и сохраняет корректные версии нетронутых частей.
+ */
+function corruptQueryDatabase(db: ProjectDatabase, operation: (raw: Database) => void): void {
+  const raw = new Database(db.path, { create: false, readwrite: true });
+  try {
+    raw.exec("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;");
+    raw.transaction(() => operation(raw))();
+  } finally {
+    raw.close();
+  }
 }
 
 describe("Предметные тексты поиска", () => {
@@ -370,23 +386,28 @@ describe("Диагностика целостности проекта", () => {
 
   test("сочетание пропавшей цели, неверного вида и цикла возвращает все нарушения без записи", async () => {
     await withEntityDatabase(async (db) => {
+      const missingTarget = await new KnowledgeService(db).create(
+        "feature",
+        { name: "Утраченная цель" },
+        actor,
+      );
       const tasks = new TasksService(db);
-      const first = await tasks.create({ title: "Первая" }, actor);
+      const first = await tasks.create({ title: "Первая", targets: [missingTarget.id] }, actor);
       const second = await tasks.create({ title: "Вторая", dependencies: [first.id] }, actor);
-      // Намеренно повреждаем несколько связей через Storage: doctor должен собрать их вместе.
+      // Storage допускает предметный цикл и сохраняет валидные версии частей.
       db.update(
         {
           ...first,
           revision: first.revision + 1,
-          data: {
-            ...first.data,
-            boardId: second.id,
-            dependencies: [second.id],
-            targets: ["missing-id"],
-          },
+          data: { ...first.data, dependencies: [second.id] },
         },
         first.revision,
       );
+      // Два нарушения FK внедряются в файл без порчи формы и hash отношений.
+      corruptQueryDatabase(db, (raw) => {
+        raw.query("UPDATE tasks SET board_id=? WHERE id=?").run(second.id, first.id);
+        raw.query("DELETE FROM features WHERE id=?").run(missingTarget.id);
+      });
       const snapshot = db.list();
       const generation = db.getGeneration();
       const queries = new QueryService(db);
@@ -397,7 +418,7 @@ describe("Диагностика целостности проекта", () => {
       expect(error.details).toMatchObject({
         valid: false,
         issues: expect.arrayContaining([
-          expect.stringContaining("missing-id"),
+          expect.stringContaining(missingTarget.id),
           expect.stringContaining("тип ссылки"),
           expect.stringContaining("TASK_CYCLE"),
         ]),
@@ -408,7 +429,7 @@ describe("Диагностика целостности проекта", () => {
   });
 
   test.each(corruptedReads)(
-    "$operation отклоняет повреждённые отношения без изменения документа",
+    "$operation отклоняет сохранённую самоссылку без изменения документа",
     async ({ operation, code }) => {
       await withEntityDatabase(async (db) => {
         const document = await new KnowledgeService(db).create(
@@ -416,13 +437,36 @@ describe("Диагностика целостности проекта", () => {
           { name: "Документ", body: "Содержание" },
           actor,
         );
-        // Намеренное повреждение вне предметного API: null не означает отсутствие связей.
+        const relation = {
+          target: { kind: "document", id: document.id },
+          type: "references",
+          description: "Самоссылка",
+        } as const;
+        const component = versionComponent({
+          ownerId: document.id,
+          kind: "document-relation",
+          id: crypto.randomUUID(),
+          position: "V",
+          parents: [],
+          deleted: false,
+          value: relation,
+        });
+        // Первичного массива relations больше нет: повреждаем реальную связь.
+        // Версия корректна, чтобы отказ пришёл от предметного декодера, а не hash-проверки.
+        corruptQueryDatabase(db, (raw) => {
+          raw
+            .query(
+              `INSERT INTO document_relations
+               (owner_id,id,position,version,parents_json,deleted,
+                target_id,target_kind,relation_type,description,description_json)
+               VALUES (?,?,'V',?,'[]',0,?,'document','references',?,NULL)`,
+            )
+            .run(document.id, component.id, component.version, document.id, relation.description);
+        });
         const corruptedRecord = {
           ...document,
-          revision: document.revision + 1,
-          data: { ...document.data, relations: null },
+          data: { ...document.data, relations: [relation] },
         };
-        db.update(corruptedRecord, document.revision);
         const generation = db.getGeneration();
         const queries = new QueryService(db);
 
@@ -441,6 +485,13 @@ describe("Диагностика целостности проекта", () => {
 
         if (operation === "check") {
           expect(error.message).toContain(document.key);
+          expect(error.message).toContain("relations[].target");
+        } else {
+          expect(error.details).toEqual({
+            id: document.id,
+            kind: "document",
+            field: "relations[].target",
+          });
         }
         expect(db.get(document.id)).toEqual(corruptedRecord);
         expect(db.getGeneration()).toBe(generation);
@@ -524,10 +575,11 @@ describe("Диагностика целостности проекта", () => {
       // Этот ID никогда не был зарегистрирован, в отличие от раздела первого документа.
       const corruptedRecord = {
         ...second,
-        revision: second.revision + 1,
         data: { ...second.data, sectionId: "never-existed" },
       };
-      db.update(corruptedRecord, second.revision);
+      corruptQueryDatabase(db, (raw) => {
+        raw.query("UPDATE documents SET section_id=? WHERE id=?").run("never-existed", second.id);
+      });
       const generation = db.getGeneration();
       const queries = new QueryService(db);
 
@@ -547,15 +599,10 @@ describe("Диагностика целостности проекта", () => {
         { name: "Документ", body: "Текст" },
         actor,
       );
-      // Намеренное повреждение ссылки на раздел через Storage.
-      db.update(
-        {
-          ...document,
-          revision: document.revision + 1,
-          data: { ...document.data, sectionId: "never-existed" },
-        },
-        document.revision,
-      );
+      // Прямое повреждение FK не превращает неизвестный ID в легально снятый раздел.
+      corruptQueryDatabase(db, (raw) => {
+        raw.query("UPDATE documents SET section_id=? WHERE id=?").run("never-existed", document.id);
+      });
       const queries = new QueryService(db);
 
       expectRelayError(() => queries.get(document.id), "CORRUPT_DATA");
@@ -595,18 +642,52 @@ describe("Диагностика целостности проекта", () => {
     });
   });
 
-  test("второй паспорт продукта отклоняется doctor без изменения записей", () => {
+  test("второй паспорт продукта отклоняется до записи, doctor подтверждает исходный состав", () => {
     withEntityDatabase((db) => {
       const product = new KnowledgeService(db).get("product");
-      // Намеренно нарушаем уникальность singleton через Storage, недоступную в KnowledgeService.
-      db.insert({ ...product, id: crypto.randomUUID(), key: "PRODUCT-EXTRA" });
+      const duplicateId = crypto.randomUUID();
+      const snapshot = db.list();
+      const generation = db.getGeneration();
+      const queries = new QueryService(db);
+
+      // Уникальность singleton теперь физическая: вторую карточку нельзя сохранить через Storage.
+      expectRelayError(
+        () => db.insert({ ...product, id: duplicateId, key: "PRODUCT-EXTRA" }),
+        "CONFLICT",
+      );
+
+      expect(queries.check()).toEqual({
+        projectId: db.projectId,
+        generation,
+        valid: true,
+        records: 3,
+        issues: [],
+      });
+      expect(db.get(duplicateId)).toBeUndefined();
+      expect(db.get("PRODUCT-EXTRA")).toBeUndefined();
+      expect(db.list()).toEqual(snapshot);
+      expect(db.getGeneration()).toBe(generation);
+    });
+  });
+
+  test("утрата паспорта продукта обнаруживается doctor без восстановления или изменения записей", () => {
+    withEntityDatabase((db) => {
+      const product = new KnowledgeService(db).get("product");
+      // Уникальный индекс защищает от второго паспорта, но повреждённый файл может утратить первый.
+      corruptQueryDatabase(db, (raw) => {
+        raw.query("DELETE FROM products WHERE id=?").run(product.id);
+      });
       const snapshot = db.list();
       const generation = db.getGeneration();
       const queries = new QueryService(db);
 
       const error = expectRelayError(() => queries.check(), "INTEGRITY_ERROR");
 
-      expect(error.message).toContain("единственный паспорт");
+      expect(error.details).toEqual({
+        valid: false,
+        records: 2,
+        issues: [expect.stringContaining("единственный паспорт")],
+      });
       expect(db.list()).toEqual(snapshot);
       expect(db.getGeneration()).toBe(generation);
     });

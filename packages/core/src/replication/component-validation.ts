@@ -3,19 +3,16 @@ import {
   componentIdentity,
   componentFields,
   componentCollection,
-  isComponentValue,
-  isComponentPosition,
+  assertPortableComponentShape,
   isPortableIdentityText,
-  isPortableVersionParents,
   type PortableComponent,
   type PortableProjectSnapshot,
 } from "@relay/contracts";
 import { replicationFingerprint } from "@relay/storage";
-import { mergeObject } from "./record-merge";
 import { replicationMessages } from "./replication.messages";
 
 /**
- * Проверяет форму, уникальность scoped IDs и содержательные версии всех первичных частей.
+ * После общего shape decoder проверяет уникальность scoped IDs и содержательные версии частей.
  */
 export function assertComponents(value: unknown): asserts value is readonly PortableComponent[] {
   if (!Array.isArray(value)) {
@@ -24,46 +21,11 @@ export function assertComponents(value: unknown): asserts value is readonly Port
     });
   }
   const seen = new Set<string>();
-  for (const entry of value) {
-    if (
-      !mergeObject(entry) ||
-      typeof entry.ownerId !== "string" ||
-      !entry.ownerId ||
-      typeof entry.id !== "string" ||
-      !entry.id ||
-      typeof entry.kind !== "string" ||
-      typeof entry.position !== "string" ||
-      !isComponentPosition(entry.position) ||
-      typeof entry.deleted !== "boolean" ||
-      !isPortableVersionParents(entry.parents) ||
-      typeof entry.version !== "string"
-    ) {
+  for (const component of value) {
+    assertPortableComponentShape(component);
+    if (!component.ownerId || !component.id) {
       throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
         path: "component",
-      });
-    }
-    if (
-      Object.keys(entry).some(
-        (field) =>
-          !["id", "kind", "ownerId", "position", "version", "parents", "deleted", "value"].includes(
-            field,
-          ),
-      )
-    ) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "component.fields",
-      });
-    }
-    // isComponentValue возвращает false для неизвестного kind; остальные поля проверены выше.
-    const component = entry as unknown as PortableComponent;
-    if (!isPortableIdentityText(component.id) || !isPortableIdentityText(component.ownerId)) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "component.identity.utf16",
-      });
-    }
-    if (!isComponentValue(component.kind, component.value)) {
-      throw new RelayError("REPLICATION_FORMAT", replicationMessages.format, 2, {
-        path: "component.value",
       });
     }
     if (

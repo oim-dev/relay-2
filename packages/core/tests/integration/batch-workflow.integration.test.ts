@@ -92,7 +92,7 @@ describe("Связанные предметные пакеты", () => {
         const document = result.entities.find((record) => record.kind === "document");
         expect(scenario?.data.featureId).toBe(feature?.id);
         expect(application).toMatchObject({
-          revision: 5,
+          revision: 4,
           data: {
             name: "Сервис бронирования",
             boardId: board?.id,
@@ -122,9 +122,9 @@ describe("Связанные предметные пакеты", () => {
         expect(result.items[3]).toMatchObject({
           id: fi?.id,
           revision: 1,
-          owner: { id: application?.id, revision: 3 },
+          owner: { id: application?.id, revision: 2 },
         });
-        expect(result.items[4]?.owner.revision).toBe(4);
+        expect(result.items[4]?.owner.revision).toBe(3);
         expect(JSON.stringify(result.items)).not.toContain("Договорённости");
         expect(input).toEqual(before);
         const selectors = loads.mock.calls.flatMap(([request]) => request.selectors);

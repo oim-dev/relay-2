@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { HistoryService } from "../../src/history/history";
 import { PlanningService } from "../../src/planning/planning";
 import { TasksService } from "../../src/tasks/tasks";
 import type { HistoryCheckpoint } from "@relay/contracts";
-import type { ProjectStore } from "@relay/storage";
+import type { ProjectDatabase, ProjectStore } from "@relay/storage";
 import { readRelationNeighborhood } from "../../src/queries/relation-neighborhood";
 import { withGraphViewFixture } from "./graph-view-fixture";
 
@@ -27,6 +28,20 @@ async function createReferencedCheckpoint(
     { runId, title: "Материал", body: "Исходная ссылка", references: [target] },
     { actor: "Автор", ifRevision: session.revision },
   );
+}
+
+/**
+ * Воспроизводит утрату физической карточки цели только в изолированном файле fixture.
+ * Отношения и их версии остаются исходными; отдельное соединение без FK всегда закрывается.
+ */
+function removeFeatureRow(db: ProjectDatabase, featureId: string): void {
+  const raw = new Database(db.path, { create: false, readwrite: true });
+  try {
+    raw.exec("PRAGMA foreign_keys=OFF");
+    raw.query("DELETE FROM features WHERE id=?").run(featureId);
+  } finally {
+    raw.close();
+  }
 }
 
 describe("Компактное соседство Core", () => {
@@ -150,61 +165,43 @@ describe("Компактное соседство Core", () => {
       const knowledge = new KnowledgeService(db);
       const feature = await knowledge.create("feature", { name: "Цель" }, "Автор");
       const checkpoint = await createReferencedCheckpoint(db, feature.id);
-      const id = crypto.randomUUID();
-      // Намеренно повреждённый снимок ссылки: подпись есть, но постоянной цели нет.
-      db.insert({
-        ...checkpoint,
-        id,
-        key: `CP-${id}`,
-        data: {
-          ...checkpoint.data,
-          references: [
-            {
-              id: crypto.randomUUID(),
-              kind: "feature",
-              key: "missing",
-              title: "Подпись не заменяет цель",
-            },
-          ],
-        },
-      });
+      // Историческая подпись остаётся валидной, но физической карточки цели больше нет.
+      removeFeatureRow(db, feature.id);
+      const generation = db.getGeneration();
 
       let failure: unknown;
       try {
-        readRelationNeighborhood(db, { ref: id });
+        readRelationNeighborhood(db, { ref: checkpoint.id });
       } catch (error) {
         failure = error;
       }
 
-      expect(failure).toMatchObject({ code: "CORRUPT_DATA", details: { id, field: "references" } });
+      expect(failure).toMatchObject({
+        code: "CORRUPT_DATA",
+        details: { id: checkpoint.id, field: "references" },
+      });
+      expect(db.get(checkpoint.id)).toEqual(checkpoint);
+      expect(db.get(feature.id)).toBeUndefined();
+      expect(db.getGeneration()).toBe(generation);
     });
   });
+
   test("повреждённая текущая цель не исчезает из успешного графа", async () => {
     await withGraphViewFixture(async (db) => {
       const knowledge = new KnowledgeService(db);
+      const feature = await knowledge.create("feature", { name: "Цель" }, "Автор");
       const document = await knowledge.create(
         "document",
         { name: "Документ", body: "Текст" },
         "Автор",
       );
-      // Storage обходит предметную проверку цели только для воспроизведения повреждения.
-      db.update(
-        {
-          ...document,
-          revision: document.revision + 1,
-          data: {
-            ...document.data,
-            relations: [
-              {
-                target: { kind: "feature", id: crypto.randomUUID() },
-                type: "documents",
-                description: "",
-              },
-            ],
-          },
-        },
-        document.revision,
-      );
+      const linked = await knowledge.linkDocument(document.id, feature.id, {
+        type: "documents",
+        actor: "Автор",
+        ifRevision: document.revision,
+      });
+      // У связи сохраняются технически корректные поля и версия: повреждена именно цель.
+      removeFeatureRow(db, feature.id);
       const generation = db.getGeneration();
 
       let failure: unknown;
@@ -218,9 +215,12 @@ describe("Компактное соседство Core", () => {
         code: "CORRUPT_DATA",
         details: { id: document.id, field: "documents" },
       });
+      expect(db.get(document.id)).toEqual(linked);
+      expect(db.get(feature.id)).toBeUndefined();
       expect(db.getGeneration()).toBe(generation);
     });
   });
+
   test("сохранённые отношения, границы глубины и owner CAS не требуют тел документов", async () => {
     await withGraphViewFixture(async (db) => {
       const knowledge = new KnowledgeService(db);

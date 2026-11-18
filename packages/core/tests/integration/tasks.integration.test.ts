@@ -62,78 +62,6 @@ const taskPageCases = [
   },
 ] as const;
 
-const corruptedDependencyOperations = [
-  {
-    name: "чтение карточки",
-    /**
-     * Читает полное содержание повреждённой задачи.
-     */
-    run: (record: EntityRecord): unknown => tasks.get(record.id),
-  },
-  {
-    name: "чтение зависимостей",
-    /**
-     * Читает состав обязательств повреждённой задачи.
-     */
-    run: (record: EntityRecord): unknown => tasks.dependencies(record.id),
-  },
-  {
-    name: "изменение заголовка",
-    /**
-     * Пытается изменить содержание по исходной ревизии повреждённой записи.
-     */
-    run: (record: EntityRecord): unknown =>
-      tasks.update(record.id, { title: "Не сохранять" }, options(record)),
-  },
-  {
-    name: "перенос колонки",
-    /**
-     * Пытается перенести повреждённую задачу в ready.
-     */
-    run: (record: EntityRecord): unknown =>
-      tasks.move(record.id, { column: "ready" }, options(record)),
-  },
-  {
-    name: "установка родителя",
-    /**
-     * Пытается назначить существующего родителя повреждённой задаче.
-     */
-    run: (record: EntityRecord, target: TaskRecord): unknown =>
-      tasks.setParent(record.id, target.id, options(record)),
-  },
-  {
-    name: "добавление зависимости",
-    /**
-     * Пытается добавить существующее обязательство к повреждённой задаче.
-     */
-    run: (record: EntityRecord, target: TaskRecord): unknown =>
-      tasks.dependency(record.id, target.id, false, options(record)),
-  },
-  {
-    name: "добавление связи",
-    /**
-     * Пытается добавить информационную связь повреждённой задачи.
-     */
-    run: (record: EntityRecord, target: TaskRecord): unknown =>
-      tasks.related(record.id, target.id, false, options(record)),
-  },
-  {
-    name: "добавление критерия",
-    /**
-     * Пытается добавить критерий повреждённой задачи.
-     */
-    run: (record: EntityRecord): unknown =>
-      tasks.criterion(record.id, "add", { title: "Не сохранять" }, options(record)),
-  },
-  {
-    name: "публикация комментария",
-    /**
-     * Пытается дополнить независимый журнал повреждённой задачи.
-     */
-    run: (record: EntityRecord): unknown => tasks.comment(record.id, "Не публиковать", "автор"),
-  },
-] as const;
-
 const doneCriterionActions = [
   { name: "изменение", action: "update" },
   { name: "повторная отметка", action: "complete" },
@@ -165,23 +93,6 @@ const staleTaskOperations = [
      */
     run: (initial: TaskRecord): unknown =>
       tasks.move(initial.id, { column: "inbox" }, options(initial)),
-  },
-] as const;
-
-const brokenTaskReferenceReads = [
-  {
-    name: "расчёт прогресса",
-    /**
-     * Запрашивает обязательства задачи с отсутствующей зависимостью.
-     */
-    run: (record: TaskRecord): unknown => tasks.progress(record.id),
-  },
-  {
-    name: "отбор готовых задач",
-    /**
-     * Запрашивает готовность в графе с отсутствующей зависимостью.
-     */
-    run: (_record: TaskRecord): unknown => tasks.list({ readiness: "ready" }),
   },
 ] as const;
 
@@ -384,70 +295,81 @@ describe("Адреса и чтение задач в SQLite", () => {
     expect(tasks.get(original.id)).toEqual(current);
   });
 
-  test("неоднозначный виртуальный адрес доски отклоняет создание задачи без записи", async () => {
+  test("повторный slug доски отклоняется до появления неоднозначного адреса", async () => {
     const first = await applicationBoard();
     const second = await applicationBoard("api");
-    // Намеренная порча адреса через Storage обходит штатную уникальность Knowledge.
-    db.update(
-      {
-        ...second.board,
-        revision: second.board.revision + 1,
-        data: { ...second.board.data, slug: first.board.data.slug },
-      },
-      second.board.revision,
-    );
     const generation = db.getGeneration();
+    const pending = db.getReplicationOutbox();
 
-    await errorCode(() => task("Не сохранять", { board: "board:web" }), "CORRUPT_DATA");
+    await errorCode(
+      () =>
+        db.update(
+          {
+            ...second.board,
+            revision: second.board.revision + 1,
+            data: { ...second.board.data, slug: first.board.data.slug },
+          },
+          second.board.revision,
+        ),
+      "CONFLICT",
+    );
 
     expect(tasks.list()).toEqual([]);
+    expect(knowledge.get("board", first.board.id)).toEqual(first.board);
+    expect(knowledge.get("board", second.board.id)).toEqual(second.board);
     expect(db.getGeneration()).toBe(generation);
+    expect(db.getReplicationOutbox()).toEqual(pending);
+    expect((await task("Однозначная доска", { board: "board:web" })).data.boardId).toBe(
+      first.board.id,
+    );
   });
 
-  test.each(corruptedDependencyOperations)(
-    "повреждённые зависимости: $name отклоняется без изменения состояния",
-    async ({ run }) => {
-      const original = await task("Повреждение");
-      const target = await task("Связанная задача");
-      // Намеренно обходим предметный сервис: воспроизводим повреждённый JSON в Storage.
-      db.update(
-        {
-          ...original,
-          revision: original.revision + 1,
-          data: { ...original.data, dependencies: null },
-        },
-        original.revision,
-      );
-      const damaged = db.get(original.id);
-      if (!damaged) {
-        throw new Error("Fixture повреждённой задачи не найден");
-      }
-      const generation = db.getGeneration();
+  test("null вместо зависимостей отклоняется до изменения задачи и её обязательств", async () => {
+    const target = await task("Связанная задача");
+    const original = await task("Владелец", { dependencies: [target.id] });
+    const generation = db.getGeneration();
+    const parts = db.getComponents([original.id]);
+    const pending = db.getReplicationOutbox();
 
-      await errorCode(() => run(damaged, target), "CORRUPT_DATA");
-
-      expect(db.get(original.id)).toEqual(damaged);
-      expect(db.getGeneration()).toBe(generation);
-      expect(tasks.get(target.id)).toEqual(target);
-    },
-  );
-
-  test("progressMany проверяет обязательства независимо от текстовых полей полной карточки", async () => {
-    const record = await task("Готовая задача", { column: "done" });
-    // Намеренное повреждение содержания: графу оно не нужно, полная карточка обязана отказать.
-    db.update(
-      { ...record, revision: record.revision + 1, data: { ...record.data, description: null } },
-      record.revision,
+    await errorCode(
+      () =>
+        db.update(
+          {
+            ...original,
+            revision: original.revision + 1,
+            data: { ...original.data, dependencies: null },
+          },
+          original.revision,
+        ),
+      "CORRUPT_DATA",
     );
 
-    const progress = tasks.progressMany([record.key]).get(record.id);
+    expect(tasks.get(original.id)).toEqual(original);
+    expect(db.getComponents([original.id])).toEqual(parts);
+    expect(db.getGeneration()).toBe(generation);
+    expect(db.getReplicationOutbox()).toEqual(pending);
+    expect(tasks.get(target.id)).toEqual(target);
+  });
 
-    expect(progress).toEqual({
-      completed: true,
-      canComplete: true,
-      blockers: [],
+  test("progressMany не декодирует тексты и журнал полной карточки", async () => {
+    const description = "ТЕКСТ-ВНЕ-ГРАФА";
+    const body = "ЖУРНАЛ-ВНЕ-ГРАФА";
+    const initial = await task("Готовая задача", { column: "done", description });
+    const record = await tasks.comment(initial.id, body, "автор");
+    const decode = spyOn(JSON, "parse");
+    try {
+      const progress = tasks.progressMany([record.key]).get(record.id);
+
+      expect(progress).toEqual({ completed: true, canComplete: true, blockers: [] });
+      expect(
+        decode.mock.calls.some(([json]) => json.includes(description) || json.includes(body)),
+      ).toBe(false);
+    } finally {
+      decode.mockRestore();
+    }
+    expect(tasks.get(record.id)).toMatchObject({
+      data: { description, comments: [{ body }] },
     });
-    await errorCode(() => tasks.get(record.id), "CORRUPT_DATA");
   });
 
   test.each(taskPageCases)(
@@ -466,20 +388,22 @@ describe("Адреса и чтение задач в SQLite", () => {
     },
   );
 
-  test("графовая проекция отличает отсутствующий parentId от допустимого null", async () => {
+  test("отсутствующий parentId отклоняется при записи, допустимый null сохраняет граф", async () => {
     const record = await task("Задача без родителя", { column: "done" });
     expect(tasks.progressMany([record.id]).get(record.id)?.completed).toBe(true);
     // Намеренно удаляем обязательное поле в Storage, а не снимаем родителя через Core.
     const data: Record<string, unknown> = { ...record.data };
     delete data.parentId;
     const damaged = { ...record, revision: record.revision + 1, data };
-    db.update(damaged, record.revision);
     const generation = db.getGeneration();
+    const pending = db.getReplicationOutbox();
 
-    await errorCode(() => tasks.progressMany([record.id]), "CORRUPT_DATA");
+    await errorCode(() => db.update(damaged, record.revision), "CORRUPT_DATA");
 
-    expect(db.get(record.id)).toEqual(damaged);
+    expect(tasks.get(record.id)).toEqual(record);
+    expect(tasks.progressMany([record.id]).get(record.id)?.completed).toBe(true);
     expect(db.getGeneration()).toBe(generation);
+    expect(db.getReplicationOutbox()).toEqual(pending);
   });
 
   test("вычисленная и SQL-страницы одинаково сортируют Unicode-заголовки", async () => {
@@ -820,7 +744,7 @@ describe("Критерии приёмки задач", () => {
   test("правка summary при повреждённом заголовке критерия отклоняется без записи", async () => {
     const record = await task("Приёмка", { acceptanceCriteria: [{ title: "Проверка" }] });
     const criterion = firstCriterion(record);
-    // Пустой заголовок нельзя создать через Core: моделируем повреждение сохранённого JSON.
+    // Пустой заголовок технически представим в SQL, но нарушает предметный контракт Core.
     const corrupted = {
       ...record,
       revision: record.revision + 1,
@@ -1742,26 +1666,34 @@ describe("Проверка внешнего ввода задач", () => {
     expect(db.getGeneration()).toBe(generation);
   });
 
-  test.each(brokenTaskReferenceReads)(
-    "отсутствующая зависимость: $name отклоняется без ложной готовности",
-    async ({ run }) => {
-      const record = await task("Повреждение");
-      // Storage намеренно сохраняет отсутствующее обязательство для проверки диагностики.
-      db.update(
-        {
-          ...record,
-          revision: record.revision + 1,
-          data: { ...record.data, dependencies: ["missing-task"] },
-        },
-        record.revision,
-      );
-      const corrupted = db.get(record.id);
-      const generation = db.getGeneration();
+  test("отсутствующая зависимость отклоняется до замены сохранённых обязательств", async () => {
+    const dependency = await task("Существующее обязательство");
+    const record = await task("Владелец", { dependencies: [dependency.id] });
+    const generation = db.getGeneration();
+    const parts = db.getComponents([record.id]);
+    const pending = db.getReplicationOutbox();
 
-      await errorCode(() => run(record), "BROKEN_REFERENCE");
+    await errorCode(
+      () =>
+        db.update(
+          {
+            ...record,
+            revision: record.revision + 1,
+            data: { ...record.data, dependencies: ["missing-task"] },
+          },
+          record.revision,
+        ),
+      "CONFLICT",
+    );
 
-      expect(db.get(record.id)).toEqual(corrupted);
-      expect(db.getGeneration()).toBe(generation);
-    },
-  );
+    expect(tasks.get(record.id)).toEqual(record);
+    expect(db.getComponents([record.id])).toEqual(parts);
+    expect(tasks.progress(record.id)).toEqual({
+      completed: false,
+      canComplete: false,
+      blockers: [dependency.id],
+    });
+    expect(db.getGeneration()).toBe(generation);
+    expect(db.getReplicationOutbox()).toEqual(pending);
+  });
 });

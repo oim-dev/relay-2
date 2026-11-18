@@ -94,14 +94,19 @@ describe("Неизменяемые связи готового knowledge-пер�
     expect(previous.data[field]).not.toBe("foreign");
   });
 
-  test("application.create разрешает только первое заполнение boardId rev1→rev2", () => {
+  test("application.create не разрешает позднее заполнение или смену ссылки на доску", () => {
     const next = storedKnowledge("application");
     const { boardId: _boardId, ...initialData } = next.data;
     const initial = { ...next, revision: 1, data: initialData };
 
     expect(() =>
       assertKnowledgeTransition(initial, next, { operation: "application.create" }),
-    ).not.toThrow();
+    ).toThrow(
+      expect.objectContaining({
+        code: "INVALID_STATE",
+        details: { id: next.id, field: "boardId" },
+      }),
+    );
     expect(() => assertKnowledgeTransition(initial, next, { operation: "replication" })).toThrow(
       RelayError,
     );

@@ -5,7 +5,7 @@ import { entityWriteOptions as write, expectAsyncRelayError } from "./helpers/en
 import { withKnowledgeFixture } from "./helpers/knowledge-fixture";
 
 describe("Async команды знаний и разреженный overlay", () => {
-  test("app+board rev2, участие и снятый раздел проходят один отложенный load/commit путь", async () => {
+  test("полные app+board, участие и снятый раздел проходят один отложенный load/commit путь", async () => {
     await withKnowledgeFixture(async (service, db) => {
       const project = service.get("project");
       /**
@@ -79,7 +79,7 @@ describe("Async команды знаний и разреженный overlay", 
         expect(syncRead).not.toHaveBeenCalled();
         expect(result.items[0]).toMatchObject({
           kind: "application",
-          revision: 2,
+          revision: 1,
           outputs: [{ kind: "board", revision: 1 }],
         });
         const firstEffects = commits.mock.calls[0]?.[0].transitions[0]?.effects;
@@ -90,13 +90,23 @@ describe("Async команды знаний и разреженный overlay", 
         ).toEqual([
           ["application", 1],
           ["board", 1],
-          ["application", 2],
         ]);
+        const applicationEffect = firstEffects?.find(
+          (effect) => effect.kind === "entity" && effect.after.kind === "application",
+        );
+        const boardEffect = firstEffects?.find(
+          (effect) => effect.kind === "entity" && effect.after.kind === "board",
+        );
+        if (applicationEffect?.kind !== "entity" || boardEffect?.kind !== "entity") {
+          throw new Error("Создание должно сохранить приложение вместе с доской");
+        }
+        expect(applicationEffect.after.data.boardId).toBe(boardEffect.after.id);
+        expect(boardEffect.after.data.applicationId).toBe(applicationEffect.after.id);
         const application = result.entities.find((record) => record.kind === "application");
         if (application === undefined) {
           throw new Error("В результате отсутствует созданное приложение");
         }
-        expect(application).toMatchObject({ revision: 3 });
+        expect(application).toMatchObject({ revision: 2 });
         const implementations = result.entities.filter(
           (record) => record.kind === "implementation",
         );

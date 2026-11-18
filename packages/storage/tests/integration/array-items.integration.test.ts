@@ -1,15 +1,15 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import type { EntityRecord } from "@relay/contracts";
+import type { HistoryRun, HistorySession } from "@relay/contracts";
 import type { ProjectDatabase } from "../../src/database/project-database";
 import {
   ProjectDatabaseFixture,
   createDocument,
+  createTask,
   expectRelayError,
 } from "./helpers/project-database-fixture";
 
-const unmatchedData = [
-  { name: "отсутствующий массив", data: {} },
+const invalidData = [
   { name: "вложенный массив вместо верхнеуровневого", data: { nested: { runs: [{ id: "42" }] } } },
   { name: "null вместо массива", data: { runs: null } },
   { name: "число вместо массива", data: { runs: 42 } },
@@ -17,19 +17,25 @@ const unmatchedData = [
   { name: "не-JSON строка вместо массива", data: { runs: "не JSON" } },
   { name: "JSON-строка вместо массива", data: { runs: '[{"id":"42"}]' } },
   { name: "объект вместо массива", data: { runs: { item: { id: "42" } } } },
-  { name: "пустой массив", data: { runs: [] } },
+  { name: "null вместо участия", data: { runs: [null] } },
+  { name: "boolean вместо участия", data: { runs: [false] } },
+  { name: "число вместо участия", data: { runs: [42] } },
+  { name: "не-JSON строка вместо участия", data: { runs: ["не JSON"] } },
+  { name: "JSON-строка вместо участия", data: { runs: ['{"id":"42"}'] } },
+  { name: "массив вместо участия", data: { runs: [[createRun("42")]] } },
+  { name: "отсутствующее поле объекта", data: { runs: [{ ...createRun("42"), id: undefined }] } },
   {
-    name: "скаляры и вложенный массив вместо объектов",
-    data: { runs: [null, false, 42, "не JSON", '{"id":"42"}', [{ id: "42" }]] },
+    name: "вложенное поле объекта",
+    data: { runs: [{ ...createRun("42"), id: undefined, nested: { id: "42" } }] },
   },
-  { name: "отсутствующее поле объекта", data: { runs: [{ other: "42" }] } },
-  { name: "вложенное поле объекта", data: { runs: [{ nested: { id: "42" } }] } },
-  { name: "число вместо строки поля", data: { runs: [{ id: 42 }] } },
+  { name: "число вместо строки поля", data: { runs: [{ ...createRun("42"), id: 42 }] } },
+  { name: "null вместо ID участия", data: { runs: [{ ...createRun("42"), id: null }] } },
+  { name: "boolean вместо ID участия", data: { runs: [{ ...createRun("42"), id: false }] } },
+  { name: "массив вместо ID участия", data: { runs: [{ ...createRun("42"), id: ["42"] }] } },
   {
-    name: "нестроковые формы поля",
-    data: { runs: [{ id: null }, { id: false }, { id: ["42"] }, { id: { value: "42" } }] },
+    name: "объект вместо ID участия",
+    data: { runs: [{ ...createRun("42"), id: { value: "42" } }] },
   },
-  { name: "подстрока вместо точного значения", data: { runs: [{ id: "142" }] } },
 ] as const;
 const literalFields = [
   { name: "точки в именах", arrayField: "runs.items", itemField: "run.id", value: "run-id" },
@@ -45,11 +51,48 @@ let fixture: ProjectDatabaseFixture;
 let db: ProjectDatabase;
 
 /**
- * Формирует минимальную техническую сессию для SQL-проверки вложенных данных, не сохраняя её.
- * Предметная валидность истории принадлежит Core; тест задаёт любые допустимые формы JSON.
+ * Формирует полное участие; сохранение и связь с владельцем остаются явными действиями теста.
  */
-function createSession(data: Record<string, unknown>): EntityRecord {
-  return { ...createDocument("SESSION-1"), kind: "work-session", data };
+function createRun(id: string, fields: Readonly<Partial<HistoryRun>> = {}): HistoryRun {
+  return {
+    id,
+    key: `RUN-${id}`,
+    actor: "author",
+    state: "active",
+    reason: "НЕ-ЗАГРУЖАТЬ-ПРИЧИНУ",
+    operator: null,
+    client: null,
+    sourceSessionId: null,
+    predecessorRunId: null,
+    startedAt: "2026-10-24T01:00:00.000Z",
+    endedAt: null,
+    endReason: null,
+    ...fields,
+  };
+}
+
+/**
+ * Формирует сессию с полной предметной формой без сохранения в БД.
+ * Активное участие выбирается из явно переданного состава; пустая сессия приостановлена.
+ */
+function createSession(runs: readonly HistoryRun[] = []): HistorySession {
+  const currentRunId = runs.find((run) => run.state === "active")?.id ?? null;
+  return {
+    ...createDocument("SESSION-1"),
+    kind: "work-session",
+    data: {
+      title: "НЕ-ЗАГРУЖАТЬ-СОДЕРЖАНИЕ",
+      description: null,
+      status: currentRunId === null ? "paused" : "open",
+      currentRunId,
+      runs: [...runs],
+      parentSessionId: null,
+      originCheckpointId: null,
+      createdByRunId: null,
+      result: null,
+      closedAt: null,
+    },
+  };
 }
 
 beforeEach(() => {
@@ -61,18 +104,23 @@ afterEach(() => {
   fixture.close();
 });
 
-describe("Наличие объекта в верхнеуровневом JSON-массиве", () => {
-  test("находит точную строку после скалярных элементов одним запросом без декодирования", () => {
+describe("Наличие элемента типизированной коллекции", () => {
+  test("находит точное строковое поле среди нескольких участий одним запросом без декодирования", () => {
     db.insert(
-      createSession({
-        title: "НЕ-ЗАГРУЖАТЬ-СОДЕРЖАНИЕ",
-        runs: ["не JSON", '{"id":"other"}', null, false, 42, [{ id: "other" }], { id: "run-id" }],
-      }),
+      createSession([
+        createRun("previous", {
+          actor: "other",
+          state: "transferred",
+          endedAt: "2026-10-24T02:00:00.000Z",
+          endReason: "Передача ответственности",
+        }),
+        createRun("current", { predecessorRunId: "previous" }),
+      ]),
     );
     const query = spyOn(Database.prototype, "query");
     const decoder = spyOn(JSON, "parse");
     try {
-      const exists = db.hasArrayItemByField("work-session", "runs", "id", "run-id");
+      const exists = db.hasArrayItemByField("work-session", "runs", "actor", "author");
 
       expect(exists).toBe(true);
       expect(query).toHaveBeenCalledTimes(1);
@@ -89,32 +137,14 @@ describe("Наличие объекта в верхнеуровневом JSON-�
   });
 
   test("находит normalized run и отвергает отсутствующий тем же узким одиночным SQL", () => {
-    const session = createSession({
-      title: "НЕ-ЗАГРУЖАТЬ-СОДЕРЖАНИЕ",
-      runs: [
-        {
-          id: "normalized-run",
-          key: "RUN-normalized-run",
-          actor: "author",
-          state: "active",
-          reason: "НЕ-ЗАГРУЖАТЬ-ПРИЧИНУ",
-          operator: null,
-          client: null,
-          sourceSessionId: null,
-          predecessorRunId: null,
-          startedAt: "2026-10-24T01:00:00.000Z",
-          endedAt: null,
-          endReason: null,
-        },
-      ],
-    });
+    const session = createSession([createRun("normalized-run")]);
     db.insert(session);
     fixture.withRaw((raw) => {
       expect(
         raw
-          .query("SELECT json_type(data,'$.runs') AS shape FROM entities WHERE id=?")
+          .query("SELECT owner_id, id FROM session_runs WHERE owner_id=? AND deleted=0")
           .get(session.id),
-      ).toEqual({ shape: null });
+      ).toEqual({ owner_id: session.id, id: "normalized-run" });
     });
     const query = spyOn(Database.prototype, "query");
     const decoder = spyOn(JSON, "parse");
@@ -138,48 +168,118 @@ describe("Наличие объекта в верхнеуровневом JSON-�
     }
   });
 
-  test.each(unmatchedData)("$name не совпадает и не вызывает ошибку разбора JSON", ({ data }) => {
-    db.insert(createSession(data));
+  test.each(invalidData)("$name отклоняется до сохранения владельца и частей", ({ data }) => {
+    const session = createSession();
+    const generation = db.getGeneration();
 
-    const exists = db.hasArrayItemByField("work-session", "runs", "id", "42");
+    expectRelayError(
+      () => db.insert({ ...session, data: { ...session.data, ...data } }),
+      "CORRUPT_DATA",
+    );
 
-    expect(exists).toBe(false);
+    expect(db.get(session.id)).toBeUndefined();
+    expect(db.get(session.key)).toBeUndefined();
+    expect(db.getComponents([session.id])).toEqual([]);
+    expect(db.getGeneration()).toBe(generation);
+    expect(db.hasArrayItemByField("work-session", "runs", "id", "42")).toBe(false);
+  });
+
+  test("пустой состав и подстрока ID не считаются точным совпадением", () => {
+    const session = createSession();
+    db.insert(session);
+    expect(db.hasArrayItemByField("work-session", "runs", "id", "42")).toBe(false);
+
+    const run = createRun("142");
+    db.update(
+      {
+        ...session,
+        revision: 2,
+        data: { ...session.data, status: "open", currentRunId: run.id, runs: [run] },
+      },
+      1,
+    );
+
+    expect(db.hasArrayItemByField("work-session", "runs", "id", "42")).toBe(false);
+    expect(db.hasArrayItemByField("work-session", "runs", "id", "142")).toBe(true);
   });
 
   test("совпадающее поле другого вида не резервирует значение для выбранного вида", () => {
-    db.insert(createSession({ runs: [{ id: "owned" }] }));
-    db.insert({ ...createDocument(), data: { runs: [{ id: "foreign" }] } });
+    db.insert(createSession([createRun("owned")]));
+    db.insert(
+      createTask(db, "TASK-1", {
+        acceptanceCriteria: [
+          {
+            id: "foreign",
+            title: "Чужой состав",
+            summary: "",
+            description: "",
+            completed: false,
+            completedAt: null,
+            completedBy: null,
+          },
+        ],
+      }),
+    );
 
     const otherKind = db.hasArrayItemByField("work-session", "runs", "id", "foreign");
-    const matchingKind = db.hasArrayItemByField("document", "runs", "id", "foreign");
+    const matchingKind = db.hasArrayItemByField("task", "acceptanceCriteria", "id", "foreign");
 
     expect(otherKind).toBe(false);
     expect(matchingKind).toBe(true);
+    expect(db.hasArrayItemByField("task", "runs", "id", "owned")).toBe(false);
   });
 
-  test.each(literalFields)("$name сравниваются буквально", ({ arrayField, itemField, value }) => {
-    db.insert(createSession({ [arrayField]: [{ [itemField]: value }] }));
+  test.each(literalFields)(
+    "$name не интерпретируются как пути или SQL",
+    ({ arrayField, itemField, value }) => {
+      db.insert(createSession([createRun("literal-run", { reason: value })]));
 
-    const matching = db.hasArrayItemByField("work-session", arrayField, itemField, value);
-    const missing = db.hasArrayItemByField(
-      "work-session",
-      arrayField,
-      itemField,
-      `${value}-missing`,
+      const matching = db.hasArrayItemByField("work-session", arrayField, itemField, value);
+      const missing = db.hasArrayItemByField(
+        "work-session",
+        arrayField,
+        itemField,
+        `${value}-missing`,
+      );
+
+      expect(matching).toBe(false);
+      expect(missing).toBe(false);
+      expect(db.hasArrayItemByField("work-session", arrayField, "reason", value)).toBe(false);
+      expect(db.hasArrayItemByField("work-session", "runs", itemField, value)).toBe(false);
+      expect(db.hasArrayItemByField("work-session", "runs", "reason", value)).toBe(true);
+    },
+  );
+
+  test("вложенное имя оператора не считается верхнеуровневым полем участия", () => {
+    db.insert(
+      createSession([
+        createRun("operator-run", {
+          operator: { name: "Оператор", email: null, source: "explicit" },
+        }),
+      ]),
     );
 
-    expect(matching).toBe(true);
-    expect(missing).toBe(false);
+    expect(db.hasArrayItemByField("work-session", "runs", "operator.name", "Оператор")).toBe(false);
+    expect(db.hasArrayItemByField("work-session", "runs", "name", "Оператор")).toBe(false);
+    expect(db.hasArrayItemByField("work-session", "runs", "id", "operator-run")).toBe(true);
   });
 
   test("внешний snapshot сохраняет результат после записи конкурентного соединения", () => {
-    const session = createSession({ runs: [] });
+    const session = createSession();
     db.insert(session);
     const writer = fixture.open();
 
     db.snapshot(() => {
       expect(db.hasArrayItemByField("work-session", "runs", "id", "new-run")).toBe(false);
-      writer.update({ ...session, revision: 2, data: { runs: [{ id: "new-run" }] } }, 1);
+      const run = createRun("new-run");
+      writer.update(
+        {
+          ...session,
+          revision: 2,
+          data: { ...session.data, status: "open", currentRunId: run.id, runs: [run] },
+        },
+        1,
+      );
       expect(db.hasArrayItemByField("work-session", "runs", "id", "new-run")).toBe(false);
     });
 

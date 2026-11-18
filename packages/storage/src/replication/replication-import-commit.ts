@@ -1,11 +1,12 @@
 import type { Database } from "bun:sqlite";
 import { RelayError } from "@relay/contracts";
-import { insertEntity, updateEntity, appendComment } from "../entities/entity-writes";
+import { appendComment } from "../entities/entity-writes";
 import { insertBatchReceipt } from "../batch/batch-receipts";
 import { applyComponentImportDelta } from "../components/component-store";
 import type { ReplicationImportPlan } from "./replication.types";
 import { storageReplicationMessages } from "./replication.messages";
-import { replicationFingerprint } from "./portable-version";
+import { insertRawEntity, removeRawEntity, updateRawEntity } from "../relational/entity-store";
+import { assignCurrentKey, releaseCurrentKeys } from "../relational/key-store";
 
 /**
  * Применяет только подготовленные строки под внешним guarded commit; полного capture/merge здесь нет.
@@ -35,18 +36,23 @@ export function commitReplicationImport(connection: Database, plan: ReplicationI
     }
   }
   connection.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
+  releaseCurrentKeys(
+    connection,
+    plan.entities
+      .filter(
+        (entry) =>
+          entry.before !== null &&
+          (entry.after === null || entry.before.record.key !== entry.after.record.key),
+      )
+      .map((entry) => entry.id),
+  );
   applyComponentImportDelta(connection, [], plan.componentRemovals);
   for (const entry of plan.commentsRemoved) {
-    connection.query("DELETE FROM replication_comment_order WHERE id=?").run(entry.comment.id);
     connection.query("DELETE FROM task_comments WHERE id=?").run(entry.comment.id);
   }
   for (const entry of plan.entities) {
     if (entry.after === null) {
-      connection.query("DELETE FROM entities WHERE id=?").run(entry.id);
-    } else if (entry.before !== null && entry.before.record.key !== entry.after.record.key) {
-      connection
-        .query("UPDATE entities SET key=? WHERE id=?")
-        .run(temporaryImportKey(connection, entry.id), entry.id);
+      removeRawEntity(connection, entry.id);
     }
   }
   for (const entry of plan.entities) {
@@ -55,13 +61,17 @@ export function commitReplicationImport(connection: Database, plan: ReplicationI
     }
     const previous = revisions.get(entry.id);
     if (entry.before === null) {
-      insertEntity(connection, { ...entry.after.record, revision: 1 });
+      insertRawEntity(connection, { ...entry.after.record, revision: 1 }, { keyMode: "defer" });
     } else if (
       previous === undefined ||
-      !updateEntity(
+      !updateRawEntity(
         connection,
-        { ...entry.after.record, revision: previous.revision + 1 },
+        {
+          ...entry.after.record,
+          revision: entry.after.record.kind === "work-checkpoint" ? 1 : previous.revision + 1,
+        },
         previous.revision,
+        { keyMode: "defer" },
       )
     ) {
       throw new RelayError(
@@ -80,6 +90,23 @@ export function commitReplicationImport(connection: Database, plan: ReplicationI
     }
   }
   applyComponentImportDelta(connection, plan.componentUpserts, []);
+  const importedAddresses = new Set(
+    plan.componentUpserts.flatMap((part) =>
+      part.kind === "address-assignment" && !part.deleted
+        ? [JSON.stringify([part.ownerId, part.value.ref])]
+        : [],
+    ),
+  );
+  for (const entry of plan.entities) {
+    if (
+      entry.after !== null &&
+      (entry.before === null ||
+        entry.before.record.key !== entry.after.record.key ||
+        importedAddresses.has(JSON.stringify([entry.id, entry.after.record.key])))
+    ) {
+      assignCurrentKey(connection, entry.id, entry.after.record.key, { create: false });
+    }
+  }
   for (const entry of plan.remapped) {
     connection
       .query(
@@ -88,10 +115,7 @@ export function commitReplicationImport(connection: Database, plan: ReplicationI
       .run(entry.ref, entry.previousId, entry.currentId);
   }
   for (const entry of plan.commentsAdded) {
-    appendComment(connection, entry.taskId, entry.comment);
-    connection
-      .query("UPDATE replication_comment_order SET after_id=? WHERE id=?")
-      .run(entry.after, entry.comment.id);
+    appendComment(connection, entry.taskId, entry.comment, entry.after);
   }
   reorderImportedComments(connection, plan);
   for (const receipt of plan.receiptsAdded) {
@@ -111,21 +135,6 @@ export function commitReplicationImport(connection: Database, plan: ReplicationI
 }
 
 /**
- * Выделяет временный SQL-ключ без двоеточия и столкновения с другой карточкой внутри commit.
- * Он не записывается в assignments, не виден читателям и заменяется конечным ключом до commit.
- */
-function temporaryImportKey(connection: Database, id: string): string {
-  const prefix = `~relay-import-${replicationFingerprint(id)}`;
-  let key = prefix;
-  let suffix = 0;
-  const occupied = connection.query("SELECT 1 FROM entities WHERE key=?");
-  while (occupied.get(key) !== null) {
-    key = `${prefix}-${++suffix}`;
-  }
-  return key;
-}
-
-/**
  * Меняет физический порядок только затронутых журналов; sequence других задач не переписывается.
  */
 function reorderImportedComments(connection: Database, plan: ReplicationImportPlan): void {
@@ -134,14 +143,20 @@ function reorderImportedComments(connection: Database, plan: ReplicationImportPl
   }
   let sequence =
     connection
-      .query<{ value: number }, []>("SELECT coalesce(max(sequence),0) AS value FROM task_comments")
+      .query<{ value: number }, []>(
+        "SELECT coalesce(max(sequence),0) AS value FROM local_comment_sequences",
+      )
       .get()?.value ?? 0;
   connection
     .query(
-      "UPDATE task_comments SET sequence=-sequence WHERE task_id IN (SELECT value FROM json_each(?))",
+      `UPDATE local_comment_sequences SET sequence=-sequence
+       WHERE comment_id IN (SELECT id FROM task_comments
+         WHERE task_id IN (SELECT value FROM json_each(?)))`,
     )
     .run(JSON.stringify(plan.commentOrder.map((entry) => entry.taskId)));
-  const update = connection.query("UPDATE task_comments SET sequence=? WHERE id=?");
+  const update = connection.query(
+    "UPDATE local_comment_sequences SET sequence=? WHERE comment_id=?",
+  );
   for (const journal of plan.commentOrder) {
     for (const id of journal.ids) {
       update.run(++sequence, id);

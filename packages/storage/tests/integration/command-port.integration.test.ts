@@ -16,18 +16,17 @@ import {
   type EntityKind,
   type EntityRecord,
   type PortableComponent,
+  type ReleaseData,
   type TaskComment,
+  type WorkPlanData,
 } from "@relay/contracts";
 import { ProjectDatabase } from "../../src/database/project-database";
 import { portableAggregateVersion } from "../../src/replication/portable-version";
-import {
-  flushComponentVersions,
-  readComponents,
-  versionComponent,
-} from "../../src/components/component-store";
+import { readComponents, versionComponent } from "../../src/components/component-store";
 import { readCommandVersions } from "../../src/commands/command-versions";
 import { readCommandGuard, loadCommandSelection } from "../../src/commands/command-selections";
 import { readCommandFacts } from "../../src/commands/command-facts";
+import { createDocument, createTask } from "./helpers/project-database-fixture";
 
 const TIMESTAMP = "2026-10-24T12:00:00.000Z";
 const PHANTOM_CASES: readonly {
@@ -42,26 +41,26 @@ const PHANTOM_CASES: readonly {
 }[] = [
   {
     name: "строковое поле",
-    selector: { kind: "field", entityKind: "document", field: "parentId", value: "subject" },
+    selector: { kind: "field", entityKind: "document", field: "documentStatus", value: "active" },
     kind: "document",
-    data: { parentId: "subject" },
+    data: { documentStatus: "active" },
   },
   {
     name: "набор строковых значений поля",
     selector: {
       kind: "field-set",
       entityKind: "document",
-      field: "parentId",
-      values: ["subject", "absent"],
+      field: "documentStatus",
+      values: ["active", "archived"],
     },
     kind: "document",
-    data: { parentId: "subject" },
+    data: { documentStatus: "active" },
   },
   {
     name: "полный выбранный вид",
     selector: { kind: "kind", entityKind: "release" },
     kind: "release",
-    data: {},
+    data: { planIds: ["id-RELEASE-PLAN"] },
   },
   {
     name: "нормализованное включение задачи",
@@ -124,7 +123,7 @@ async function withCommandDatabase(
     "../../../..",
     ".artifacts",
     new Date().toISOString().slice(0, 10),
-    "git-sync-implementation/commands/review-fixes",
+    "database-redesign",
   );
   mkdirSync(artifacts, { recursive: true });
   const directory = mkdtempSync(join(artifacts, "fixture-"));
@@ -147,14 +146,59 @@ async function withCommandDatabase(
 }
 
 /**
- * Готовит минимальную техническую карточку для проверки порта, минуя предметные сервисы.
- * Тесты проверяют механизм SQLite; предметные валидаторы не являются частью этой подготовки.
+ * Готовит полную предметную форму для проверки порта с контролируемыми ID и metadata.
+ * Доска задачи выбирается из fixture; прочие ссылочные цели тест сохраняет явно.
+ * Переопределения задают существенные поля сценария, запись в БД не выполняется.
  */
 function record(
+  db: ProjectDatabase,
   key: string,
   kind: EntityKind = "document",
   data: Readonly<Record<string, unknown>> = {},
 ): EntityRecord {
+  let defaults: Record<string, unknown>;
+  switch (kind) {
+    case "document":
+      defaults = createDocument(key).data;
+      break;
+    case "task":
+      defaults = createTask(db, key).data;
+      break;
+    case "work-plan":
+      defaults = {
+        projectId: db.projectId,
+        title: key,
+        summary: "",
+        goal: "",
+        rationale: "",
+        boundaries: "",
+        expectedResult: "",
+        result: "",
+        status: "draft",
+        startedAt: null,
+        closedAt: null,
+        stages: [],
+        scope: [],
+        participants: [],
+      } satisfies WorkPlanData;
+      break;
+    case "release":
+      defaults = {
+        projectId: db.projectId,
+        title: key,
+        version: "1.0",
+        summary: "",
+        description: "",
+        plannedFor: "",
+        status: "planned",
+        releasedAt: null,
+        releasedBy: null,
+        planIds: [],
+      } satisfies ReleaseData;
+      break;
+    default:
+      throw new Error(`Форма fixture для ${kind} не определена`);
+  }
   return {
     id: `id-${key}`,
     key,
@@ -164,7 +208,7 @@ function record(
     updatedAt: TIMESTAMP,
     createdBy: "author",
     updatedBy: "author",
-    data: structuredClone(data),
+    data: { ...defaults, ...structuredClone(data) },
   };
 }
 
@@ -313,14 +357,25 @@ describe("Async CommandStore на реальной SQLite", () => {
     "phantom: $name отклоняет stale plan до любых записей",
     async ({ selector, kind, data }) => {
       await withCommandDatabase(async (db, peer, raw) => {
+        if (selector.kind === "memberships") {
+          db.insert({ ...record(db, "SUBJECT", "task"), id: selector.taskId });
+        }
+        if (kind === "release") {
+          db.insert(record(db, "RELEASE-PLAN", "work-plan"));
+        }
         const loaded = await db.commands.load({ anchor: null, selectors: [selector] });
-        const draft = record("DRAFT-1");
+        expect(loaded.observations[0]).toMatchObject(
+          selector.kind === "array-item"
+            ? { kind: "boolean", value: false }
+            : { kind: "records", records: [] },
+        );
+        const draft = record(db, "DRAFT-1");
         const prepared = plan(db, [{ kind: "entity", before: null, after: draft }], loaded.guards, {
           counters: [{ prefix: "DRAFT", before: 0, after: 1 }],
           receipt: { operationKey: "stale", requestJson: "{}" },
         });
         // Завершённый load — явный барьер: конкурент пишет до начала commit, без sleep/retry.
-        peer.insert(record("PHANTOM", kind, data));
+        peer.insert(record(peer, "PHANTOM", kind, data));
         const generation = db.getGeneration();
         const outbox = db.getReplicationOutbox();
 
@@ -337,11 +392,13 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("field guard замечает изменение ревизии уже выбранного состава", async () => {
     await withCommandDatabase(async (db, peer) => {
-      const original = record("DOC", "document", { owner: "selected", body: "До" });
+      const original = record(db, "DOC", "document", { documentStatus: "active", body: "До" });
       db.insert(original);
       const loaded = await db.commands.load({
         anchor: null,
-        selectors: [{ kind: "field", entityKind: "document", field: "owner", value: "selected" }],
+        selectors: [
+          { kind: "field", entityKind: "document", field: "documentStatus", value: "active" },
+        ],
       });
       const actual = changed(original, { body: "Конкурент" });
       peer.update(actual, original.revision);
@@ -377,7 +434,7 @@ describe("Async CommandStore на реальной SQLite", () => {
     "anchor учитывает отдельный источник %s",
     async (source) => {
       await withCommandDatabase(async (db, peer, raw) => {
-        const task = record("TASK", "task", { dependencies: [] });
+        const task = record(db, "TASK", "task", { dependencies: [] });
         db.insert(task);
         const loaded = await db.commands.load({ anchor: null, selectors: [] });
         if (source === "comment") {
@@ -390,14 +447,12 @@ describe("Async CommandStore на реальной SQLite", () => {
             .run("TASK", "previous", task.id);
         } else if (source === "component-version") {
           raw
-            .query(
-              "UPDATE entity_components SET version='changed' WHERE owner_id=? AND kind='collection'",
-            )
-            .run(task.id);
+            .query("UPDATE component_collections SET version=? WHERE owner_id=?")
+            .run("0".repeat(64), task.id);
         } else {
           raw
-            .query("UPDATE replication_entity_versions SET version='changed' WHERE entity_id=?")
-            .run(task.id);
+            .query("UPDATE replication_entity_versions SET version=? WHERE entity_id=?")
+            .run("0".repeat(64), task.id);
         }
 
         await expectCommandError(
@@ -410,7 +465,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("address-state guard замечает новую защиту переназначения без изменения entity CAS", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const original = record("TASK", "task");
+      const original = record(db, "TASK", "task");
       db.insert(original);
       const loaded = await db.commands.load({
         anchor: null,
@@ -443,11 +498,12 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("preview пропускает ID, alias, virtual и excluded без потребления counter", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const alias = record("KEY-1");
+      const alias = record(db, "KEY-1");
       db.insert(alias);
       db.rename(alias.id, "RENAMED", 1, "author");
-      db.insert({ ...record("OTHER"), id: "KEY-2" });
-      db.insert(record("BOARD-A", "board", { slug: "KEY-3", prefix: "KEY-4" }));
+      db.insert({ ...record(db, "OTHER"), id: "KEY-2" });
+      const board = stored(db, "BOARD-PRODUCT");
+      db.update(changed(board, { prefix: "KEY-3" }), board.revision);
       const anchor = await db.commands.load({ anchor: null, selectors: [] });
       const generation = db.getGeneration();
       const outbox = db.getReplicationOutbox();
@@ -455,7 +511,13 @@ describe("Async CommandStore на реальной SQLite", () => {
       const preview = await db.commands.load({
         anchor: anchor.anchor,
         selectors: [
-          { kind: "key", entityKind: "board", prefix: "KEY", after: 0, excluded: ["KEY-5"] },
+          {
+            kind: "key",
+            entityKind: "board",
+            prefix: "KEY",
+            after: 0,
+            excluded: ["KEY-4", "KEY-5"],
+          },
         ],
       });
 
@@ -483,7 +545,7 @@ describe("Async CommandStore на реальной SQLite", () => {
         { kind: "key", before: 4, value: 5, key: "DOC-5" },
         { kind: "key", before: 4, value: 9, key: "DOC-9" },
       ]);
-      const created = record("DOC-9");
+      const created = record(db, "DOC-9");
 
       await db.commands.commit(
         plan(db, [{ kind: "entity", before: null, after: created }], loaded.guards, {
@@ -504,7 +566,7 @@ describe("Async CommandStore на реальной SQLite", () => {
         anchor: null,
         selectors: [{ kind: "key", entityKind: "document", prefix: "DOC", after: 0, excluded: [] }],
       });
-      peer.insert(record("DOC-1"));
+      peer.insert(record(peer, "DOC-1"));
 
       await expectCommandError(
         db.commands.commit(
@@ -529,7 +591,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("receipt-first возвращает исходный результат раньше stale guards и отличает другой request", async () => {
     await withCommandDatabase(async (db, peer) => {
-      const original = record("DOC", "document", { body: "До" });
+      const original = record(db, "DOC", "document", { body: "До" });
       db.insert(original);
       const loaded = await db.commands.load({
         anchor: null,
@@ -572,7 +634,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("check откатывает aliases, counters, journals, receipts, anchor и boundary tape", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const original = record("TASK", "task", { title: "Исходная", comments: [] });
+      const original = record(db, "TASK", "task", { title: "Исходная", comments: [] });
       db.insert(original);
       const loaded = await db.commands.load({
         anchor: null,
@@ -626,7 +688,7 @@ describe("Async CommandStore на реальной SQLite", () => {
     "%s finalize отклоняется с rollback, async body не запускается",
     async (mode) => {
       await withCommandDatabase(async (db, _peer, raw) => {
-        const created = record("REJECTED-1");
+        const created = record(db, "REJECTED-1");
         const generation = db.getGeneration();
         const outbox = db.getReplicationOutbox();
         let invoked = 0;
@@ -664,8 +726,8 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("поздний CAS failure откатывает уже применённый boundary и технические резервы", async () => {
     await withCommandDatabase(async (db, peer, raw) => {
-      const first = record("FIRST");
-      const second = record("SECOND");
+      const first = record(db, "FIRST");
+      const second = record(db, "SECOND");
       db.insert(first);
       db.insert(second);
       const concurrent = changed(second, { body: "Конкурент" });
@@ -706,7 +768,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("два append с одним исходным guard сохраняются, старый content update не заменяет журнал", async () => {
     await withCommandDatabase(async (db, peer) => {
-      const original = record("TASK", "task", { title: "До", comments: [] });
+      const original = record(db, "TASK", "task", { title: "До", comments: [] });
       db.insert(original);
       const selector: CommandSelector = { kind: "entity", ref: original.id, semantic: "existence" };
       // Оба участника завершили подготовку до первого commit; journal не входит в fingerprints.
@@ -769,7 +831,11 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("ordered tape сохраняет промежуточное удаление и повторное включение с новым component ID", async () => {
     await withCommandDatabase(async (db) => {
-      const original = record("TASK", "task", { dependencies: ["dependency"], comments: [] });
+      db.insert({ ...record(db, "DEPENDENCY", "task"), id: "dependency" });
+      const original = record(db, "TASK", "task", {
+        dependencies: ["dependency"],
+        comments: [],
+      });
       db.insert(original);
       const before = db
         .captureReplication()
@@ -848,10 +914,12 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("исходный отрицательный guard не перепроверяется поверх собственных промежуточных effects", async () => {
     await withCommandDatabase(async (db) => {
-      const created = record("OWN", "document", { owner: "selected" });
+      const created = record(db, "OWN", "document", { documentStatus: "active" });
       const loaded = await db.commands.load({
         anchor: null,
-        selectors: [{ kind: "field", entityKind: "document", field: "owner", value: "selected" }],
+        selectors: [
+          { kind: "field", entityKind: "document", field: "documentStatus", value: "active" },
+        ],
       });
       const updated = changed(created, { body: "Второй шаг" });
       const steps = [
@@ -926,7 +994,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("инфраструктурный отказ outer outbox откатывает уже рассчитанный результат и receipt", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const created = record("ATOMIC-1");
+      const created = record(db, "ATOMIC-1");
       const generation = db.getGeneration();
       const outbox = db.getReplicationOutbox();
       const anchor = await db.commands.load({ anchor: null, selectors: [] });
@@ -963,10 +1031,15 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("одинаковые offline переходы одного проекта получают разные ID назначений на разных репликах", async () => {
     await withCommandDatabase(async (left) => {
-      await withCommandDatabase(async (right) => {
-        const original = record("SHARED", "task", { dependencies: [], comments: [] });
+      const right = ProjectDatabase.createReplica(
+        join(dirname(left.path), "offline-replica.sqlite"),
+        left.projectId,
+      );
+      try {
+        left.insert({ ...record(left, "DEPENDENCY", "task"), id: "dependency" });
+        const original = record(left, "SHARED", "task", { dependencies: [], comments: [] });
         left.insert(original);
-        right.insert(original);
+        right.bootstrapReplication(left.captureReplication());
         const leftRead = await left.commands.load({
           anchor: null,
           selectors: [{ kind: "entity", ref: original.id }],
@@ -1001,13 +1074,16 @@ describe("Async CommandStore на реальной SQLite", () => {
         expect(leftPart.id).not.toBe(rightPart.id);
         expect(stored(left, original.id)).toEqual(after);
         expect(stored(right, original.id)).toEqual(after);
-      });
+      } finally {
+        right.close();
+      }
     });
   });
 
   test("один подготовленный план воспроизводит ID и версию назначения на точной копии той же реплики", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const original = record("SAME-PLAN", "task", { dependencies: [], comments: [] });
+      db.insert({ ...record(db, "DEPENDENCY", "task"), id: "dependency" });
+      const original = record(db, "SAME-PLAN", "task", { dependencies: [], comments: [] });
       db.insert(original);
       const loaded = await db.commands.load({
         anchor: null,
@@ -1050,7 +1126,7 @@ describe("Async CommandStore на реальной SQLite", () => {
     async (hasReceipt) => {
       await withCommandDatabase(async (source) => {
         await withCommandDatabase(async (destination, _peer, raw) => {
-          const created = record("FOREIGN-1");
+          const created = record(source, "FOREIGN-1");
           const loaded = await source.commands.load({ anchor: null, selectors: [] });
           const receipt = {
             operationKey: "foreign",
@@ -1088,7 +1164,8 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("все полные selectors возвращают версии только выбранных агрегатов отдельно от EntityRecord", async () => {
     await withCommandDatabase(async (db) => {
-      const selected = record("VERSIONED", "work-plan", {
+      db.insert({ ...record(db, "SUBJECT", "task"), id: "subject" });
+      const selected = record(db, "VERSIONED", "work-plan", {
         projectId: db.projectId,
         stages: [
           {
@@ -1101,7 +1178,7 @@ describe("Async CommandStore на реальной SQLite", () => {
           },
         ],
       });
-      const other = record("OTHER", "work-plan", { projectId: db.projectId, stages: [] });
+      const other = record(db, "OTHER", "work-plan", { projectId: db.projectId, stages: [] });
       db.insert(selected);
       db.insert(other);
       const snapshot = db.captureReplication();
@@ -1142,7 +1219,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("versions читаются пакетно для нескольких выбранных owners без запроса на каждого", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const owners = [record("ONE"), record("TWO"), record("THREE")];
+      const owners = [record(db, "ONE"), record(db, "TWO"), record(db, "THREE")];
       db.transaction(() => {
         for (const owner of owners) {
           db.insert(owner);
@@ -1164,7 +1241,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("component-only изменение меняет aggregate guard при прежних primary version и local revision", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const original = record("COMPONENT", "task", {
+      const original = record(db, "COMPONENT", "task", {
         comments: [],
         acceptanceCriteria: [
           {
@@ -1193,17 +1270,19 @@ describe("Async CommandStore на реальной SQLite", () => {
         parents: [criterion.version],
         value: { ...criterion.value, title: "Конкурентное изменение" },
       });
+      if (changedPart.kind !== "task-criterion") {
+        throw new Error("Версионирование изменило вид критерия");
+      }
       // Низкая запись намеренно оставляет owner CAS прежним, изолируя проверку aggregate token.
       raw
         .query(
-          "UPDATE entity_components SET value=?,version=?,parents_json=? WHERE owner_id=? AND kind=? AND id=?",
+          "UPDATE task_criteria SET title=?,version=?,parents_json=? WHERE owner_id=? AND id=?",
         )
         .run(
-          JSON.stringify(changedPart.value),
+          changedPart.value.title,
           changedPart.version,
           JSON.stringify(changedPart.parents),
           changedPart.ownerId,
-          changedPart.kind,
           changedPart.id,
         );
 
@@ -1232,15 +1311,23 @@ describe("Async CommandStore на реальной SQLite", () => {
         revision: original.revision,
         data: { acceptanceCriteria: [{ id: "criterion", title: "Конкурентное изменение" }] },
       });
-      expect(stored(db, original.id).data).not.toHaveProperty("title");
+      expect(stored(db, original.id).data.title).toBe(original.data.title);
     });
   });
 
-  test.each(["task-dependency", "address-assignment", "collection"] as const)(
-    "aggregate token учитывает сохранённую часть %s, включая tombstone",
-    async (kind) => {
+  test.each([
+    { kind: "task-dependency", table: "task_dependencies" },
+    { kind: "address-assignment", table: "object_keys" },
+    { kind: "collection", table: "component_collections" },
+  ] as const)(
+    "aggregate token учитывает сохранённую часть $kind, включая tombstone",
+    async ({ kind, table }) => {
       await withCommandDatabase(async (db, _peer, raw) => {
-        const original = record("ALL-PARTS", "task", { dependencies: ["retired"], comments: [] });
+        db.insert({ ...record(db, "RETIRED", "task"), id: "retired" });
+        const original = record(db, "ALL-PARTS", "task", {
+          dependencies: ["retired"],
+          comments: [],
+        });
         db.insert(original);
         db.update(changed(original, { dependencies: [] }), 1);
         const selector: CommandSelector = { kind: "entity", ref: original.id };
@@ -1254,16 +1341,8 @@ describe("Async CommandStore на реальной SQLite", () => {
         }
         const changedPart = versionComponent({ ...part, parents: [part.version] });
         raw
-          .query(
-            "UPDATE entity_components SET version=?,parents_json=? WHERE owner_id=? AND kind=? AND id=?",
-          )
-          .run(
-            changedPart.version,
-            JSON.stringify(changedPart.parents),
-            part.ownerId,
-            part.kind,
-            part.id,
-          );
+          .query(`UPDATE ${table} SET version=?,parents_json=? WHERE owner_id=? AND id=?`)
+          .run(changedPart.version, JSON.stringify(changedPart.parents), part.ownerId, part.id);
 
         const current = await db.commands.load({ anchor: null, selectors: [selector] });
 
@@ -1279,7 +1358,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("комментарии и техническая local revision не меняют portable aggregate token", async () => {
     await withCommandDatabase(async (db, peer, raw) => {
-      const original = record("PORTABLE", "task", { dependencies: [], comments: [] });
+      const original = record(db, "PORTABLE", "task", { dependencies: [], comments: [] });
       db.insert(original);
       const selector: CommandSelector = { kind: "entity", ref: original.id };
       const before = await db.commands.load({ anchor: null, selectors: [selector] });
@@ -1288,7 +1367,9 @@ describe("Async CommandStore на реальной SQLite", () => {
       raw
         .transaction(() => {
           raw.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
-          raw.query("UPDATE entities SET revision=revision+1 WHERE id=?").run(original.id);
+          raw
+            .query("UPDATE local_entity_revisions SET revision=revision+1 WHERE entity_id=?")
+            .run(original.id);
           raw.exec("UPDATE replication_state SET importing=0 WHERE singleton=1");
         })
         .immediate();
@@ -1306,7 +1387,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("summaries сохраняет адресное окно и metadata, не декодируя payload частей", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const task = record("SUMMARY-TASK", "task", {
+      const task = record(db, "SUMMARY-TASK", "task", {
         title: "Задача",
         column: "ready",
         description: "Полное описание",
@@ -1323,19 +1404,19 @@ describe("Async CommandStore на реальной SQLite", () => {
           },
         ],
       });
-      const document = record("SUMMARY-DOC", "document", {
+      const document = record(db, "SUMMARY-DOC", "document", {
         name: "Документ",
         documentStatus: "draft",
         body: "Полный документ",
       });
       db.insert(task);
       db.insert(document);
-      db.insert(record("OUTSIDE", "document", { name: "Вне выбранного окна" }));
+      db.insert(record(db, "OUTSIDE", "document", { name: "Вне выбранного окна" }));
       const versions = readCommandVersions(raw, [task.id, document.id]);
       // Полная гидратация этой карточки должна отказать; summary не использует содержимое критерия.
       raw
         .query(
-          "UPDATE entity_components SET value=json_set(value,'$.title',123) WHERE owner_id=? AND kind='task-criterion'",
+          "UPDATE task_criteria SET title='Повреждённый критерий без новой версии' WHERE owner_id=?",
         )
         .run(task.id);
 
@@ -1394,7 +1475,7 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("summaries и generation принадлежат snapshot до конкурентного commit и не подменяются anchor revision", async () => {
     await withCommandDatabase(async (db, peer, raw) => {
-      const original = record("SNAPSHOT-SUMMARY", "document", {
+      const original = record(db, "SNAPSHOT-SUMMARY", "document", {
         name: "Исходное имя",
         documentStatus: "draft",
       });
@@ -1447,9 +1528,13 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("existence guards допускают комментарий после content edit и rename, facts возвращают свежую задачу", async () => {
     await withCommandDatabase(async (db, peer) => {
-      const original = record("OLD-TASK", "task", { title: "До", dependencies: [], comments: [] });
+      const original = record(db, "OLD-TASK", "task", {
+        title: "До",
+        dependencies: [],
+        comments: [],
+      });
       db.insert(original);
-      db.insert(record("UNSELECTED-TASK", "task", { title: "Чужая задача", comments: [] }));
+      db.insert(record(db, "UNSELECTED-TASK", "task", { title: "Чужая задача", comments: [] }));
       const selector: CommandSelector = {
         kind: "entity",
         ref: original.key,
@@ -1509,8 +1594,8 @@ describe("Async CommandStore на реальной SQLite", () => {
     "existence %s guard отклоняет новую привязку прежнего alias",
     async (kind) => {
       await withCommandDatabase(async (db, _peer, raw) => {
-        const original = record("OLD-ALIAS", "task", { comments: [] });
-        const other = record("OTHER-TASK", "task", { comments: [] });
+        const original = record(db, "OLD-ALIAS", "task", { comments: [] });
+        const other = record(db, "OTHER-TASK", "task", { comments: [] });
         db.insert(original);
         db.insert(other);
         db.rename(original.id, "PRIMARY-TASK", original.revision, "author");
@@ -1519,15 +1604,42 @@ describe("Async CommandStore на реальной SQLite", () => {
             ? { kind, ref: original.key, semantic: "existence", entityKind: "task" }
             : { kind, refs: [original.key] };
         const loaded = await db.commands.load({ anchor: null, selectors: [selector] });
+        const alias = readComponents(raw, [original.id]).find(
+          (part) =>
+            part.kind === "address-assignment" && !part.deleted && part.value.ref === original.key,
+        );
+        if (alias?.kind !== "address-assignment") {
+          throw new Error("Отсутствует подготовленный алиас");
+        }
+        const retired = versionComponent({ ...alias, deleted: true, parents: [alias.version] });
+        const reassigned = versionComponent({
+          ...alias,
+          id: "reassigned-alias",
+          ownerId: other.id,
+          parents: [],
+        });
         // Техническая переназначенная привязка не меняет ID/вид двух владельцев.
         raw
           .transaction(() => {
             raw.exec("UPDATE replication_state SET importing=1 WHERE singleton=1");
-            raw.query("DELETE FROM entity_refs WHERE ref=?").run(original.key);
             raw
-              .query("INSERT INTO entity_refs(ref,entity_id) VALUES(?,?)")
-              .run(original.key, other.id);
-            flushComponentVersions(raw);
+              .query(
+                "UPDATE object_keys SET deleted=1,version=?,parents_json=? WHERE owner_id=? AND id=?",
+              )
+              .run(retired.version, JSON.stringify(retired.parents), original.id, alias.id);
+            raw
+              .query(
+                `INSERT INTO object_keys(owner_id,id,position,version,parents_json,deleted,ref,is_current)
+                 VALUES(?,?,?,?,?,0,?,0)`,
+              )
+              .run(
+                other.id,
+                reassigned.id,
+                reassigned.position,
+                reassigned.version,
+                JSON.stringify(reassigned.parents),
+                original.key,
+              );
             raw.exec("UPDATE replication_state SET importing=0 WHERE singleton=1");
           })
           .immediate();
@@ -1555,7 +1667,7 @@ describe("Async CommandStore на реальной SQLite", () => {
     "freshTaskIds отклоняет %s без записи комментария или содержания",
     async (mode) => {
       await withCommandDatabase(async (db) => {
-        const original = record("FRESH-CONTRACT", "task", { title: "До", comments: [] });
+        const original = record(db, "FRESH-CONTRACT", "task", { title: "До", comments: [] });
         db.insert(original);
         const generation = db.getGeneration();
         const outbox = db.getReplicationOutbox();
@@ -1599,8 +1711,8 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("freshTaskIds переиспользует журнал из карточек без повторной SQL-выборки комментариев", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const first = record("FRESH-FIRST", "task", { title: "Первый", comments: [] });
-      const second = record("FRESH-SECOND", "task", { title: "Второй", comments: [] });
+      const first = record(db, "FRESH-FIRST", "task", { title: "Первый", comments: [] });
+      const second = record(db, "FRESH-SECOND", "task", { title: "Второй", comments: [] });
       db.insert(first);
       db.insert(second);
       db.appendTaskComment(first.id, comment("first-journal"));
@@ -1625,8 +1737,8 @@ describe("Async CommandStore на реальной SQLite", () => {
 
   test("freshTaskIds не загружает тела остальных объявленных журналов", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const fresh = record("FRESH-BODY", "task", { title: "Свежий", comments: [] });
-      const journalOnly = record("JOURNAL-ONLY", "task", {
+      const fresh = record(db, "FRESH-BODY", "task", { title: "Свежий", comments: [] });
+      const journalOnly = record(db, "JOURNAL-ONLY", "task", {
         comments: [],
         acceptanceCriteria: [
           {
@@ -1646,7 +1758,7 @@ describe("Async CommandStore на реальной SQLite", () => {
       // Повреждённая часть чужой карточки выявит ненужную полную гидратацию вместо journal-only чтения.
       raw
         .query(
-          "UPDATE entity_components SET value=json_set(value,'$.title',123) WHERE owner_id=? AND kind='task-criterion'",
+          "UPDATE task_criteria SET title='Повреждённый критерий без новой версии' WHERE owner_id=?",
         )
         .run(journalOnly.id);
 
@@ -1657,29 +1769,31 @@ describe("Async CommandStore на реальной SQLite", () => {
       expect([...facts.taskRecords.keys()]).toEqual([fresh.id]);
       expect(facts.comments.get(fresh.id)).toEqual([]);
       expect(facts.comments.get(journalOnly.id)).toEqual([comment("narrow-journal")]);
+      expect(() => db.get(journalOnly.id)).toThrow(
+        expect.objectContaining({ code: "CORRUPT_DATA" }),
+      );
     });
   });
 
-  test("field-set выбирает один полный набор по буквальному полю независимо от числа значений", async () => {
+  test("field-set выбирает один полный набор по строковому полю без приведения типов и трактовки JSON-пути", async () => {
     await withCommandDatabase(async (db, _peer, raw) => {
-      const field = 'owner.id"[]';
-      const first = record("FIELD-A", "document", { [field]: "one", body: "Первый" });
-      const second = record("FIELD-B", "document", { [field]: "two", body: "Второй" });
-      const numericText = record("FIELD-C", "document", { [field]: "5" });
+      const first = record(db, "FIELD-A", "document", { name: "one", body: "Первый" });
+      const second = record(db, "FIELD-B", "document", { name: "two", body: "Второй" });
+      const numericText = record(db, "FIELD-C", "document", { name: "5" });
       for (const entry of [
         first,
         second,
         numericText,
-        record("FIELD-NUMBER", "document", { [field]: 5 }),
-        record("FIELD-PATH", "document", { owner: { id: "one" } }),
-        record("FIELD-KIND", "task", { [field]: "one" }),
+        record(db, "FIELD-BOOLEAN", "document", { name: "Не выбрано", pinned: true }),
       ]) {
         db.insert(entry);
       }
+      const board = stored(db, "BOARD-PRODUCT");
+      db.update(changed(board, { name: "one" }), board.revision);
       const selector: CommandSelector = {
         kind: "field-set",
         entityKind: "document",
-        field,
+        field: "name",
         values: ["two", "one", "one", "5", "absent"],
       };
       raw.exec("BEGIN DEFERRED");
@@ -1702,6 +1816,23 @@ describe("Async CommandStore на реальной SQLite", () => {
           versions: {},
         });
         expect(query.mock.calls).toHaveLength(0);
+        expect(
+          loadCommandSelection(raw, {
+            ...selector,
+            field: "pinned",
+            values: ["true", "1"],
+          }).observation,
+        ).toEqual({ kind: "records", records: [], versions: {} });
+        expect(loadCommandSelection(raw, { ...selector, field: 'name"[]' }).observation).toEqual({
+          kind: "records",
+          records: [],
+          versions: {},
+        });
+        expect(loadCommandSelection(raw, { ...selector, field: "$.name" }).observation).toEqual({
+          kind: "records",
+          records: [],
+          versions: {},
+        });
       } finally {
         query.mockRestore();
         raw.exec("ROLLBACK");

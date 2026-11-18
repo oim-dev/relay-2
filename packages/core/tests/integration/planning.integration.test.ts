@@ -87,64 +87,6 @@ const corruptedStageVariants = [
   },
 ] as const;
 
-const corruptedPlanOperations = [
-  {
-    operationName: "чтение плана",
-    /**
-     * Читает повреждённую карточку целиком.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord): unknown =>
-      service.get("work-plan", plan.id),
-  },
-  {
-    operationName: "список планов",
-    /**
-     * Читает список, содержащий повреждённый план.
-     */
-    run: (service: PlanningService): unknown => service.list("work-plan"),
-  },
-  {
-    operationName: "чтение этапа",
-    /**
-     * Запрашивает существующий до повреждения этап.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord): unknown =>
-      service.getStage(plan.id, stageAt(plan).id),
-  },
-  {
-    operationName: "чтение включений задачи",
-    /**
-     * Запрашивает включения задачи в повреждённый план.
-     */
-    run: (
-      service: PlanningService,
-      _plan: WorkPlanRecord,
-      _corrupted: EntityRecord,
-      task: TaskRecord,
-    ): unknown => service.memberships(task.id),
-  },
-  {
-    operationName: "изменение плана",
-    /**
-     * Пытается изменить текст с актуальной ревизией повреждённой записи.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord, corrupted: EntityRecord): unknown =>
-      service.update("work-plan", plan.id, { summary: "Не сохранять" }, write(corrupted)),
-  },
-  {
-    operationName: "создание этапа",
-    /**
-     * Пытается дополнить повреждённый состав этапов.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord, corrupted: EntityRecord): unknown =>
-      service.stage(plan.id, "create", { title: "Не сохранять" }, write(corrupted)),
-  },
-] as const;
-
-const corruptedPlanCases = corruptedStageVariants.flatMap((variant) =>
-  corruptedPlanOperations.map((operation) => ({ ...variant, ...operation })),
-);
-
 const closedPlanOperations = [
   {
     name: "изменение цели",
@@ -254,60 +196,6 @@ const invalidSamePlanTransfers = [
     reason: "  ",
     targetRevisionDelta: 0,
     code: "VALIDATION_ERROR",
-  },
-] as const;
-
-const corruptedReleaseOperations = [
-  {
-    name: "чтение состава",
-    /**
-     * Читает планы релиза с повреждённым сохранённым составом.
-     */
-    run: (service: PlanningService, release: EntityRecord): unknown =>
-      service.releasePlans(release.id),
-  },
-  {
-    name: "расчёт прогресса",
-    /**
-     * Рассчитывает прогресс релиза с повреждённым сохранённым составом.
-     */
-    run: (service: PlanningService, release: EntityRecord): unknown =>
-      service.progress("release", release.id),
-  },
-  {
-    name: "изменение заголовка",
-    /**
-     * Пытается изменить релиз с актуальной ревизией повреждённой записи.
-     */
-    run: (service: PlanningService, release: EntityRecord): unknown =>
-      service.update("release", release.id, { title: "Не сохранять" }, write(release)),
-  },
-] as const;
-
-const brokenCompositionOperations = [
-  {
-    name: "прогресс плана",
-    /**
-     * Запрашивает прогресс плана с отсутствующей задачей состава.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord, _release: ReleaseRecord): unknown =>
-      service.progress("work-plan", plan.id),
-  },
-  {
-    name: "прогресс релиза",
-    /**
-     * Запрашивает прогресс релиза, план которого ссылается на отсутствующую задачу.
-     */
-    run: (service: PlanningService, _plan: WorkPlanRecord, release: ReleaseRecord): unknown =>
-      service.progress("release", release.id),
-  },
-  {
-    name: "завершение плана",
-    /**
-     * Пытается завершить план с отсутствующим обязательством.
-     */
-    run: (service: PlanningService, plan: WorkPlanRecord): unknown =>
-      service.transition("work-plan", plan.id, "complete", { result: "Готово" }, write(plan)),
   },
 ] as const;
 
@@ -810,55 +698,59 @@ describe("Чтение планов и релизов в SQLite", () => {
 });
 
 describe("Повреждение сохранённых составов планирования", () => {
-  test.each(corruptedPlanCases)(
-    "$damageName: $operationName отклоняется без записи",
-    async ({ damage, run }) => {
+  test.each(corruptedStageVariants)(
+    "$damageName отклоняется до сохранения плана и его первичных частей",
+    async ({ damage }) => {
       await fixture(async (db, service, tasks) => {
         const task = await tasks.create({ title: "Работа" }, actor);
         const plan = await include(service, await planWithStage(service), task);
-        // Намеренно повреждаем сохранённую форму через Storage, обходя предметный API.
+        // Storage обязан отвергнуть невозможную реляционную форму, не оставляя partial owner.
         const corrupted = {
           ...plan,
           revision: plan.revision + 1,
           data: { ...plan.data, stages: damage(stageAt(plan)) },
         };
-        db.update(corrupted, plan.revision);
         const generation = db.getGeneration();
+        const parts = db.getComponents([plan.id]);
+        const pending = db.getReplicationOutbox();
 
-        await fails(async () => run(service, plan, corrupted, task), "CORRUPT_DATA");
+        await fails(() => db.update(corrupted, plan.revision), "CORRUPT_DATA");
 
-        expect(db.get(plan.id)).toEqual(corrupted);
+        expect(service.get("work-plan", plan.id)).toEqual(plan);
+        expect(db.getComponents([plan.id])).toEqual(parts);
+        expect(tasks.get(task.id)).toEqual(task);
         expect(db.getGeneration()).toBe(generation);
+        expect(db.getReplicationOutbox()).toEqual(pending);
       });
     },
   );
 
-  test.each(corruptedReleaseOperations)(
-    "повреждённый состав релиза: $name отклоняется без записи",
-    async ({ run }) => {
-      await fixture(async (db, service) => {
-        const plan = await planWithStage(service);
-        const release = await service.create(
-          "release",
-          { title: "Выпуск", version: "1", planIds: [plan.id] },
-          actor,
-        );
-        // Низкоуровневый fixture моделирует недопустимый сохранённый JSON.
-        const corrupted = {
-          ...release,
-          revision: release.revision + 1,
-          data: { ...release.data, planIds: null },
-        };
-        db.update(corrupted, release.revision);
-        const generation = db.getGeneration();
+  test("null вместо состава релиза отклоняется до сохранения", async () => {
+    await fixture(async (db, service) => {
+      const plan = await planWithStage(service);
+      const release = await service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [plan.id] },
+        actor,
+      );
+      // Низкоуровневый вызов проверяет отказ до появления недопустимой формы.
+      const corrupted = {
+        ...release,
+        revision: release.revision + 1,
+        data: { ...release.data, planIds: null },
+      };
+      const generation = db.getGeneration();
+      const parts = db.getComponents([release.id]);
+      const pending = db.getReplicationOutbox();
 
-        await fails(async () => run(service, corrupted), "CORRUPT_DATA");
+      await fails(() => db.update(corrupted, release.revision), "CORRUPT_DATA");
 
-        expect(db.get(release.id)).toEqual(corrupted);
-        expect(db.getGeneration()).toBe(generation);
-      });
-    },
-  );
+      expect(service.get("release", release.id)).toEqual(release);
+      expect(db.getComponents([release.id])).toEqual(parts);
+      expect(db.getGeneration()).toBe(generation);
+      expect(db.getReplicationOutbox()).toEqual(pending);
+    });
+  });
 });
 
 describe("Готовность составов планирования", () => {
@@ -1219,7 +1111,7 @@ describe("Включения задач и ревизии планов", () => {
       const sql = new Database(db.path, { create: false, readwrite: true });
       try {
         // Триггер моделирует реальный отказ хранения после успешной первой UPDATE.
-        sql.exec(`CREATE TRIGGER reject_transfer BEFORE UPDATE ON entities
+        sql.exec(`CREATE TRIGGER reject_transfer BEFORE UPDATE ON work_plans
           WHEN OLD.id = '${target.id}' BEGIN SELECT RAISE(ABORT, 'Отказ второй записи'); END`);
 
         const failure = await fails(
@@ -2164,37 +2056,38 @@ describe("Проверка внешнего ввода планирования"
 });
 
 describe("Повреждённые ссылки составов планирования", () => {
-  test.each(brokenCompositionOperations)(
-    "отсутствующая задача: $name отклоняется без изменения записей",
-    async ({ run }) => {
-      await fixture(async (db, service) => {
-        const initial = await planWithStage(service);
-        // Намеренная битая ссылка сохраняется низкоуровневым fixture Storage.
-        const plan = {
-          ...initial,
-          revision: initial.revision + 1,
-          data: {
-            ...initial.data,
-            stages: initial.data.stages.map((stage) => ({
-              ...stage,
-              taskIds: ["missing-task-id"],
-            })),
-          },
-        };
-        db.update(plan, initial.revision);
-        const release = await service.create(
-          "release",
-          { title: "Выпуск", version: "1", planIds: [plan.id] },
-          actor,
-        );
-        const before = db.getGeneration();
+  test("включение отсутствующей задачи отклоняется до изменения плана и состава релиза", async () => {
+    await fixture(async (db, service) => {
+      const initial = await planWithStage(service);
+      // FK должен откатить уже подготовленные изменения owner и parts целиком.
+      const plan = {
+        ...initial,
+        revision: initial.revision + 1,
+        data: {
+          ...initial.data,
+          stages: initial.data.stages.map((stage) => ({
+            ...stage,
+            taskIds: ["missing-task-id"],
+          })),
+        },
+      };
+      const release = await service.create(
+        "release",
+        { title: "Выпуск", version: "1", planIds: [initial.id] },
+        actor,
+      );
+      const before = db.getGeneration();
+      const parts = db.getComponents([initial.id, release.id]);
+      const pending = db.getReplicationOutbox();
 
-        await fails(async () => run(service, plan, release), "NOT_FOUND");
+      const failure = await fails(() => db.update(plan, initial.revision), "CONFLICT");
 
-        expect(db.getGeneration()).toBe(before);
-        expect(service.get("work-plan", plan.id)).toEqual(plan);
-        expect(service.get("release", release.id)).toEqual(release);
-      });
-    },
-  );
+      expect(failure.details).toMatchObject({ reason: "FOREIGN KEY constraint failed" });
+      expect(db.getGeneration()).toBe(before);
+      expect(service.get("work-plan", initial.id)).toEqual(initial);
+      expect(service.get("release", release.id)).toEqual(release);
+      expect(db.getComponents([initial.id, release.id])).toEqual(parts);
+      expect(db.getReplicationOutbox()).toEqual(pending);
+    });
+  });
 });

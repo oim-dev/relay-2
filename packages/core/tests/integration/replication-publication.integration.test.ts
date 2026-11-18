@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { join } from "node:path";
-import { ProjectDatabase, replicationFingerprint, portableEntity } from "@relay/storage";
+import {
+  ProjectDatabase,
+  RELATIONAL_TABLES,
+  replicationFingerprint,
+  portableEntity,
+} from "@relay/storage";
 import { BatchService } from "../../src/batch/batch";
 import { KnowledgeService } from "../../src/knowledge/knowledge";
 import { PlanningService } from "../../src/planning/planning";
@@ -35,7 +40,7 @@ describe("Проверяемые ordered публикации", () => {
         }
         const base = portableEntity(before);
         const result = portableEntity(after, [base.version]);
-        // Здесь моделируется только прежний immutable payload. Реальный v3→v4 file upgrade проверяет Storage.
+        // Прежний immutable payload проверяется на текущей БД независимо от отменённой миграции файлов.
         const payload = {
           formatVersion: 1 as const,
           projectId: first.projectId,
@@ -383,9 +388,17 @@ describe("Проверяемые ordered публикации", () => {
         const published = new ReplicationService(first).prepare(remote).snapshot;
         const audit = new Database(second.path, { strict: true });
         try {
-          audit.exec(
-            "CREATE TABLE import_audit(kind TEXT,id TEXT); CREATE TRIGGER audit_entity AFTER UPDATE ON entities BEGIN INSERT INTO import_audit VALUES('entity',NEW.id); END; CREATE TRIGGER audit_component AFTER UPDATE ON entity_components BEGIN INSERT INTO import_audit VALUES('component',NEW.id); END;",
-          );
+          audit.exec("CREATE TABLE import_audit(kind TEXT,id TEXT)");
+          for (const table of RELATIONAL_TABLES) {
+            if (table.entityKind === undefined && table.componentKind === undefined) {
+              continue;
+            }
+            const kind = table.entityKind === undefined ? "component" : "entity";
+            audit.exec(`
+              CREATE TRIGGER audit_${table.name} AFTER UPDATE ON ${table.name}
+              BEGIN INSERT INTO import_audit VALUES('${kind}', NEW.id); END;
+            `);
+          }
 
           new ReplicationService(second).accept(published);
 

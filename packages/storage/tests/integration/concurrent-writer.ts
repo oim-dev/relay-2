@@ -1,5 +1,5 @@
 import { parentPort, workerData } from "node:worker_threads";
-import { RelayError, type EntityRecord } from "@relay/contracts";
+import { RelayError, type DocumentData, type EntityRecord } from "@relay/contracts";
 import { ProjectDatabase } from "../../src/database/project-database";
 import type {
   ConcurrentWriterInput,
@@ -25,6 +25,7 @@ function readWriterInput(input: unknown): ConcurrentWriterInput {
 
 /**
  * Записывает шесть документов с атомарным выделением номера и пытается обновить общую ревизию.
+ * Имя документа содержит автора и порядковый номер; победитель CAS сохраняет автора в имени продукта.
  * Только ожидаемый конфликт CAS считается результатом; остальные ошибки завершают worker с отказом.
  */
 function writeConcurrentChanges(
@@ -47,7 +48,16 @@ function writeConcurrentChanges(
           updatedAt: now,
           createdBy: actor,
           updatedBy: actor,
-          data: { index },
+          data: {
+            name: `${actor}-${index + 1}`,
+            summary: "",
+            body: `Запись ${actor}`,
+            documentKind: "description",
+            documentStatus: "draft",
+            sectionId: null,
+            pinned: false,
+            relations: [],
+          } satisfies DocumentData,
         });
         return key;
       }),
@@ -55,7 +65,12 @@ function writeConcurrentChanges(
   }
   try {
     db.update(
-      { ...original, revision: original.revision + 1, updatedBy: actor, data: { actor } },
+      {
+        ...original,
+        revision: original.revision + 1,
+        updatedBy: actor,
+        data: { ...original.data, name: actor },
+      },
       original.revision,
     );
     return { keys, outcome: "updated" };
@@ -74,7 +89,7 @@ if (!port) {
 }
 const db = ProjectDatabase.open(path);
 try {
-  const original = db.get("PRODUCT");
+  const original = db.get("PRODUCT", "product");
   if (!original) {
     throw new Error("Начальный паспорт отсутствует в тестовой базе");
   }

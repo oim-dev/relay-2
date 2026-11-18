@@ -13,6 +13,7 @@ import {
   snapshotHistoryStorage,
   withHistoryFixture,
 } from "./history-fixture";
+import { insertForeignIntentMaterial } from "./helpers/history-read-corruption";
 
 describe("Асинхронный план истории", () => {
   test("NamedCommand разрешает адрес принимаемого ребёнка, сохраняя ID в checkpoint", async () => {
@@ -80,24 +81,25 @@ describe("Асинхронный план истории", () => {
         );
         try {
           await ready.promise;
-          const id = crypto.randomUUID();
           // Техническая вставка намеренно обходит CAS сессии, изолируя защиту состава/закрытия intent.
-          second.insert({
-            ...intent,
-            id,
-            key: `CP-${id}`,
-            data: {
-              ...intent.data,
-              kind: field === "sessionId" ? "progress" : "result",
-              intentId: intent.id,
-              sessionId: field === "sessionId" ? session.id : foreign.id,
-              runId:
-                field === "sessionId"
-                  ? currentHistoryRun(session).id
-                  : currentHistoryRun(foreign).id,
-              sequence: field === "sessionId" ? 2 : 1,
-            },
-          });
+          if (field === "sessionId") {
+            const id = crypto.randomUUID();
+            second.insert({
+              ...intent,
+              id,
+              key: `CP-${id}`,
+              data: {
+                ...intent.data,
+                kind: "progress",
+                intentId: intent.id,
+                sequence: 2,
+                sessionRevision: owner.revision + 1,
+              },
+            });
+          } else {
+            // Повреждение внешней SQLite изолирует intentId guard от выборки sessionId владельца.
+            insertForeignIntentMaterial(second, intent, foreign, "result", 1);
+          }
           const before = snapshotHistoryStorage(db);
           const outbox = db.getReplicationOutbox();
           release.resolve();

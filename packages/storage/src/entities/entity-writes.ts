@@ -5,32 +5,26 @@
 import type { Database } from "bun:sqlite";
 import {
   RelayError,
-  isPortableIdentityText,
   splitComponentRecord,
   type EntityRecord,
   type TaskComment,
 } from "@relay/contracts";
-import { getEntityIdentity } from "./entity-queries";
+import { getEntityIdentity, getRawEntity } from "./entity-queries";
 import type { EntityRevision, KeyCounterRow } from "./entity-queries.types";
 import { entityMessages } from "./entity.messages";
 import { synchronizeComponents } from "../components/component-store";
-import { withComponentAllocation } from "../components/component-allocation";
 import type { ComponentWriteOptions } from "../components/component-store.types";
 import { assertEntitySqlText, assertSqlText } from "./entity-sql-text";
+import { insertRawEntity, updateRawEntity } from "../relational/entity-store";
+import { captureEntityChange, isReplicationImport } from "../replication/replication-capture";
+import { ensureEntityAddresses } from "../components/address-assignments";
+import { assignCurrentKey } from "../relational/key-store";
+import { encodeText } from "../relational/columns";
+import { insertSqlRow } from "../relational/sql-write";
+import type { EntityUpdateOptions } from "./entity-writes.types";
 
 /**
- * Проверяет техническое suppression импорта: raw owner не должен регенерировать primary parts.
- */
-function importingComponents(connection: Database): boolean {
-  return (
-    connection
-      .query<{ importing: number }, []>("SELECT importing FROM replication_state WHERE singleton=1")
-      .get()?.importing === 1
-  );
-}
-
-/**
- * Вставляет raw owner и primary parts; алиасы и поколение создаются триггерами той же транзакции.
+ * Вставляет typed owner и primary parts, сохраняя поколение и очередь в той же транзакции.
  * Начальные комментарии запрещены, кроме пустой проекции: журнал пополняется отдельной операцией.
  */
 export function insertEntity(
@@ -47,65 +41,49 @@ export function insertEntity(
     throw new RelayError("VALIDATION_ERROR", entityMessages.commentRequiresAppend, 2);
   }
   const layout = splitComponentRecord(entity);
-  withComponentAllocation(connection, options, () => {
-    connection
-      .query(
-        `INSERT INTO entities(id, kind, key, revision, created_at, updated_at, created_by, updated_by, data)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        entity.id,
-        entity.kind,
-        entity.key,
-        entity.revision,
-        entity.createdAt,
-        entity.updatedAt,
-        entity.createdBy,
-        entity.updatedBy,
-        JSON.stringify(layout.record.data),
-      );
-    if (!importingComponents(connection)) {
-      synchronizeComponents(connection, layout, options);
-    }
-  });
+  insertRawEntity(connection, layout.record, { keyMode: "defer" });
+  if (!isReplicationImport(connection)) {
+    ensureEntityAddresses(connection, entity, options);
+    assignCurrentKey(connection, entity.id, entity.key, { create: false });
+    synchronizeComponents(connection, layout, options);
+  }
+  captureEntityChange(connection, null, layout.record);
 }
 
 /**
  * Выполняет CAS owner и синхронизирует его parts, возвращая признак совпадения ревизии.
  * Только изменённые части меняют версии; комментарии не затрагиваются. В importing parts пишет import owner.
+ * Exact before команды сохраняет основание производных связей, даже если соседний эффект уже изменил их JOIN.
  */
 export function updateEntity(
   connection: Database,
   entity: EntityRecord,
   expectedRevision: number,
-  options: ComponentWriteOptions = {},
+  options: EntityUpdateOptions = {},
 ): boolean {
   assertEntitySqlText(entity);
   const layout = splitComponentRecord(entity);
-  return withComponentAllocation(connection, options, () => {
-    // run().changes учитывает триггеры; RETURNING подтверждает изменение самой строки CAS.
-    const result = connection
-      .query(
-        `UPDATE entities SET kind = ?, key = ?, revision = ?, created_at = ?, updated_at = ?,
-         created_by = ?, updated_by = ?, data = ? WHERE id = ? AND revision = ? RETURNING id`,
-      )
-      .get(
-        entity.kind,
-        entity.key,
-        entity.revision,
-        entity.createdAt,
-        entity.updatedAt,
-        entity.createdBy,
-        entity.updatedBy,
-        JSON.stringify(layout.record.data),
-        entity.id,
-        expectedRevision,
-      );
-    if (result !== null && !importingComponents(connection)) {
-      synchronizeComponents(connection, layout, options);
-    }
-    return result !== null;
-  });
+  if (isReplicationImport(connection)) {
+    return updateRawEntity(connection, layout.record, expectedRevision, { keyMode: "defer" });
+  }
+  const before =
+    options.before === undefined
+      ? getRawEntity(connection, entity.id)
+      : splitComponentRecord(options.before).record;
+  if (before !== undefined && before.id !== entity.id) {
+    throw new RelayError("VALIDATION_ERROR", entityMessages.invalidBefore, 2);
+  }
+  if (before === undefined || before.revision !== expectedRevision) {
+    return false;
+  }
+  if (!updateRawEntity(connection, layout.record, expectedRevision, { keyMode: "defer" })) {
+    return false;
+  }
+  ensureEntityAddresses(connection, entity, options);
+  assignCurrentKey(connection, entity.id, entity.key, { create: false });
+  synchronizeComponents(connection, layout, options);
+  captureEntityChange(connection, before, layout.record);
+  return true;
 }
 
 /**
@@ -157,38 +135,53 @@ export function decodeTaskComment(comment: Record<string, unknown>): TaskComment
 }
 
 /**
- * Добавляет комментарий в append-only журнал с порядком по SQLite sequence.
+ * Добавляет переносимую строку комментария и отдельный локальный порядок в одной транзакции.
  * Уникальность ID, вид владельца и прирост поколения обеспечиваются SQL, ревизия задачи не меняется.
+ * afterId задаёт точного предшественника импорта; undefined выбирает последнюю локальную запись задачи.
+ * Общий UTF-8 binding сохраняет начальный BOM; непарные UTF-16 units передаются через scalar carrier.
  */
-export function appendComment(connection: Database, taskId: string, comment: TaskComment): void {
+export function appendComment(
+  connection: Database,
+  taskId: string,
+  comment: TaskComment,
+  afterId?: string | null,
+): void {
   assertSqlText(taskId, "taskId");
   for (const field of ["id", "createdAt", "createdBy"] as const) {
     assertSqlText(comment[field], `comment.${field}`);
   }
   const title = commentField(comment, "title");
   const body = commentField(comment, "body");
-  const titleJson = isPortableIdentityText(title) ? null : JSON.stringify(title);
-  const bodyJson = isPortableIdentityText(body) ? null : JSON.stringify(body);
-  const encoding = (titleJson === null ? 0 : 1) | (bodyJson === null ? 0 : 2);
+  const titleRow = encodeText(title, "title");
+  const bodyRow = encodeText(body, "body");
+  const after =
+    afterId === undefined
+      ? (connection
+          .query<{ id: string }, [string]>(
+            `SELECT c.id FROM task_comments c
+             JOIN local_comment_sequences s ON s.comment_id=c.id
+             WHERE c.task_id=? ORDER BY s.sequence DESC LIMIT 1`,
+          )
+          .get(taskId)?.id ?? null)
+      : afterId;
+  if (after !== null) {
+    assertSqlText(after, "comment.afterId");
+  }
+  insertSqlRow(connection, "task_comments", {
+    id: comment.id,
+    task_id: taskId,
+    ...titleRow,
+    ...bodyRow,
+    created_at: comment.createdAt,
+    created_by: comment.createdBy,
+    after_id: after,
+  });
   connection
     .query(
-      `INSERT INTO task_comments(id, task_id, title, body, created_at, created_by, text_encoding)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO local_comment_sequences(comment_id,sequence)
+       SELECT ?,coalesce(max(sequence),0)+1 FROM local_comment_sequences`,
     )
-    .run(
-      comment.id,
-      taskId,
-      titleJson === null ? title : "",
-      bodyJson === null ? body : "",
-      comment.createdAt,
-      comment.createdBy,
-      encoding,
-    );
-  if (titleJson !== null || bodyJson !== null) {
-    connection
-      .query("INSERT INTO replication_comment_text(comment_id,title_json,body_json) VALUES(?,?,?)")
-      .run(comment.id, titleJson, bodyJson);
-  }
+    .run(comment.id);
 }
 
 /**

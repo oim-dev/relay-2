@@ -19,6 +19,7 @@ const actions = [
   { argv: ["auto", "enable"], action: "auto.enable" },
   { argv: ["auto", "disable"], action: "auto.disable" },
   { argv: ["conflicts", "list"], action: "conflicts.list" },
+  { argv: ["keys", "list"], action: "keys.list" },
   {
     argv: ["conflicts", "get", "conflict-1"],
     action: "conflicts.get",
@@ -199,6 +200,49 @@ describe("Пользовательский вход relay git-sync", () => {
       expect(invalid.code).toBe("INVALID_JSON");
       expect(missingActor.code).toBe("ACTOR_REQUIRED");
       expect(calls).toEqual([]);
+    }, group);
+  });
+
+  test("решение коллизии передаёт выбранные ключи, ID и исходный fingerprint дословно", async () => {
+    await withCliFixture(async (cli) => {
+      const decision = {
+        fingerprint: "прочитанный-fingerprint",
+        assignments: [
+          { entityId: "task-first", fromKey: "TASK-42", key: "TASK-43" },
+          { entityId: "task-second", key: "TASK-47" },
+        ],
+      };
+      const calls: GitSyncRequest[] = [];
+
+      const answer = await cli.success(
+        [
+          "git-sync",
+          "keys",
+          "resolve",
+          "replica:7",
+          "--input",
+          "-",
+          "--actor",
+          "human",
+          "--config",
+          "missing.json",
+        ],
+        {
+          stdin: JSON.stringify(decision),
+          gitSync: requestClient(async (request) => {
+            calls.push(request);
+            return { id: "replica:7", included: ["replica:7"], pending: 1 };
+          }),
+        },
+      );
+
+      expect(answer.data).toEqual({ id: "replica:7", included: ["replica:7"], pending: 1 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        action: "keys.resolve",
+        input: { id: "replica:7", decision, actor: "human" },
+        options: { config: "missing.json" },
+      });
     }, group);
   });
 

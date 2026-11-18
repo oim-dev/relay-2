@@ -12,11 +12,17 @@ import {
 } from "@relay/contracts";
 import { storageReplicationMessages } from "./replication.messages";
 import { canonicalJson, portableEntity, replicationFingerprint } from "./portable-version";
-import { readComponents, flushComponentVersions } from "../components/component-store";
+import { readComponents } from "../components/component-store";
 import { TASK_COMMENT_JSON, TASK_COMMENT_SOURCE } from "../entities/comment-text";
 import { readComponentChanges, readTransitionQueue } from "./replication-transitions";
 import { decodeOutboxChangeset } from "./replication-outbox";
 import { recordSynchronizationMutation } from "../synchronization/schedule";
+import {
+  readReplicationConfirmations,
+  readCurrentPublication,
+  writeReplicationConfirmations,
+  writeCurrentPublication,
+} from "./replication-metadata";
 import type {
   EntityDeltaRow,
   ReplicationJsonRow,
@@ -27,10 +33,11 @@ import type {
   StoredEntityVersion,
   ReplicationCursorRow,
   ReplicationGuard,
+  ReplicationKeyAddresses,
 } from "./replication.types";
 
-const COMMENTS = `SELECT json_object('taskId',c.task_id,'after',o.after_id,'comment',${TASK_COMMENT_JSON}) AS json
-  FROM ${TASK_COMMENT_SOURCE} JOIN replication_comment_order o ON o.id=c.id`;
+const COMMENTS = `SELECT json_object('taskId',c.task_id,'after',c.after_id,'comment',${TASK_COMMENT_JSON}) AS json
+  FROM ${TASK_COMMENT_SOURCE}`;
 const RECEIPTS = `SELECT operation_key AS operationKey,request_json AS requestJson,result_json AS resultJson FROM batch_receipts`;
 const RECORDS = `SELECT json_object('id',entities.id,'kind',kind,'key',key,'revision',revision,
   'createdAt',created_at,'updatedAt',updated_at,'createdBy',created_by,'updatedBy',updated_by,'data',json(data)) AS json,
@@ -65,25 +72,20 @@ export function readReplicationState(connection: Database): ReplicationState {
 
 /**
  * Читает полный переносимый снимок только при явном обмене, никогда на обычной записи.
+ * Внешний snapshot объединяет предметные строки, confirmations и физический current proof.
+ * publication=null после мутации без нового доказательства; accepted checkpoint из base_json
+ * не подставляется, поскольку его digest может относиться к прежнему состоянию.
  */
 export function captureStoredProject(
   connection: Database,
   projectId: string,
 ): PortableProjectSnapshot {
-  const accepted = connection
-    .query<{ json: string | null }, []>(
-      "SELECT json_extract(base_json,'$.confirmations') AS json FROM replication_state WHERE singleton=1",
-    )
-    .get();
-  if (accepted === null) {
-    throw new RelayError("DATABASE_INVALID", storageReplicationMessages.stateMissing, 1);
-  }
   return {
     formatVersion: 1,
     modelVersion: 2,
     projectId,
     components: readComponents(connection),
-    publication: null,
+    publication: readCurrentPublication(connection),
     entities: connection
       .query<ReplicationJsonRow & Partial<StoredEntityVersion> & { pending_id: string | null }, []>(
         `${RECORDS} ORDER BY entities.id`,
@@ -114,7 +116,7 @@ export function captureStoredProject(
     receipts: connection
       .query<PortableBatchReceipt, []>(`${RECEIPTS} ORDER BY operation_key`)
       .all(),
-    confirmations: accepted?.json == null ? [] : JSON.parse(accepted.json),
+    confirmations: readReplicationConfirmations(connection),
   };
 }
 
@@ -123,7 +125,6 @@ export function captureStoredProject(
  * Savepoint и dryrun откатывают SQL-очереди; отсутствие дельт не расходует sequence.
  */
 export function flushReplicationQueue(connection: Database, baseline = false): void {
-  flushComponentVersions(connection);
   const components = readComponentChanges(connection);
   const transitions = readTransitionQueue(connection);
   const storedReadContext = connection
@@ -239,7 +240,7 @@ export function flushReplicationQueue(connection: Database, baseline = false): v
         .query(
           "INSERT INTO replication_entity_versions VALUES(?,?,?) ON CONFLICT(entity_id) DO UPDATE SET version=excluded.version,parents_json=excluded.parents_json",
         )
-        .run(row.id, after.version, JSON.stringify(after.parents));
+        .run(row.id, after.version, canonicalJson(after.parents));
     }
     return { id: row.id, before, after };
   });
@@ -340,8 +341,28 @@ export function readReplicationDecisions(
 }
 
 /**
+ * Возвращает последнее сохранённое решение changeset независимо от наличия pending outbox.
+ * Индекс changeset_id и обратный rowid-порядок выбирают одну строку без чтения остальных JSON.
+ * Порядок отражает запись immutable решений, а не часы автора.
+ */
+export function readReplicationDecision(
+  connection: Database,
+  changesetId: string,
+): StoredReplicationDecision | undefined {
+  const row = connection
+    .query<ReplicationJsonRow, [string]>(
+      "SELECT json FROM replication_resolutions WHERE changeset_id=? ORDER BY rowid DESC LIMIT 1",
+    )
+    .get(changesetId);
+  return row === null ? undefined : JSON.parse(row.json);
+}
+
+/**
  * Сохраняет техническое состояние в транзакции вызывающего, не создавая echo-outbox.
  * Список acknowledged формирует Core только из подтверждений реально принятого remote.
+ * base сохраняет accepted checkpoint независимо от currentPublication. Последний назначается
+ * явно после guarded import; undefined не назначает proof, null снимает. Изменение confirmations
+ * также снимает прежний proof. Фактические изменения metadata повышают transport revision.
  */
 export function writeReplicationState(connection: Database, update: ReplicationStateUpdate): void {
   const before = connection
@@ -351,6 +372,7 @@ export function writeReplicationState(connection: Database, update: ReplicationS
     .get();
   let changed = false;
   if (update.base !== undefined) {
+    changed = writeReplicationConfirmations(connection, update.base.confirmations);
     const json = canonicalJson(update.base);
     if (before?.base_json !== json) {
       changed = true;
@@ -363,6 +385,9 @@ export function writeReplicationState(connection: Database, update: ReplicationS
       changed = true;
       connection.query("UPDATE replication_state SET observed_json=? WHERE singleton=1").run(json);
     }
+  }
+  if (update.currentPublication !== undefined) {
+    changed = writeCurrentPublication(connection, update.currentPublication) || changed;
   }
   const previousConflicts = readReplicationConflicts(connection, update.examined);
   const conflictsChanged =
@@ -404,6 +429,28 @@ export function writeReplicationState(connection: Database, update: ReplicationS
 }
 
 /**
+ * Проверяет наличие захваченных изменений до их outer flush в durable outbox.
+ * Один запрос EXISTS не читает payload и не меняет транзакцию. Очереди наблюдений и пустые
+ * command boundaries не считаются мутациями: readonly/no-op вызовы не блокируют обмен.
+ */
+export function hasUnflushedReplicationChanges(connection: Database): boolean {
+  const row = connection
+    .query<{ present: number }, []>(
+      `SELECT
+        EXISTS(SELECT 1 FROM replication_entity_queue)
+        OR EXISTS(SELECT 1 FROM component_changes)
+        OR EXISTS(SELECT 1 FROM replication_address_queue)
+        OR EXISTS(SELECT 1 FROM replication_comment_queue)
+        OR EXISTS(SELECT 1 FROM replication_receipt_queue) AS present`,
+    )
+    .get();
+  if (row === null) {
+    throw new RelayError("DATABASE_INVALID", storageReplicationMessages.stateMissing, 1);
+  }
+  return row.present === 1;
+}
+
+/**
  * Читает скалярный guard без полного remote JSON и без пользовательских карточек.
  */
 export function readReplicationGuard(connection: Database): ReplicationGuard {
@@ -416,6 +463,44 @@ export function readReplicationGuard(connection: Database): ReplicationGuard {
     throw new RelayError("DATABASE_INVALID", storageReplicationMessages.stateMissing, 1);
   }
   return row;
+}
+
+/**
+ * Выбирает адреса локального индекса, observed snapshot и последних pending-решений.
+ * Нужен snapshot вызывающего; наружу передаются только пары ref/entityId, без владельцев,
+ * outbox payload и полных материалов решений. Принятые и заменённые решения не резервируют ключ.
+ */
+export function readReplicationKeyAddresses(connection: Database): ReplicationKeyAddresses {
+  return {
+    local: connection
+      .query<PortableAddress, []>(
+        "SELECT ref,owner_id AS entityId FROM object_keys WHERE deleted=0 ORDER BY ref",
+      )
+      .all(),
+    observed: connection
+      .query<PortableAddress, []>(
+        `SELECT json_extract(a.value,'$.ref') AS ref,
+          json_extract(a.value,'$.entityId') AS entityId
+         FROM replication_state s,json_each(s.observed_json,'$.addresses') a
+         WHERE s.singleton=1 ORDER BY ref`,
+      )
+      .all(),
+    pending: connection
+      .query<PortableAddress, []>(
+        `SELECT DISTINCT json_extract(a.value,'$.key') AS ref,
+          json_extract(a.value,'$.entityId') AS entityId
+         FROM replication_resolutions r
+         JOIN replication_outbox o ON o.id=r.changeset_id
+         JOIN json_each(r.json,'$.assignments') a
+         WHERE json_extract(r.json,'$.choice')='keys'
+           AND NOT EXISTS (
+             SELECT 1 FROM replication_resolutions newer
+             WHERE newer.changeset_id=r.changeset_id AND newer.rowid>r.rowid
+           )
+         ORDER BY ref,entityId`,
+      )
+      .all(),
+  };
 }
 
 /**

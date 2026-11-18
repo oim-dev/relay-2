@@ -16,7 +16,7 @@ export interface ComponentRow {
   readonly group_id: string;
   /* Сохранённая плотная позиция. */
   readonly position: string;
-  /* Переносимая версия; пустая только у адреса до завершения текущей транзакции. */
+  /* Окончательная переносимая версия, вычисленная до typed записи. */
   readonly version: string;
   /* JSON непосредственных предков. */
   readonly parents_json: string;
@@ -24,16 +24,12 @@ export interface ComponentRow {
   readonly deleted: number;
   /* Точный JSON предметного значения. */
   readonly value: string;
-  /* 1 лишь у SQL-created address до финализации версии в текущей транзакции. */
-  readonly version_pending?: number;
 }
 
 /**
  * Режим выделения идентичностей при сохранении агрегата.
  */
 export interface ComponentWriteOptions {
-  /* true — детерминированные IDs технической миграции вместо новых UUID назначений. */
-  readonly migration?: boolean;
   /* Предварительно выделенный ID transition/effect; exact commit обязан передать его для retry-стабильных IDs. */
   readonly allocationId?: string;
 }
@@ -48,4 +44,6 @@ export interface ComponentStorageEntry {
   readonly identity: string;
   /* Область порядка внутри owner/kind. */
   readonly group: string;
+  /* Уже прочитанная часть той же транзакции; null означает проверенное отсутствие, undefined требует чтения. */
+  readonly before?: PortableComponent | null;
 }

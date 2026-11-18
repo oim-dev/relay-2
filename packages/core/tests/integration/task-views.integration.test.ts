@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { RelayError } from "@relay/contracts";
@@ -197,15 +198,23 @@ describe("Компактная страница задач Core", () => {
 
   test("повреждённая колонка вне совпадений не превращается в пустую успешную сводку", async () => {
     const task = await tasks.create({ board: "product", title: "Повреждённая" }, "Автор");
-    // Намеренная порча сохранённого поля обходит Core и проверяет границу декодирования reader.
-    db.update(
-      { ...task, revision: task.revision + 1, data: { ...task.data, column: "неизвестная" } },
-      task.revision,
-    );
+    const raw = new Database(db.path, { create: false, readwrite: true });
+    try {
+      // CHECK отключён только в этом соединении с изолированным файлом:
+      // неизвестный enum должен попасть в reader, не быть отвергнут writer раньше.
+      raw.exec("PRAGMA ignore_check_constraints=ON");
+      raw.query("UPDATE tasks SET column=? WHERE id=?").run("неизвестная", task.id);
+    } finally {
+      raw.close();
+    }
     const generation = db.getGeneration();
 
     expectCode(() => views.page({ q: "Нет совпадений", searchIn: "title" }), "CORRUPT_DATA");
 
+    expect(db.get(task.id)).toEqual({
+      ...task,
+      data: { ...task.data, column: "неизвестная" },
+    });
     expect(db.getGeneration()).toBe(generation);
   });
 

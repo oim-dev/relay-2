@@ -2,6 +2,7 @@ import type { EntityRecord } from "../entities/entity.types";
 import type { PortableComponent } from "../components/component.types";
 import type { CommandSelector } from "../commands/command-store.types";
 import type { TaskComment } from "../tasks/tasks.types";
+import type { ReplicationKeyResolution } from "./replication-key.types";
 
 /**
  * Сохранённая переносимая карточка без технического CAS конкретной SQLite.
@@ -110,7 +111,7 @@ export interface PortableProjectSnapshot {
   readonly receipts: readonly PortableBatchReceipt[];
   /* Подтверждения атомарных changeset по replicaId. */
   readonly confirmations: readonly ReplicationConfirmation[];
-  /* Только последняя публикация; null у локального capture без публикации. */
+  /* Публикация именно этого состояния; null после ещё неопубликованных локальных изменений. */
   readonly publication?: ReplicationPublication | null;
 }
 
@@ -236,6 +237,12 @@ export interface ReplicationPredicate {
 export type ReplicationResolution = ReplicationDecision & ReplicationResolutionMaterial;
 
 /**
+ * Внутренний переносимый выбор, включая отдельный Core-сценарий разрешения ключей.
+ * Публичный серверный ReplicationResolution сохраняет прежнюю форму и имя.
+ */
+export type PortableReplicationResolution = ReplicationResolution | ReplicationKeyResolution;
+
+/**
  * Неизменяемая переносимая основа решения, отдельная от первоначального payload changeset.
  */
 export interface ReplicationResolutionMaterial {
@@ -278,7 +285,7 @@ export interface PublicationChange {
   /* Первоначальная неизменяемая транзакция с выделенными ID/временами. */
   readonly source: ReplicationChangeset;
   /* Явное решение либо null для обычного согласования. */
-  readonly resolution: ReplicationResolution | null;
+  readonly resolution: PortableReplicationResolution | null;
   /* Реально принятые переходы с версиями согласованного контекста. */
   readonly transitions: readonly ReplicationTransition[];
 }

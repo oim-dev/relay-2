@@ -69,7 +69,7 @@ export class SqliteCommandStore implements CommandStore {
   private readonly host: SqliteCommandStoreHost;
 
   /**
-   * Принимает готовое соединение со схемой v4 без чтения SQL и владения его закрытием.
+   * Принимает готовое соединение текущей схемы без чтения SQL и владения его закрытием.
    */
   constructor(connection: Database, host: SqliteCommandStoreHost) {
     requireSynchronousCallback(host.snapshot);

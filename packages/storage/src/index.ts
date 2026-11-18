@@ -34,11 +34,9 @@ export {
 export {
   readComponents,
   replaceComponents,
-  flushComponentVersions,
   synchronizeComponents,
   versionComponent,
 } from "./components/component-store";
-export { migrateComponents, enqueueComponentBaseline } from "./components/component-migration";
 export { applyComponentImportDelta } from "./components/component-store";
 export { adaptLegacyChangeset } from "./replication/replication-legacy";
 export { planReplicationImport } from "./replication/replication-import-plan";
@@ -47,3 +45,24 @@ export type {
   SynchronizationAttempt,
   SynchronizationMode,
 } from "./synchronization/schedule.types";
+export { snapshotToPortableRows, portableRowsToSnapshot } from "./relational/portable-codec";
+export { RELATIONAL_TABLES } from "./relational/catalog";
+export type { RelationalTableDescriptor } from "./relational/catalog.types";
+export type {
+  PortableTableRows,
+  PortableTableMap,
+  EntityRowMetadata,
+  ComponentRowMetadata,
+  EntityTableRow,
+  ComponentTableRow,
+  ImplementationTargetColumns,
+  TaskTargetColumns,
+  ObjectIdentityRow,
+  CheckpointReferenceRow,
+  CheckpointAcceptanceRow,
+  PortableCommentRow,
+  PortableEntityVersionRow,
+  PortableReceiptRow,
+  PortableConfirmationRow,
+  PortablePublicationRow,
+} from "./relational/rows.types";

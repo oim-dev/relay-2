@@ -33,7 +33,7 @@ const CRASH_INDEX = 2;
 const LATE_NAME = "Позднее имя после подготовки Git-кандидата";
 
 describe("AC-50: конечный обмен независимой команды через одну Git-ветку", () => {
-  test("50 offline-участников сохраняют ID, связи и квитанции после non-FF, crash, поздней записи, конфликта и restore", async () => {
+  test("50 offline-участников сохраняют ID, связи и квитанции после явного выбора ключей, non-FF, crash, конфликта и restore", async () => {
     await withTeamFixture(async (team) => {
       const first = await team.replica();
       const commonTask = await new TasksService(first.db).create({ title: "Общая задача" }, "seed");
@@ -74,23 +74,55 @@ describe("AC-50: конечный обмен независимой команд
       changesets.push(...creations.flatMap((entry) => entry.changesets));
 
       const winner = participant(team, WINNER_INDEX);
-      await winner.engine.run();
-      expect(winner.replication.core.status().pending).toBe(0);
-      // Первый принятый DOC-2 уже определён; следующая пара намеренно делит один parent.
-      first.repository.publications.length = 0;
-      await publishCompetingPair(team);
-      for (const replica of team.replicas.filter(
-        (entry) => ![0, 1, WINNER_INDEX].includes(entry.index),
-      )) {
-        await replica.engine.run();
-      }
-      await exchangeTeam(team.replicas);
-
-      const afterCreation = await publishedSnapshot(first);
       const winnerCreation = creations[WINNER_INDEX];
       if (winnerCreation === undefined) {
         throw new Error("Нет исходного результата первого winner");
       }
+      await winner.engine.run();
+      expect(winner.replication.core.status().pending).toBe(0);
+      for (const replica of team.replicas.filter((entry) => entry.index !== WINNER_INDEX)) {
+        const creation = creations[replica.index];
+        if (creation === undefined) {
+          throw new Error("Нет исходной пары участника с коллизией");
+        }
+        await replica.engine.run();
+        expect(replica.db.getReplicationOutbox()).toEqual([...creation.changesets]);
+        for (const expected of [
+          { entity: creation.task, owner: winnerCreation.task },
+          { entity: creation.document, owner: winnerCreation.document },
+        ]) {
+          const conflicts = replica.replication.keyConflicts();
+          expect(conflicts).toHaveLength(1);
+          const conflict = conflicts[0];
+          if (conflict === undefined) {
+            throw new Error("Нет ожидаемой коллизии ключа offline-создания");
+          }
+          expect(conflict.code).toBe("REPLICATION_KEY_COLLISION");
+          expect(conflict.collisions).toHaveLength(1);
+          expect(conflict.collisions[0]).toMatchObject({
+            entityId: expected.entity.id,
+            key: expected.entity.key,
+            acceptedOwnerId: expected.owner.id,
+          });
+          const assignments = conflict.collisions.map((entry) => ({
+            entityId: entry.entityId,
+            key: entry.suggestedKey,
+          }));
+          const preview = replica.replication.resolveKeys(
+            conflict.id,
+            { fingerprint: conflict.fingerprint, assignments },
+            `key-resolver-${replica.index}`,
+          );
+          expect(preview.included).toContain(conflict.id);
+          expect(replica.db.getReplicationOutbox()).toEqual([...creation.changesets]);
+          expect(replica.db.get(expected.entity.id)?.key).toBe(expected.entity.key);
+        }
+        await replica.engine.run();
+        expect(replica.replication.keyConflicts()).toEqual([]);
+      }
+      await exchangeTeam(team.replicas);
+
+      const afterCreation = await publishedSnapshot(first);
       expectCreationsPreserved(afterCreation, creations, winnerCreation);
       expectTeamConverged(team.replicas, afterCreation);
       for (const change of changesets) {
@@ -124,8 +156,18 @@ describe("AC-50: конечный обмен независимой команд
       expect(offline.db.getReplicationOutbox()).toEqual(offlineQueue);
       // Потерянный ответ касается уже принятого пакета с комментарием и пользовательской квитанцией.
       winner.repository.loseNextSuccessfulReply = true;
+      // Согласованные ключи позволяют проверить non-FF независимых правок без новой коллизии.
+      const second = participant(team, 1);
+      first.repository.publications.length = 0;
+      second.repository.publications.length = 0;
+      await publishCompetingPair(team);
+      expect(second.repository.publications).toHaveLength(2);
+      expect(second.repository.publications[1]?.exitCode).toBe(0);
+      expect(second.repository.publications[1]?.parent).toBe(
+        first.repository.publications[0]?.commit,
+      );
       // Два последних участника пропускают и эту волну, и последующее разрешение конфликта.
-      for (const replica of team.replicas.slice(0, 48)) {
+      for (const replica of team.replicas.slice(2, 48)) {
         if (replica.index === CRASH_INDEX) {
           const creation = creations[CRASH_INDEX];
           if (!creation) {

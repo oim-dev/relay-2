@@ -72,10 +72,13 @@ describe("Файловая база проекта", () => {
     expect(reopened.getGeneration()).toBe(generation);
     fixture.withRaw((raw) => {
       expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
-      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 5 });
+      expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 6 });
       expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
-      expect(raw.query("SELECT data FROM entities WHERE kind = 'project'").get()).toEqual({
-        data: JSON.stringify({ name: projectMetadata.name, slug: projectMetadata.slug }),
+      expect(
+        raw.query("SELECT name, slug FROM projects WHERE id = ?").get(projectMetadata.id),
+      ).toEqual({
+        name: projectMetadata.name,
+        slug: projectMetadata.slug,
       });
     });
   });
@@ -185,18 +188,23 @@ describe("Ревизии и общее пространство ссылок", (
     const entity = createDocument();
     first.insert(entity);
     const stale = requireRecord(second, entity.id);
-    first.update({ ...entity, revision: 2, data: { title: "Первый редактор" } }, 1);
+    const winner = { ...entity, revision: 2, data: { ...entity.data, name: "Первый редактор" } };
+    first.update(winner, 1);
     const generation = first.getGeneration();
 
     const conflict = expectRelayError(
-      () => second.update({ ...stale, revision: 2, data: { title: "Устаревший редактор" } }, 1),
+      () =>
+        second.update(
+          { ...stale, revision: 2, data: { ...stale.data, name: "Устаревший редактор" } },
+          1,
+        ),
       "REVISION_CONFLICT",
     );
 
     expect(conflict.exitCode).toBe(4);
     expect(conflict.details).toMatchObject({ expectedRevision: 1, actualRevision: 2 });
     expectRelayError(() => second.rename(entity.id, entity.key, 1, "tester"), "REVISION_CONFLICT");
-    expect(second.get(entity.id)?.data).toEqual({ title: "Первый редактор" });
+    expect(second.get(entity.id)).toEqual(winner);
     expect(second.getGeneration()).toBe(generation);
   });
 

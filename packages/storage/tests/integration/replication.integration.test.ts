@@ -1,18 +1,62 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import type { PortableAddress, ReplicationChangeset } from "@relay/contracts";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { ProjectDatabase } from "../../src/database/project-database";
-import { BATCH_RECEIPT_SCHEMA } from "../../src/sqlite/batch-schema";
 import {
   BatchReceiptUpgradeFixture,
   batchUpgradeRecords,
 } from "./helpers/batch-receipt-upgrade-fixture";
-import { createDocument } from "./helpers/project-database-fixture";
+import { createDocument, expectRelayError } from "./helpers/project-database-fixture";
 import { replicationV3Schema } from "./helpers/replication-v3-schema";
-import { PROJECT_WRITE_TRIGGERS } from "../../src/sqlite/entity-triggers";
 import { portableEntity, replicationFingerprint } from "../../src/replication/portable-version";
+
+// Замороженное добавление v2: исторический fixture не зависит от текущей схемы квитанций.
+const legacyBatchReceiptSchema = `
+  CREATE TABLE batch_receipts (
+    operation_key TEXT PRIMARY KEY NOT NULL CHECK(length(operation_key)>0),
+    request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json)='object'),
+    result_json TEXT NOT NULL CHECK(json_valid(result_json) AND json_type(result_json)='object')
+  ) STRICT;
+  CREATE TRIGGER batch_receipts_no_update BEFORE UPDATE ON batch_receipts BEGIN
+    SELECT RAISE(ABORT,'Квитанции пакетов нельзя изменять или удалять');
+  END;
+  CREATE TRIGGER batch_receipts_no_delete BEFORE DELETE ON batch_receipts BEGIN
+    SELECT RAISE(ABORT,'Квитанции пакетов нельзя изменять или удалять');
+  END;
+`;
+// Прежние guards v3 остаются частью fixture после замены production-триггеров на typed layout.
+const legacyV3WriteTriggers = `
+  DROP TRIGGER entities_insert;
+  DROP TRIGGER entities_update;
+  DROP TRIGGER entities_immutable;
+  DROP TRIGGER task_comments_no_update;
+  DROP TRIGGER task_comments_no_delete;
+  CREATE TRIGGER entities_insert AFTER INSERT ON entities
+  WHEN (SELECT importing FROM replication_state WHERE singleton=1)=0 BEGIN
+    INSERT INTO entity_refs(ref,entity_id) VALUES(NEW.id,NEW.id);
+    INSERT INTO entity_refs(ref,entity_id) SELECT NEW.key,NEW.id WHERE NEW.key!=NEW.id;
+    UPDATE project_state SET generation=generation+1 WHERE singleton=1;
+  END;
+  CREATE TRIGGER entities_update AFTER UPDATE ON entities
+  WHEN (SELECT importing FROM replication_state WHERE singleton=1)=0 BEGIN
+    INSERT INTO entity_refs(ref,entity_id) SELECT NEW.key,NEW.id WHERE NOT EXISTS(
+      SELECT 1 FROM entity_refs WHERE ref=NEW.key AND entity_id=NEW.id);
+    UPDATE project_state SET generation=generation+1 WHERE singleton=1;
+  END;
+  CREATE TRIGGER entities_immutable BEFORE UPDATE ON entities
+  WHEN NEW.id!=OLD.id OR NEW.kind!=OLD.kind OR NEW.created_at!=OLD.created_at OR NEW.created_by!=OLD.created_by
+    OR (NEW.revision!=OLD.revision+1 AND NOT(
+      (SELECT importing FROM replication_state WHERE singleton=1)=1 AND NEW.revision=OLD.revision))
+  BEGIN SELECT RAISE(ABORT,'immutable entity fields or invalid revision'); END;
+  CREATE TRIGGER task_comments_no_update BEFORE UPDATE ON task_comments
+  WHEN (SELECT importing FROM replication_state WHERE singleton=1)=0
+  BEGIN SELECT RAISE(ABORT,'task comments are append-only'); END;
+  CREATE TRIGGER task_comments_no_delete BEFORE DELETE ON task_comments
+  WHEN (SELECT importing FROM replication_state WHERE singleton=1)=0
+  BEGIN SELECT RAISE(ABORT,'task comments are append-only'); END;
+`;
 
 /**
  * Удерживает изолированную файловую SQLite и очищает её вместе с проверочным raw-соединением.
@@ -54,17 +98,14 @@ describe("Durable outbox SQLite", () => {
     });
   });
 
-  test("upgrade v3 сохраняет bytes старого source с revision, digest, ID и historical receipt без фиктивного ack", () => {
+  test("отказ v3 сохраняет исходные байты changeset, digest, ID и историческую квитанцию без подтверждения", () => {
     const fixture = new BatchReceiptUpgradeFixture();
     try {
       fixture.createV1();
       const source = fixture.withRaw((raw) => {
-        raw.exec(BATCH_RECEIPT_SCHEMA);
+        raw.exec(legacyBatchReceiptSchema);
         raw.exec(replicationV3Schema);
-        for (const [name, sql] of Object.entries(PROJECT_WRITE_TRIGGERS)) {
-          raw.exec(`DROP TRIGGER ${name}`);
-          raw.exec(sql);
-        }
+        raw.exec(legacyV3WriteTriggers);
         const entities = batchUpgradeRecords.map((record) => ({
           ...portableEntity(record),
           record,
@@ -106,37 +147,41 @@ describe("Durable outbox SQLite", () => {
         raw
           .query("INSERT INTO replication_outbox VALUES(?,?,?)")
           .run(change.id, change.sequence, json);
-        raw.exec("UPDATE replication_state SET sequence=7; PRAGMA user_version=3");
+        raw.exec(
+          "UPDATE replication_state SET sequence=7; PRAGMA user_version=3; PRAGMA journal_mode=DELETE",
+        );
+        expect(raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
         return {
           json,
           change,
-          generation: raw
-            .query<{ generation: number }, []>("SELECT generation FROM project_state")
-            .get()?.generation,
+          receipt,
+          project: raw.query("SELECT * FROM project_state").get(),
+          replication: raw.query("SELECT * FROM replication_state").get(),
         };
       });
+      const before = readFileSync(fixture.path);
 
-      const db = fixture.open();
+      const failure = expectRelayError(() => fixture.open(), "SCHEMA_VERSION_UNSUPPORTED");
 
-      expect(db.getReplicationOutbox()).toEqual([source.change]);
-      expect(
-        fixture.withRaw(
-          (raw) =>
-            raw.query<{ json: string }, []>("SELECT json FROM replication_outbox").get()?.json,
-        ),
-      ).toBe(source.json);
-      expect(db.getReplicationState()).toMatchObject({
-        replicaId: "legacy-replica",
-        sequence: 7,
-        base: null,
+      expect(failure.details).toMatchObject({ expectedVersion: 6, actualVersion: 3 });
+      expect(readFileSync(fixture.path)).toEqual(before);
+      expect(readdirSync(fixture.directory)).toEqual(["project.sqlite"]);
+      fixture.withRaw((raw) => {
+        expect(raw.query("SELECT * FROM replication_outbox").all()).toEqual([
+          { id: source.change.id, sequence: source.change.sequence, json: source.json },
+        ]);
+        expect(raw.query("SELECT * FROM project_state").get()).toEqual(source.project);
+        expect(raw.query("SELECT * FROM replication_state").get()).toEqual(source.replication);
+        expect(raw.query("SELECT * FROM batch_receipts").all()).toEqual([
+          {
+            operation_key: source.receipt.operationKey,
+            request_json: source.receipt.requestJson,
+            result_json: source.receipt.resultJson,
+          },
+        ]);
+        expect(raw.query("PRAGMA user_version").get()).toEqual({ user_version: 3 });
+        expect(raw.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
       });
-      expect(
-        db.captureReplication().entities.every((entry) => !Object.hasOwn(entry.record, "revision")),
-      ).toBe(true);
-      expect(db.get("legacy-document")?.revision).toBe(4);
-      expect(db.getGeneration()).toBe(source.generation ?? -1);
-      expect(db.getBatchReceipt("historical")?.resultJson).toBe('{"revision":77,"key":"DOC-OLD"}');
-      expect(db.captureReplication().confirmations).toEqual([]);
     } finally {
       fixture.close();
     }
@@ -158,7 +203,7 @@ describe("Durable outbox SQLite", () => {
         } catch {
           /* Намеренный отказ вложенного сценария перехвачен внешней транзакцией. */
         }
-        db.update({ ...document, revision: 2, data: { title: "Итог" } }, 1);
+        db.update({ ...document, revision: 2, data: { ...document.data, name: "Итог" } }, 1);
       });
 
       const outbox = db.getReplicationOutbox();
@@ -169,7 +214,7 @@ describe("Durable outbox SQLite", () => {
       expect(change?.entities[0]?.after?.record).toMatchObject({
         id: document.id,
         key: document.key,
-        data: { title: "Итог" },
+        data: { name: "Итог" },
       });
       expect(change?.entities[0]?.after?.record).not.toHaveProperty("revision");
       expect(db.get(document.id)?.revision).toBe(2);
@@ -231,65 +276,40 @@ describe("Durable outbox SQLite", () => {
     });
   });
 
-  test("обновление v2 сохраняет существующие квитанции, алиасы, журнал и поколение", () => {
-    const fixture = new BatchReceiptUpgradeFixture();
-    try {
-      fixture.createV1();
-      fixture.withRaw((raw) => {
-        raw.exec(BATCH_RECEIPT_SCHEMA);
-        raw.exec("PRAGMA user_version=2");
-        raw.exec(
-          "INSERT INTO batch_receipts VALUES('historical','{\"request\":1}','{\"result\":2}')",
-        );
+  test("текущая схема запрещает перезапись outbox и сохраняет точный источник после повторного открытия", () => {
+    withReplicationDatabase((db, raw) => {
+      const document = createDocument();
+      const receipt = {
+        operationKey: "immutable-source",
+        requestJson: '{ "actor": "original" }',
+        resultJson: '{ "revision": 17, "key": "DOC-OLD" }',
+      };
+      db.transaction(() => {
+        db.insert(document);
+        db.insertBatchReceipt(receipt);
       });
-      const before = fixture.withRaw((raw) => ({
-        records: raw.query("SELECT * FROM entities ORDER BY id").all(),
-        addresses: raw.query("SELECT * FROM entity_refs ORDER BY ref").all(),
-        comments: raw
-          .query(
-            "SELECT sequence,id,task_id,title,body,created_at,created_by FROM task_comments ORDER BY sequence",
-          )
-          .all(),
-        state: raw.query("SELECT * FROM project_state").get(),
-      }));
+      const queue = db.getReplicationOutbox();
+      const sources = raw.query("SELECT * FROM replication_outbox ORDER BY sequence").all();
+      const generation = db.getGeneration();
+      const state = db.getReplicationState();
 
-      const upgraded = fixture.open();
+      expect(() => raw.exec("UPDATE replication_outbox SET json='{}'")).toThrow(
+        expect.objectContaining({ code: "SQLITE_CONSTRAINT_TRIGGER" }),
+      );
 
-      expect(upgraded.getBatchReceipt("historical")).toEqual({
-        operationKey: "historical",
-        requestJson: '{"request":1}',
-        resultJson: '{"result":2}',
-      });
-      expect(upgraded.getReplicationOutbox()).toHaveLength(1);
-      expect(upgraded.getReplicationOutbox()[0]?.mode).toBe("baseline");
-      expect(upgraded.getReplicationOutbox()[0]?.comments).toHaveLength(2);
-      expect(
-        fixture.withRaw((raw) => ({
-          records: raw.query("SELECT * FROM entities ORDER BY id").all(),
-          addresses: raw.query("SELECT * FROM entity_refs ORDER BY ref").all(),
-          comments: raw
-            .query(
-              "SELECT sequence,id,task_id,title,body,created_at,created_by FROM task_comments ORDER BY sequence",
-            )
-            .all(),
-          state: raw.query("SELECT * FROM project_state").get(),
-        })),
-      ).toEqual(before);
-      expect(
-        fixture.withRaw((raw) =>
-          raw.query("SELECT id,text_encoding FROM task_comments ORDER BY sequence").all(),
-        ),
-      ).toEqual([
-        { id: "legacy-comment-first", text_encoding: 0 },
-        { id: "legacy-comment-second", text_encoding: 0 },
-      ]);
-      expect(
-        fixture.withRaw((raw) =>
-          raw.query("SELECT comment_id FROM replication_comment_text").all(),
-        ),
-      ).toEqual([]);
-    } finally {
-      fixture.close();
-    }
+      expect(raw.query("SELECT * FROM replication_outbox ORDER BY sequence").all()).toEqual(
+        sources,
+      );
+      const reopened = ProjectDatabase.open(db.path);
+      try {
+        expect(reopened.getReplicationOutbox()).toEqual(queue);
+        expect(reopened.getBatchReceipt(receipt.operationKey)).toEqual(receipt);
+        expect(reopened.get(document.id)).toEqual(document);
+        expect(reopened.getGeneration()).toBe(generation);
+        expect(reopened.getReplicationState()).toEqual(state);
+      } finally {
+        reopened.close();
+      }
+    });
   });
 });

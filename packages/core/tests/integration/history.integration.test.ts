@@ -65,8 +65,11 @@ const invalidRevisionCases = [
 ] as const satisfies readonly HistoryInputCase[];
 
 const corruptedDocumentNames = [
-  { name: "имя документа null блокирует снимок без изменения истории", input: null },
-  { name: "отсутствующее имя документа блокирует снимок без изменения истории", input: undefined },
+  { name: "null в имени документа отклоняется до записи и сохраняет исходный снимок", input: null },
+  {
+    name: "отсутствующее имя документа отклоняется до записи и сохраняет исходный снимок",
+    input: undefined,
+  },
 ] as const satisfies readonly HistoryInputCase[];
 
 const rejectedRunReferences = [
@@ -118,34 +121,39 @@ describe("Снимки ссылок в материалах истории", () 
       );
       const session = await history.start({ title: "Проверить документ" }, "агент");
       const corruptedData: Record<string, unknown> = { ...document.data };
-      // Намеренно портим обязательное имя через Storage: ключ не должен скрыть потерю содержания.
+      // Невозможная SQL-форма должна отклоняться раньше создания исторического снимка.
       if (input === undefined) {
         delete corruptedData.name;
       } else {
         corruptedData.name = input;
       }
       const corrupted = { ...document, revision: document.revision + 1, data: corruptedData };
-      db.update(corrupted, document.revision);
       const before = snapshotHistoryStorage(db);
+      const pending = db.getReplicationOutbox();
 
-      await expectHistoryError(
-        async () =>
-          await history.checkpoint(
-            session.id,
-            "open",
-            {
-              title: "Прочитать документ",
-              body: "Сохранить основание работы",
-              runId: session.data.currentRunId,
-              references: [document.key],
-            },
-            historyOwner(session),
-          ),
-        "CORRUPT_DATA",
-      );
+      await expectHistoryError(() => db.update(corrupted, document.revision), "CORRUPT_DATA");
 
       expect(snapshotHistoryStorage(db)).toEqual(before);
-      expect(db.get(document.id)).toEqual(corrupted);
+      expect(db.get(document.id)).toEqual(document);
+      expect(db.getReplicationOutbox()).toEqual(pending);
+
+      const checkpoint = await history.checkpoint(
+        session.id,
+        "open",
+        {
+          title: "Прочитать документ",
+          body: "Сохранить основание работы",
+          runId: session.data.currentRunId,
+          references: [document.key],
+        },
+        historyOwner(session),
+      );
+
+      expect(checkpoint.data.references).toEqual([
+        { id: document.id, kind: "document", key: document.key, title: "Исходное имя" },
+      ]);
+      expect(checkpoint.data.sessionRevision).toBe(session.revision + 1);
+      expect(history.getCheckpoint(checkpoint.id)).toEqual(checkpoint);
     });
   });
 
@@ -298,14 +306,24 @@ describe("Снимки ссылок в материалах истории", () 
     });
   });
 
-  test("постороннее поле name задачи не подменяет проверенный заголовок в снимке", async () => {
+  test("постороннее name задачи отклоняется при записи, снимок сохраняет исходный заголовок", async () => {
     await withHistoryFixture(async (history, { db }) => {
       const task = await new TasksService(db).create({ title: "Проверенный заголовок" }, "автор");
-      // Внедряем чужое поле через Storage: оно не является названием задачи.
-      db.update(
-        { ...task, revision: task.revision + 1, data: { ...task.data, name: null } },
-        task.revision,
+      const generation = db.getGeneration();
+      const pending = db.getReplicationOutbox();
+
+      await expectHistoryError(
+        () =>
+          db.update(
+            { ...task, revision: task.revision + 1, data: { ...task.data, name: null } },
+            task.revision,
+          ),
+        "CORRUPT_DATA",
       );
+
+      expect(db.get(task.id)).toEqual(task);
+      expect(db.getGeneration()).toBe(generation);
+      expect(db.getReplicationOutbox()).toEqual(pending);
       const session = await history.start({ title: "Проверить задачу" }, "агент");
 
       const checkpoint = await history.checkpoint(
@@ -542,107 +560,36 @@ describe("Проверка внешнего ввода истории", () => {
   });
 });
 
-describe("Повреждённые сохранённые данные истории", () => {
-  test("runs: null отклоняется при чтении сессии без потери сохранённой строки", async () => {
+describe("Отказ записи повреждённых данных истории", () => {
+  test("runs: null отклоняется без потери владельца, участия и ранее сохранённых материалов", async () => {
     await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start({ title: "Повреждённое участие" }, "агент");
-      corruptHistoryRuns(db, session);
-      const before = snapshotHistoryStorage(db);
-
-      await expectHistoryError(async () => history.get(session.id), "CORRUPT_DATA");
-
-      expect(snapshotHistoryStorage(db)).toEqual(before);
-    });
-  });
-
-  test("runs: null отклоняется при чтении списка вместо пропуска повреждённой сессии", async () => {
-    await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start({ title: "Повреждённое участие в списке" }, "агент");
-      corruptHistoryRuns(db, session);
-      const before = snapshotHistoryStorage(db);
-
-      await expectHistoryError(async () => history.list(), "CORRUPT_DATA");
-
-      expect(snapshotHistoryStorage(db)).toEqual(before);
-    });
-  });
-
-  test("runs: null блокирует takeover без перезаписи повреждённого состояния", async () => {
-    await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start(
-        { title: "Повреждённое участие перед передачей" },
-        "агент",
-      );
-      const corrupted = corruptHistoryRuns(db, session);
-      const before = snapshotHistoryStorage(db);
-
-      await expectHistoryError(
-        async () =>
-          await history.transition(
-            session.id,
-            "takeover",
-            { reason: "Продолжить работу" },
-            { actor: "второй-агент", ifRevision: corrupted.revision },
-          ),
-        "CORRUPT_DATA",
-      );
-
-      expect(snapshotHistoryStorage(db)).toEqual(before);
-    });
-  });
-
-  test("runs: null блокирует новый материал без изменения сессии и поколения", async () => {
-    await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start({ title: "Повреждённый владелец материала" }, "агент");
-      const corrupted = corruptHistoryRuns(db, session);
-      const before = snapshotHistoryStorage(db);
-
-      await expectHistoryError(
-        async () =>
-          await history.checkpoint(
-            session.id,
-            "open",
-            {
-              runId: session.data.currentRunId,
-              title: "Намерение",
-              body: "Проверить состояние",
-            },
-            { actor: "агент", ifRevision: corrupted.revision },
-          ),
-        "CORRUPT_DATA",
-      );
-
-      expect(snapshotHistoryStorage(db)).toEqual(before);
-    });
-  });
-
-  test("references: null отклоняется при чтении материала вместо пустого массива", async () => {
-    await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start({ title: "Повреждённый материал" }, "агент");
+      const session = await history.start({ title: "Сохранить участие" }, "агент");
       const intent = await openHistoryIntent(history, session);
-      const corrupted = insertCorruptedHistoryCheckpoint(db, intent);
+      const current = history.get(session.id);
       const before = snapshotHistoryStorage(db);
+      const parts = db.getComponents([session.id]);
+      const pending = db.getReplicationOutbox();
 
-      await expectHistoryError(async () => history.getCheckpoint(corrupted.id), "CORRUPT_DATA");
+      await expectHistoryError(() => corruptHistoryRuns(db, current), "CORRUPT_DATA");
 
       expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(db.getComponents([session.id])).toEqual(parts);
+      expect(db.getReplicationOutbox()).toEqual(pending);
+      expect(history.get(session.id)).toEqual(current);
+      expect(history.list()).toEqual([current]);
+
+      const progress = await recordHistoryMaterial(history, current, intent, "save");
+
+      expect(progress.data.runId).toBe(currentHistoryRun(current).id);
+      expect(progress.data.actor).toBe("агент");
+      expect(progress.data.sessionRevision).toBe(current.revision + 1);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.history(session.id)).toEqual([intent, progress]);
+      expect(history.get(session.id).data.runs).toEqual(current.data.runs);
     });
   });
 
-  test("references: null отклоняется при чтении истории вместо пропуска материала", async () => {
-    await withHistoryFixture(async (history, { db }) => {
-      const session = await history.start({ title: "Повреждённый материал в истории" }, "агент");
-      const intent = await openHistoryIntent(history, session);
-      insertCorruptedHistoryCheckpoint(db, intent);
-      const before = snapshotHistoryStorage(db);
-
-      await expectHistoryError(async () => history.history(session.id), "CORRUPT_DATA");
-
-      expect(snapshotHistoryStorage(db)).toEqual(before);
-    });
-  });
-
-  test("повреждённый соседний материал блокирует продолжение валидного намерения без записи", async () => {
+  test("references: null отклоняется до вставки и не мешает продолжению валидного намерения", async () => {
     await withHistoryFixture(async (history, { db }) => {
       const session = await history.start(
         { title: "Продолжение при повреждении истории" },
@@ -650,17 +597,25 @@ describe("Повреждённые сохранённые данные исто�
       );
       const intent = await openHistoryIntent(history, session);
       const current = history.get(session.id);
-      insertCorruptedHistoryCheckpoint(db, intent);
       const before = snapshotHistoryStorage(db);
+      const pending = db.getReplicationOutbox();
 
-      await expectHistoryError(
-        async () => await recordHistoryMaterial(history, current, intent, "save"),
-        "CORRUPT_DATA",
-      );
+      await expectHistoryError(() => insertCorruptedHistoryCheckpoint(db, intent), "CORRUPT_DATA");
 
       expect(snapshotHistoryStorage(db)).toEqual(before);
+      expect(db.getReplicationOutbox()).toEqual(pending);
       expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.history(session.id)).toEqual([intent]);
       expect(history.get(session.id)).toEqual(current);
+
+      const progress = await recordHistoryMaterial(history, current, intent, "save");
+
+      expect(progress.data.sequence).toBe(intent.data.sequence + 1);
+      expect(progress.data.intentId).toBe(intent.id);
+      expect(progress.data.runId).toBe(currentHistoryRun(current).id);
+      expect(progress.data.sessionRevision).toBe(current.revision + 1);
+      expect(history.getCheckpoint(intent.id)).toEqual(intent);
+      expect(history.history(session.id)).toEqual([intent, progress]);
     });
   });
 });
